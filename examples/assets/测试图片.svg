@@ -1,0 +1,9 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="480" height="240" viewBox="0 0 480 240" role="img" aria-labelledby="title desc">
+  <title id="title">中文路径图片</title>
+  <desc id="desc">用于测试包含中文路径的 Markdown 图片。</desc>
+  <rect width="480" height="240" rx="20" fill="#fffaf0"/>
+  <rect x="28" y="28" width="424" height="184" rx="14" fill="#ffffff" stroke="#ddd0bb" stroke-width="2"/>
+  <path d="M96 154l52-56 46 42 38-30 72 70H72z" fill="#3b6da8"/>
+  <circle cx="348" cy="82" r="26" fill="#fbbf24"/>
+  <text x="240" y="208" text-anchor="middle" font-family="PingFang SC, Arial, sans-serif" font-size="18" fill="#2a241b">中文文件名资源</text>
+</svg>

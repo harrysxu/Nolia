@@ -1,0 +1,26 @@
+/node_modules/
+/dist/
+/release/
+/release-arch-compare/
+/output/
+.DS_Store
+.vite
+/coverage/
+/playwright-report/
+/test-results/
+*.log
+tsup.config.bundled_*.mjs
+/index-*.js
+
+# Local environment and credentials
+.env
+.env.*
+!.env.example
+*.p12
+*.cer
+*.certSigningRequest
+*.mobileprovision
+*.provisionprofile
+
+# Private local notes that must not be published
+docs/private/

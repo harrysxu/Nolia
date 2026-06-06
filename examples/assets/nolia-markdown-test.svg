@@ -1,0 +1,9 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="720" height="360" viewBox="0 0 720 360" role="img" aria-labelledby="title desc">
+  <title id="title">Nolia Markdown test asset</title>
+  <desc id="desc">A local SVG image used by the Markdown syntax test file.</desc>
+  <rect width="720" height="360" rx="24" fill="#f7fafc"/>
+  <rect x="32" y="32" width="656" height="296" rx="18" fill="#ffffff" stroke="#d5dbe5" stroke-width="2"/>
+  <circle cx="120" cy="128" r="48" fill="#3b82f6"/>
+  <path d="M224 104h320M224 148h248M224 192h360M224 236h208" stroke="#18212f" stroke-width="18" stroke-linecap="round"/>
+  <text x="120" y="286" text-anchor="middle" font-family="Inter, Arial, sans-serif" font-size="24" font-weight="700" fill="#ffffff">N</text>
+</svg>

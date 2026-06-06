@@ -1,0 +1,16 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta
+      http-equiv="Content-Security-Policy"
+      content="default-src 'self'; img-src 'self' data: blob: nolia-asset:; media-src 'self' nolia-asset:; frame-src 'self' nolia-asset:; worker-src 'self' blob: nolia-plugin:; style-src 'self' 'unsafe-inline'; script-src 'self' nolia-plugin:; font-src 'self' data:; connect-src 'self' nolia-plugin: nolia-asset: ws: http://localhost:5173 http://127.0.0.1:5173;"
+    />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Nolia</title>
+  </head>
+  <body>
+    <div id="root"></div>
+    <script type="module" src="/src/renderer/main.tsx"></script>
+  </body>
+</html>
