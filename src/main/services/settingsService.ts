@@ -135,6 +135,11 @@ export class SettingsService {
     await this.persist();
   }
 
+  async removeRecentWorkspace(workspaceId: string): Promise<void> {
+    this.state.recentWorkspaces = this.state.recentWorkspaces.filter((workspace) => workspace.workspaceId !== workspaceId);
+    await this.persist();
+  }
+
   findRecentById(workspaceId: string): RecentWorkspace | undefined {
     return this.state.recentWorkspaces.find((workspace) => workspace.workspaceId === workspaceId);
   }

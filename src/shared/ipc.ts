@@ -13,6 +13,10 @@ export const WorkspaceSwitchRequestSchema = z.object({
   workspaceId: z.string().min(1)
 });
 
+export const WorkspaceRemoveRecentRequestSchema = z.object({
+  workspaceId: z.string().min(1)
+});
+
 export const WorkspaceListTagsRequestSchema = z.object({
   workspaceId: z.string().min(1)
 });
@@ -185,6 +189,7 @@ export const ExtensionsSyncMenusRequestSchema = z.object({
 
 export type WorkspaceOpenRequest = z.infer<typeof WorkspaceOpenRequestSchema>;
 export type WorkspaceSwitchRequest = z.infer<typeof WorkspaceSwitchRequestSchema>;
+export type WorkspaceRemoveRecentRequest = z.infer<typeof WorkspaceRemoveRecentRequestSchema>;
 export type WorkspaceListTagsRequest = z.infer<typeof WorkspaceListTagsRequestSchema>;
 export type FileListTreeRequest = z.infer<typeof FileListTreeRequestSchema>;
 export type FileReadRequest = z.infer<typeof FileReadRequestSchema>;

@@ -12,7 +12,7 @@ import {
 import { createTranslator, type Translator } from "../../shared/i18n";
 import type { RecentWorkspace, WorkspaceIndexedEvent, WorkspaceInfo } from "../../shared/types";
 import type { ResolvedLocale } from "../../shared/types";
-import type { WorkspaceOpenRequest, WorkspaceSwitchRequest } from "../../shared/ipc";
+import type { WorkspaceOpenRequest, WorkspaceRemoveRecentRequest, WorkspaceSwitchRequest } from "../../shared/ipc";
 import { ensureDir, pathExists } from "../utils/filePaths";
 import { DiagnosticsService } from "./diagnosticsService";
 import { SettingsService } from "./settingsService";
@@ -120,6 +120,11 @@ export class WorkspaceService {
   }
 
   async listRecentWorkspaces(): Promise<RecentWorkspace[]> {
+    return this.settings.listRecentWorkspaces();
+  }
+
+  async removeRecentWorkspace(request: WorkspaceRemoveRecentRequest): Promise<RecentWorkspace[]> {
+    await this.settings.removeRecentWorkspace(request.workspaceId);
     return this.settings.listRecentWorkspaces();
   }
 

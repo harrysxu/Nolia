@@ -10,6 +10,7 @@ The app keeps user documents in the workspace folder selected by the user. Markd
 - [User Manual](docs/user/USER_MANUAL.md)
 - [Plugin Guide](docs/plugins/PLUGIN_DEVELOPMENT.md)
 - [Architecture Map](docs/architecture/CODEBASE_MAP.md)
+- [QA Plan](docs/qa/README.md)
 - [Release Checklist](docs/release/RELEASE_CHECKLIST.md)
 - [Changelog](docs/release/CHANGELOG.md)
 - [Privacy Statement](docs/legal/PRIVACY.md)

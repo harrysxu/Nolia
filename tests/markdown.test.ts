@@ -136,6 +136,14 @@ const value = 1;
     expect(markdown).toContain("nolia-toc:end");
   });
 
+  it("renders table of contents hierarchy as nested lists", async () => {
+    const source = `${createMarkdownTocBlock("# Alpha\n\n## Beta\n\n### Gamma\n\n# Delta\n")}\n\n# Alpha\n\n## Beta\n\n### Gamma\n\n# Delta\n`;
+    const html = await renderMarkdownToHtml(source);
+
+    expect(html).toContain('<a href="#alpha">Alpha</a><ul><li><a href="#beta">Beta</a><ul><li><a href="#gamma">Gamma</a></li></ul></li></ul></li>');
+    expect(html).toContain('</li><li><a href="#delta">Delta</a></li></ul>');
+  });
+
   it("updates editable fenced-code languages by rendered code-block order", () => {
     const source = [
       "```ts",

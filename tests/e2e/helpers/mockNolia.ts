@@ -82,6 +82,7 @@ export async function installMockNolia(page: Page, options: MockWorkspaceOptions
     let pluginDescriptors = [...(rawOptions.plugins ?? [])];
     const files = new Map<string, string>(Object.entries(rawOptions.files ?? { "home.md": "# Home\n\nSelf test workspace." }));
     const binaries = new Map<string, MockBinaryFile>(Object.entries(rawOptions.binaries ?? {}));
+    let recentWorkspaces = [...(rawOptions.recentWorkspaces ?? [])];
     const explicitSearchItems = rawOptions.searchItems;
     const backlinks = rawOptions.backlinks ?? { linked: [], unlinked: [] };
     const workspaceIndexedListeners = new Set<(event: WorkspaceIndexedEvent) => void>();
@@ -209,7 +210,7 @@ export async function installMockNolia(page: Page, options: MockWorkspaceOptions
 
     window.nolia = {
       workspace: {
-        bootstrap: async () => ({ activeWorkspace: workspaceOpen ? workspace : undefined, recentWorkspaces: rawOptions.recentWorkspaces ?? [], settings: mutableSettings }),
+        bootstrap: async () => ({ activeWorkspace: workspaceOpen ? workspace : undefined, recentWorkspaces, settings: mutableSettings }),
         open: async () => {
           workspaceOpen = true;
           window.localStorage.removeItem(workspaceClosedStorageKey);
@@ -220,7 +221,11 @@ export async function installMockNolia(page: Page, options: MockWorkspaceOptions
           window.localStorage.removeItem(workspaceClosedStorageKey);
           return workspace;
         },
-        listRecent: async () => rawOptions.recentWorkspaces ?? [],
+        listRecent: async () => recentWorkspaces,
+        removeRecent: async ({ workspaceId }) => {
+          recentWorkspaces = recentWorkspaces.filter((item) => item.workspaceId !== workspaceId);
+          return recentWorkspaces;
+        },
         listTags: async () => [],
         switch: async () => {
           workspaceOpen = true;

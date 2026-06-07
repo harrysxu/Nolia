@@ -48,6 +48,7 @@ import {
   List,
   ListChecks,
   ListOrdered,
+  Rows3,
   Menu,
   Minus,
   Move,
@@ -145,11 +146,15 @@ type RegisteredPluginRenderer<TContext> = {
   render: PluginRenderProvider<TContext>;
 };
 const LEFT_PANEL_WIDTH_STORAGE_KEY = "nolia.leftPanelWidth.v2";
+const RIGHT_PANEL_WIDTH_STORAGE_KEY = "nolia.rightPanelWidth.v1";
 const TOOLBAR_VISIBLE_STORAGE_KEY = "nolia.toolbarVisible.v1";
 const LINE_NUMBERS_VISIBLE_STORAGE_KEY = "nolia.lineNumbersVisible.v1";
 const DEFAULT_LEFT_PANEL_WIDTH = 300;
 const MIN_LEFT_PANEL_WIDTH = 260;
 const MAX_LEFT_PANEL_WIDTH = 420;
+const DEFAULT_RIGHT_PANEL_WIDTH = 320;
+const MIN_RIGHT_PANEL_WIDTH = 240;
+const MAX_RIGHT_PANEL_WIDTH = 520;
 const DEFAULT_SPLIT_LEFT_PERCENT = 50;
 const MIN_SPLIT_LEFT_PERCENT = 25;
 const MAX_SPLIT_LEFT_PERCENT = 75;
@@ -203,6 +208,7 @@ export function App() {
   } | undefined>();
   const [leftPanelCollapsed, setLeftPanelCollapsed] = useState(false);
   const [leftPanelWidth, setLeftPanelWidth] = useState(readStoredLeftPanelWidth);
+  const [rightPanelWidth, setRightPanelWidth] = useState(readStoredRightPanelWidth);
   const [rightPanelCollapsed, setRightPanelCollapsed] = useState(true);
   const [immersiveMode, setImmersiveMode] = useState(false);
   const [appSettings, setAppSettings] = useState<AppSettings | undefined>();
@@ -219,6 +225,7 @@ export function App() {
   const activeResourceRef = useRef(activeResource);
   const suspendedShellRef = useRef<SuspendedShellState | undefined>(undefined);
   const leftPanelWidthRef = useRef(leftPanelWidth);
+  const rightPanelWidthRef = useRef(rightPanelWidth);
   const viewPreferencesLoadedRef = useRef(false);
   const autosaveTimers = useRef<Map<string, number>>(new Map());
   const renderToken = useRef(0);
@@ -286,6 +293,11 @@ export function App() {
     leftPanelWidthRef.current = leftPanelWidth;
     window.localStorage.setItem(LEFT_PANEL_WIDTH_STORAGE_KEY, String(leftPanelWidth));
   }, [leftPanelWidth]);
+
+  useEffect(() => {
+    rightPanelWidthRef.current = rightPanelWidth;
+    window.localStorage.setItem(RIGHT_PANEL_WIDTH_STORAGE_KEY, String(rightPanelWidth));
+  }, [rightPanelWidth]);
 
   useEffect(() => {
     void bootstrap();
@@ -725,7 +737,7 @@ export function App() {
 
       <div
         className={`workspace-grid${leftPanelCollapsed ? " is-left-collapsed" : ""}${rightPanelCollapsed ? " is-right-collapsed" : ""}${immersiveMode ? " is-immersive" : ""}${!showWorkspacePanels ? " is-single-file" : ""}`}
-        style={{ "--left-panel-width": `${leftPanelWidth}px` } as CSSProperties}
+        style={{ "--left-panel-width": `${leftPanelWidth}px`, "--right-panel-width": `${rightPanelWidth}px` } as CSSProperties}
       >
         {showWorkspacePanels ? (
           <AppNav
@@ -836,6 +848,7 @@ export function App() {
             pluginFileEditors={pluginFileEditors}
             toolbarVisible={Boolean(visibleDocument && toolbarVisible && !immersiveMode)}
             lineNumbersVisible={lineNumbersVisible}
+            onToggleLineNumbers={() => setLineNumbersVisible(!lineNumbersVisible)}
             onSourceChange={(value) => void updateSourceText(value)}
             onHtmlChange={(value) => void updateHtmlDraft(value)}
             onMarkdownPaste={(value) => void updateSourceText(value)}
@@ -851,6 +864,18 @@ export function App() {
             onRegisterPluginEditorSaveHandler={registerPluginEditorSaveHandler}
           />
         </main>
+
+        {showWorkspacePanels ? (
+          <button
+            type="button"
+            className="right-panel-resizer"
+            aria-label={tr("拖拽调整右侧面板宽度")}
+            title={tr("拖拽调整右侧面板宽度")}
+            onPointerDown={startRightPanelResize}
+            onKeyDown={handleRightPanelResizeKeyDown}
+            onDoubleClick={() => setRightPanelWidth(DEFAULT_RIGHT_PANEL_WIDTH)}
+          />
+        ) : null}
 
         {showWorkspacePanels ? (
         <aside className={`right-panel ${rightPanelView}`} aria-hidden={rightPanelCollapsed}>
@@ -942,6 +967,50 @@ export function App() {
     if (event.key === "End") {
       event.preventDefault();
       setLeftPanelWidth(MAX_LEFT_PANEL_WIDTH);
+    }
+  }
+
+  function startRightPanelResize(event: ReactPointerEvent<HTMLButtonElement>) {
+    if (rightPanelCollapsed || event.button !== 0) {
+      return;
+    }
+    event.preventDefault();
+    const startX = event.clientX;
+    const startWidth = rightPanelWidthRef.current;
+    document.body.classList.add("is-resizing-right-panel");
+
+    const onPointerMove = (moveEvent: PointerEvent) => {
+      setRightPanelWidth(clampRightPanelWidth(startWidth + startX - moveEvent.clientX));
+    };
+    const stopResize = () => {
+      document.body.classList.remove("is-resizing-right-panel");
+      window.removeEventListener("pointermove", onPointerMove);
+      window.removeEventListener("pointerup", stopResize);
+      window.removeEventListener("pointercancel", stopResize);
+    };
+
+    window.addEventListener("pointermove", onPointerMove);
+    window.addEventListener("pointerup", stopResize);
+    window.addEventListener("pointercancel", stopResize);
+  }
+
+  function handleRightPanelResizeKeyDown(event: ReactKeyboardEvent<HTMLButtonElement>) {
+    if (rightPanelCollapsed) {
+      return;
+    }
+    if (event.key === "ArrowLeft" || event.key === "ArrowRight") {
+      event.preventDefault();
+      setRightPanelWidth((width) => clampRightPanelWidth(width + (event.key === "ArrowLeft" ? 16 : -16)));
+      return;
+    }
+    if (event.key === "Home") {
+      event.preventDefault();
+      setRightPanelWidth(MIN_RIGHT_PANEL_WIDTH);
+      return;
+    }
+    if (event.key === "End") {
+      event.preventDefault();
+      setRightPanelWidth(MAX_RIGHT_PANEL_WIDTH);
     }
   }
 
@@ -1260,9 +1329,11 @@ export function App() {
   async function openRecentWorkspace(item: RecentWorkspace) {
     setWelcomeErrorMessage(undefined);
     if (!item.exists) {
-      const message = tr("无法打开「{name}」：路径不存在或无权访问。{path}", { name: item.name, path: item.path });
-      setWelcomeErrorMessage(message);
-      setStatusMessage(tr("最近工作区路径不可用"));
+      const next =
+        (await window.nolia.workspace.removeRecent?.({ workspaceId: item.workspaceId })) ??
+        recentWorkspaces.filter((workspaceItem) => workspaceItem.workspaceId !== item.workspaceId);
+      setRecentWorkspaces(next);
+      setStatusMessage(tr("已移除不可用工作区 {name}", { name: item.name }));
       return;
     }
     setWelcomeOpeningWorkspaceId(item.workspaceId);
@@ -2466,12 +2537,6 @@ function refreshMarkdownTocIfPresent(source: string): string {
   return hasMarkdownToc(source) ? updateMarkdownToc(source) : source;
 }
 
-function appendMarkdownToc(source: string, title: string): string {
-  const trimmed = source.trimEnd();
-  const block = createMarkdownTocBlock(trimmed, title);
-  return trimmed ? `${trimmed}\n\n${block}\n` : `${block}\n`;
-}
-
 function editorModeLabel(mode: OpenDocumentTab["mode"], tr = createTranslator("zh-CN")): string {
   switch (mode) {
     case "source":
@@ -2984,6 +3049,18 @@ function readStoredLeftPanelWidth(): number {
   return Number.isFinite(stored) ? clampLeftPanelWidth(stored) : DEFAULT_LEFT_PANEL_WIDTH;
 }
 
+function readStoredRightPanelWidth(): number {
+  if (typeof window === "undefined") {
+    return DEFAULT_RIGHT_PANEL_WIDTH;
+  }
+  const storedValue = window.localStorage.getItem(RIGHT_PANEL_WIDTH_STORAGE_KEY);
+  if (!storedValue) {
+    return DEFAULT_RIGHT_PANEL_WIDTH;
+  }
+  const stored = Number(storedValue);
+  return Number.isFinite(stored) ? clampRightPanelWidth(stored) : DEFAULT_RIGHT_PANEL_WIDTH;
+}
+
 function readStoredBoolean(key: string, fallback: boolean): boolean {
   if (typeof window === "undefined") {
     return fallback;
@@ -3000,6 +3077,10 @@ function readStoredBoolean(key: string, fallback: boolean): boolean {
 
 function clampLeftPanelWidth(width: number): number {
   return Math.min(MAX_LEFT_PANEL_WIDTH, Math.max(MIN_LEFT_PANEL_WIDTH, Math.round(width)));
+}
+
+function clampRightPanelWidth(width: number): number {
+  return Math.min(MAX_RIGHT_PANEL_WIDTH, Math.max(MIN_RIGHT_PANEL_WIDTH, Math.round(width)));
 }
 
 function clampSplitLeftPercent(percent: number): number {
@@ -3627,6 +3708,7 @@ const EditorPane = forwardRef<EditorPaneHandle, {
   pluginFileEditors: Map<string, RegisteredPluginRenderer<PluginFileEditorContext>>;
   toolbarVisible: boolean;
   lineNumbersVisible: boolean;
+  onToggleLineNumbers: () => void;
   onSourceChange: (value: string) => void;
   onHtmlChange: (value: string) => void;
   onMarkdownPaste: (value: string) => void;
@@ -3650,6 +3732,7 @@ const EditorPane = forwardRef<EditorPaneHandle, {
     pluginFileEditors,
     toolbarVisible,
     lineNumbersVisible,
+    onToggleLineNumbers,
     onSourceChange,
     onHtmlChange,
     onMarkdownPaste,
@@ -3676,6 +3759,7 @@ const EditorPane = forwardRef<EditorPaneHandle, {
   const [splitLeftPercent, setSplitLeftPercent] = useState(DEFAULT_SPLIT_LEFT_PERCENT);
   const [sourceTableDialog, setSourceTableDialog] = useState<TableDialogState | undefined>();
   const sourceToolsActive = document?.mode === "source" || document?.mode === "split";
+  const sourceEditorKey = document ? `${document.sourceKind ?? "workspace"}:${document.filePath ?? document.pathRel}` : "empty";
   const insertSourceSnippet = (snippet: MarkdownSnippet) => insertSnippetIntoSourceEditor(sourceEditorRef, snippet);
   const insertOrUpdateSourceToc = () => {
     if (!document) {
@@ -3699,9 +3783,10 @@ const EditorPane = forwardRef<EditorPaneHandle, {
     }
     const markdownBody = await htmlToMarkdown(currentHtml);
     const currentSource = mergeWysiwygBodyIntoSource(document.sourceText, markdownBody);
-    const nextSource = hasMarkdownToc(currentSource)
-      ? updateMarkdownToc(currentSource)
-      : appendMarkdownToc(currentSource, tr("目录"));
+    if (!hasMarkdownToc(currentSource)) {
+      return;
+    }
+    const nextSource = updateMarkdownToc(currentSource);
     if (nextSource !== document.sourceText || document.pendingHtml) {
       onSourceChange(nextSource);
     }
@@ -4028,11 +4113,13 @@ const EditorPane = forwardRef<EditorPaneHandle, {
               onInsertTable={(event) => setSourceTableDialog(createAnchoredTableDialog(event.currentTarget))}
               onInsertLink={openSourceLinkDialog}
               onInsertToc={insertOrUpdateSourceToc}
+              lineNumbersVisible={lineNumbersVisible}
+              onToggleLineNumbers={onToggleLineNumbers}
               onUndo={undoSourceEdit}
               onRedo={redoSourceEdit}
             />
           ) : null}
-          <SourceEditor ref={sourceEditorRef} value={document.sourceText} onChange={onSourceChange} onSelectionLengthChange={onSelectionLengthChange} showLineNumbers={lineNumbersVisible} />
+          <SourceEditor key={sourceEditorKey} ref={sourceEditorRef} value={document.sourceText} onChange={onSourceChange} onSelectionLengthChange={onSelectionLengthChange} showLineNumbers={lineNumbersVisible} />
         </div>
       ) : null}
       {document.mode === "wysiwyg" ? (
@@ -4063,11 +4150,13 @@ const EditorPane = forwardRef<EditorPaneHandle, {
                   onInsertTable={(event) => setSourceTableDialog(createAnchoredTableDialog(event.currentTarget))}
                   onInsertLink={openSourceLinkDialog}
                   onInsertToc={insertOrUpdateSourceToc}
+                  lineNumbersVisible={lineNumbersVisible}
+                  onToggleLineNumbers={onToggleLineNumbers}
                   onUndo={undoSourceEdit}
                   onRedo={redoSourceEdit}
                 />
               ) : null}
-              <SourceEditor ref={sourceEditorRef} value={document.sourceText} onChange={onSourceChange} onSelectionLengthChange={onSelectionLengthChange} showLineNumbers={lineNumbersVisible} />
+              <SourceEditor key={sourceEditorKey} ref={sourceEditorRef} value={document.sourceText} onChange={onSourceChange} onSelectionLengthChange={onSelectionLengthChange} showLineNumbers={lineNumbersVisible} />
             </div>
           </div>
           <button
@@ -4674,6 +4763,8 @@ function MarkdownActionBar({
   onInsertTable,
   onInsertLink,
   onInsertToc,
+  lineNumbersVisible,
+  onToggleLineNumbers,
   onUndo,
   onRedo
 }: {
@@ -4682,12 +4773,17 @@ function MarkdownActionBar({
   onInsertTable: (event: ReactMouseEvent<HTMLButtonElement>) => void;
   onInsertLink: () => void;
   onInsertToc: () => void;
+  lineNumbersVisible: boolean;
+  onToggleLineNumbers: () => void;
   onUndo: () => void;
   onRedo: () => void;
 }) {
   const { tr } = useRendererI18n();
   return (
     <div className="markdown-actionbar" role="toolbar" aria-label={tr("Markdown 工具")}>
+      <ToolbarIconButton title={tr("插入目录")} icon={<TableOfContents size={16} />} onClick={onInsertToc} />
+      <ToolbarIconButton title={tr("行号")} icon={<Rows3 size={16} />} onClick={onToggleLineNumbers} pressed={lineNumbersVisible} />
+      <ToolbarDivider />
       <ToolbarIconButton title={tr("撤销")} icon={<Undo2 size={16} />} onClick={onUndo} />
       <ToolbarIconButton title={tr("重做")} icon={<Redo2 size={16} />} onClick={onRedo} />
       <ToolbarDivider />
@@ -4695,7 +4791,6 @@ function MarkdownActionBar({
       <ToolbarIconButton title={tr("一级标题")} icon={<Heading1 size={16} />} onClick={() => onInsert({ before: "# ", placeholder: tr("一级标题") })} />
       <ToolbarIconButton title={tr("二级标题")} icon={<Heading2 size={16} />} onClick={() => onInsert({ before: "## ", placeholder: tr("二级标题") })} />
       <ToolbarIconButton title={tr("三级标题")} icon={<Heading3 size={16} />} onClick={() => onInsert({ before: "### ", placeholder: tr("三级标题") })} />
-      <ToolbarIconButton title={tr("目录")} icon={<TableOfContents size={16} />} onClick={onInsertToc} />
       <ToolbarDivider />
       <ToolbarIconButton title={tr("加粗")} icon={<Bold size={16} />} onClick={() => onInsert({ before: "**", after: "**", placeholder: tr("加粗文本") })} />
       <ToolbarIconButton title={tr("斜体")} icon={<Italic size={16} />} onClick={() => onInsert({ before: "*", after: "*", placeholder: tr("斜体文本") })} />
@@ -4709,7 +4804,7 @@ function MarkdownActionBar({
       <ToolbarDivider />
       <ToolbarIconButton title={tr("链接")} icon={<Link2 size={16} />} onClick={onInsertLink} />
       <ToolbarIconButton title={tr("图片")} icon={<ImageIcon size={16} />} onClick={onInsertImage} />
-      <ToolbarIconButton title={tr("代码块")} icon={<FileCode2 size={16} />} onClick={() => onInsert({ before: "```\n", after: "\n```", placeholder: tr("代码"), block: true })} />
+      <ToolbarIconButton title={tr("代码块")} icon={<FileCode2 size={16} />} onClick={() => onInsert({ before: "```\n", after: "\n```", placeholder: tr("代码"), block: true, select: "body" })} />
       <ToolbarIconButton title={tr("表格")} icon={<Table2 size={16} />} onClick={onInsertTable} />
       <ToolbarIconButton title={tr("公式")} icon={<Sigma size={16} />} onClick={() => onInsert({ before: "$$\n", after: "\n$$", placeholder: "E = mc^2", block: true })} />
       <ToolbarIconButton title={tr("引用")} icon={<Quote size={16} />} onClick={() => onInsert({ before: "> ", placeholder: tr("引用"), block: true })} />
@@ -4723,11 +4818,12 @@ type MarkdownSnippet = {
   after?: string;
   placeholder?: string;
   block?: boolean;
+  select?: "body" | "end";
 };
 
-function ToolbarIconButton({ title, icon, onClick }: { title: string; icon: ReactNode; onClick: (event: ReactMouseEvent<HTMLButtonElement>) => void }) {
+function ToolbarIconButton({ title, icon, onClick, pressed }: { title: string; icon: ReactNode; onClick: (event: ReactMouseEvent<HTMLButtonElement>) => void; pressed?: boolean }) {
   return (
-    <button type="button" className="toolbar-icon-button" title={title} aria-label={title} onClick={onClick}>
+    <button type="button" className={`toolbar-icon-button${pressed ? " is-active" : ""}`} title={title} aria-label={title} aria-pressed={pressed} onClick={onClick}>
       {icon}
     </button>
   );
@@ -4909,8 +5005,8 @@ function insertSnippetIntoSourceEditor(ref: RefObject<ReactCodeMirrorRef | null>
   const needsLeadingBreak = snippet.block && line.text.trim() && range.from !== line.from;
   const prefix = needsLeadingBreak ? `\n${snippet.before}` : snippet.before;
   const inserted = `${prefix}${body}${snippet.after ?? ""}`;
-  const selectionStart = range.from + prefix.length;
-  const selectionEnd = selectionStart + body.length;
+  const selectionStart = snippet.select === "end" ? range.from + inserted.length : range.from + prefix.length;
+  const selectionEnd = snippet.select === "end" ? selectionStart : selectionStart + body.length;
   view.dispatch({
     changes: { from: range.from, to: range.to, insert: inserted },
     selection: { anchor: selectionStart, head: selectionEnd },
@@ -5109,9 +5205,9 @@ function NotesWorkspaceView({
         </div>
         <div className="tree-section">
           <header className="tree-section-header">
-            <div>
+            <div className="tree-section-title">
               <strong>{tr("全部文件")}</strong>
-              <span>{tr("{items} 个项目 · {notes} 篇笔记", { items: openableItemsCount, notes: markdownNotes.length })}</span>
+              <span className="tree-section-count">{tr("{items} 个项目 · {notes} 篇笔记", { items: openableItemsCount, notes: markdownNotes.length })}</span>
             </div>
             <span className="tree-section-actions">
               <button
@@ -5985,7 +6081,7 @@ function DocumentDetails({
       <SidebarBox title={tr("目录")}>
         {doc.parsed.headings.length === 0 ? <div className="empty-state">{tr("暂无标题。")}</div> : null}
         {doc.parsed.headings.map((heading) => (
-          <button key={heading.id} type="button" className="result-item">
+          <button key={heading.id} type="button" className="result-item outline-item" style={outlineItemStyle(heading.depth)}>
             <strong>{heading.text}</strong>
             <span>{tr("第 {line} 行", { line: heading.line })}</span>
           </button>
@@ -6018,12 +6114,16 @@ function OutlinePanel({
     <div className="panel-list">
       {doc.parsed.headings.length === 0 ? <div className="panel-empty">{tr("暂无标题。")}</div> : null}
       {doc.parsed.headings.map((heading, index) => (
-        <button key={`${heading.id}:${index}`} type="button" className="panel-item" onClick={() => onJump(heading.line, index)}>
-          <span style={{ paddingLeft: Math.max(0, heading.depth - 1) * 8 }}>{heading.text}</span>
+        <button key={`${heading.id}:${index}`} type="button" className="panel-item outline-item" style={outlineItemStyle(heading.depth)} onClick={() => onJump(heading.line, index)}>
+          <span>{heading.text}</span>
         </button>
       ))}
     </div>
   );
+}
+
+function outlineItemStyle(depth: number): CSSProperties {
+  return { "--outline-depth": Math.max(0, Math.min(5, depth - 1)) } as CSSProperties;
 }
 
 function ErrorPanel({ statusMessage }: { statusMessage: string }) {

@@ -22,6 +22,7 @@ Nolia 是一款 macOS 本地优先 Markdown 知识工作台，基于 Electron、
 - [更新日志](release/CHANGELOG.md)
 - [发布检查清单](release/RELEASE_CHECKLIST.md)
 - [macOS 签名与公证指南](release/MACOS_SIGNING_NOTARIZATION.md)
+- [QA 测试文档](qa/README.md)
 - [代码结构地图](architecture/CODEBASE_MAP.md)
 - [贡献指南](../CONTRIBUTING.md)
 - [安全政策](../SECURITY.md)

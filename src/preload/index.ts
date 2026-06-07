@@ -26,6 +26,7 @@ import {
   type SettingsSetRequest,
   type WorkspaceOpenRequest,
   type WorkspaceListTagsRequest,
+  type WorkspaceRemoveRecentRequest,
   type WorkspaceSwitchRequest
 } from "../shared/ipc";
 import type { PluginDescriptor } from "../shared/extensions";
@@ -55,6 +56,7 @@ export interface NoliaApi {
     open: (request?: WorkspaceOpenRequest) => Promise<WorkspaceInfo | undefined>;
     create: (request?: WorkspaceOpenRequest) => Promise<WorkspaceInfo | undefined>;
     listRecent: () => Promise<RecentWorkspace[]>;
+    removeRecent?: (request: WorkspaceRemoveRecentRequest) => Promise<RecentWorkspace[]>;
     listTags: (request: WorkspaceListTagsRequest) => Promise<Array<{ name: string; displayName: string; count: number }>>;
     switch: (request: WorkspaceSwitchRequest) => Promise<{ ok: boolean; restoredState?: WorkspaceInfo }>;
     close: () => Promise<void>;
@@ -133,6 +135,7 @@ const api: NoliaApi = {
     open: (request = {}) => invoke(IpcChannels.workspaceOpen, request),
     create: (request = {}) => invoke(IpcChannels.workspaceCreate, request),
     listRecent: () => invoke(IpcChannels.workspaceListRecent, {}),
+    removeRecent: (request) => invoke(IpcChannels.workspaceRemoveRecent, request),
     listTags: (request) => invoke(IpcChannels.workspaceListTags, request),
     switch: (request) => invoke(IpcChannels.workspaceSwitch, request),
     close: () => invoke(IpcChannels.workspaceClose, {})

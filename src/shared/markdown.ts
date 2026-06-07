@@ -381,15 +381,58 @@ function tocBlockHtml(blockSource: string): string {
   const title = visibleMarkdown.match(/^#{1,6}\s+(.+)$/m)?.[1]?.trim() || "目录";
   const items = visibleMarkdown
     .split(/\r?\n/)
-    .map((line) => line.match(/^\s*-\s+\[([^\]]+)]\((#[^)]+)\)/))
-    .filter((match): match is RegExpMatchArray => Boolean(match))
-    .map((match) => `<li><a href="${escapeHtmlAttribute(match[2])}">${escapeHtml(unescapeMarkdownTocLabel(match[1]))}</a></li>`)
-    .join("");
-  return `<h2 id="${escapeHtmlAttribute(slugify(title))}">${escapeHtml(title)}</h2><ul>${items || "<li><em>暂无标题</em></li>"}</ul>`;
+    .map((line) => {
+      const match = line.match(/^(\s*)-\s+\[([^\]]+)]\((#[^)]+)\)/);
+      if (!match) {
+        return undefined;
+      }
+      return {
+        depth: Math.floor(match[1].replace(/\t/g, "  ").length / 2),
+        label: unescapeMarkdownTocLabel(match[2]),
+        href: match[3]
+      };
+    })
+    .filter((item): item is { depth: number; label: string; href: string } => Boolean(item));
+  const list = items.length ? tocListHtml(items) : "<ul><li><em>暂无标题</em></li></ul>";
+  return `<h2 id="${escapeHtmlAttribute(slugify(title))}">${escapeHtml(title)}</h2>${list}`;
 }
 
 function unescapeMarkdownTocLabel(value: string): string {
   return value.replace(/\\]/g, "]").replace(/\\\\/g, "\\");
+}
+
+function tocListHtml(items: Array<{ depth: number; label: string; href: string }>): string {
+  let html = "";
+  let currentDepth = -1;
+  let openItem = false;
+  items.forEach((item) => {
+    const depth = Math.max(0, item.depth);
+    if (currentDepth < 0) {
+      html += "<ul>";
+      currentDepth = 0;
+    }
+    while (currentDepth < depth) {
+      html += openItem ? "<ul>" : "<li><ul>";
+      currentDepth += 1;
+      openItem = false;
+    }
+    while (currentDepth > depth) {
+      html += openItem ? "</li></ul>" : "</ul>";
+      currentDepth -= 1;
+      openItem = true;
+    }
+    if (openItem) {
+      html += "</li>";
+    }
+    html += `<li><a href="${escapeHtmlAttribute(item.href)}">${escapeHtml(item.label)}</a>`;
+    openItem = true;
+  });
+  while (currentDepth >= 0) {
+    html += openItem ? "</li></ul>" : "</ul>";
+    currentDepth -= 1;
+    openItem = true;
+  }
+  return html;
 }
 
 function remarkWikiLinksAndMarks() {

@@ -28,6 +28,7 @@ import {
   SettingsSetRequestSchema,
   WorkspaceOpenRequestSchema,
   WorkspaceListTagsRequestSchema,
+  WorkspaceRemoveRecentRequestSchema,
   WorkspaceSwitchRequestSchema
 } from "../shared/ipc";
 import { parseMarkdown } from "../shared/markdown";
@@ -56,6 +57,7 @@ export function registerIpcHandlers(services: IpcServices): void {
   handle(IpcChannels.workspaceOpen, WorkspaceOpenRequestSchema, (request) => services.workspaces.openWorkspace(request));
   handle(IpcChannels.workspaceCreate, WorkspaceOpenRequestSchema, (request) => services.workspaces.createWorkspace(request));
   handle(IpcChannels.workspaceListRecent, EmptySchema, () => services.workspaces.listRecentWorkspaces());
+  handle(IpcChannels.workspaceRemoveRecent, WorkspaceRemoveRecentRequestSchema, (request) => services.workspaces.removeRecentWorkspace(request));
   handle(IpcChannels.workspaceListTags, WorkspaceListTagsRequestSchema, (request) => {
     const runtime = services.workspaces.requireWorkspace(request.workspaceId);
     return runtime.db.listTags();

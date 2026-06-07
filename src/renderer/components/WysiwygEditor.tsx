@@ -42,7 +42,7 @@ import {
 } from "lucide-react";
 
 import { codeFenceLanguageForCodeBlock, normalizeCodeBlockLanguage } from "../../shared/codeBlockLanguages";
-import { htmlToMarkdown, htmlToMarkdownSync, renderMarkdownToHtml } from "../../shared/markdown";
+import { createMarkdownTocBlock, hasMarkdownToc, htmlToMarkdown, htmlToMarkdownSync, renderMarkdownToHtml } from "../../shared/markdown";
 import { useRendererI18n } from "../app/i18n";
 import { MathBlock } from "./MathBlock";
 import { InlineMath } from "./InlineMath";
@@ -1124,11 +1124,26 @@ export const WysiwygEditor = forwardRef<WysiwygEditorHandle, WysiwygEditorProps>
         : current
     );
   };
+  const insertOrUpdateToc = async () => {
+    clearMarkdownSourceEditor(editor.view);
+    closeTableMenu();
+    setTableSourceEditor(undefined);
+    const currentHtml = editor.getHTML();
+    const currentMarkdown = await htmlToMarkdown(currentHtml);
+    if (hasMarkdownToc(currentMarkdown)) {
+      onInsertToc?.(currentHtml);
+      return;
+    }
+    markUserEditIntent();
+    await insertMarkdownBlockAtSelection(editor, createMarkdownTocBlock(currentMarkdown, tr("目录")), { workspaceId, documentPathRel });
+  };
 
   return (
     <div className="wysiwyg-shell">
       {showToolbar ? (
       <div className="editor-toolbar" role="toolbar" aria-label={tr("Markdown 工具")} onMouseDown={markUserEditIntent}>
+        <IconButton title={tr("插入目录")} onClick={() => void insertOrUpdateToc()} icon={<TableOfContents size={16} />} />
+        <ToolbarDivider />
         <IconButton title={tr("撤销")} onClick={() => editor.chain().focus().undo().run()} icon={<Undo2 size={16} />} />
         <IconButton title={tr("重做")} onClick={() => editor.chain().focus().redo().run()} icon={<Redo2 size={16} />} />
         <ToolbarDivider />
@@ -1136,7 +1151,6 @@ export const WysiwygEditor = forwardRef<WysiwygEditorHandle, WysiwygEditorProps>
         <IconButton title={tr("一级标题")} onClick={() => editor.chain().focus().toggleHeading({ level: 1 }).run()} icon={<Heading1 size={16} />} />
         <IconButton title={tr("二级标题")} onClick={() => editor.chain().focus().toggleHeading({ level: 2 }).run()} icon={<Heading2 size={16} />} />
         <IconButton title={tr("三级标题")} onClick={() => editor.chain().focus().toggleHeading({ level: 3 }).run()} icon={<Heading3 size={16} />} />
-        <IconButton title={tr("目录")} onClick={() => onInsertToc?.(editor.getHTML())} icon={<TableOfContents size={16} />} />
         <ToolbarDivider />
         <IconButton title={tr("加粗")} onClick={() => editor.chain().focus().toggleBold().run()} icon={<Bold size={16} />} />
         <IconButton title={tr("斜体")} onClick={() => editor.chain().focus().toggleItalic().run()} icon={<Italic size={16} />} />
@@ -1819,6 +1833,30 @@ async function insertMarkdownPlainText(
   }
 }
 
+async function insertMarkdownBlockAtSelection(
+  editor: NonNullable<ReturnType<typeof useEditor>>,
+  markdown: string,
+  options: { workspaceId?: string; documentPathRel?: string } = {}
+) {
+  const view = editor.view;
+  try {
+    const html = normalizeRenderedHtmlForWysiwyg(await renderMarkdownToHtml(markdown), options);
+    const container = document.createElement("div");
+    container.innerHTML = splitTaskListItemsForParsing(html);
+    const parsedDoc = ProseMirrorDOMParser.fromSchema(view.state.schema).parse(container);
+    const slice = parsedDoc.slice(0, parsedDoc.content.size);
+    const transaction = view.state.tr.replaceSelection(slice);
+    transaction.setMeta("noliaUserEdit", true);
+    view.dispatch(transaction.scrollIntoView());
+    view.focus();
+  } catch {
+    const transaction = view.state.tr.insertText(markdown).scrollIntoView();
+    transaction.setMeta("noliaUserEdit", true);
+    view.dispatch(transaction);
+    view.focus();
+  }
+}
+
 function queueTaskDomTextRestore(editor: Editor, markdown: string, onChange?: (value: string) => void) {
   restoreTaskDomTextFromMarkdown(editor, markdown);
   onChange?.(editor.view.dom.innerHTML);
@@ -2109,12 +2147,55 @@ function insertCodeBlock(editor: NonNullable<ReturnType<typeof useEditor>>) {
   if (!codeBlock) {
     return;
   }
-  const { from, to } = state.selection;
-  const tr = state.tr.replaceRangeWith(from, to, codeBlock.create());
-  const nextPos = Math.min(from + 1, tr.doc.content.size);
-  tr.setSelection(TextSelection.create(tr.doc, nextPos));
+  const currentRange = codeBlockRangeAtSelection(state);
+  if (currentRange) {
+    focusCodeBlockText(editor.view, currentRange, state.selection.from);
+    return;
+  }
+  if (state.selection.empty && editor.chain().focus().setCodeBlock().run()) {
+    const insertedRange = codeBlockRangeAtSelection(editor.view.state);
+    if (insertedRange) {
+      focusCodeBlockText(editor.view, insertedRange, editor.view.state.selection.from);
+    }
+    return;
+  }
+  const selectedText = state.doc.textBetween(state.selection.from, state.selection.to, "\n");
+  const tr = state.tr.replaceSelectionWith(codeBlock.create(null, selectedText ? state.schema.text(selectedText) : undefined), false);
+  const insertedRange = codeBlockRangeNearPosition(tr.doc, tr.selection.from);
+  if (insertedRange) {
+    const nextPos = Math.min(insertedRange.to - 1, insertedRange.from + 1 + selectedText.length);
+    tr.setSelection(TextSelection.create(tr.doc, nextPos));
+  }
+  tr.setMeta("noliaUserEdit", true);
   dispatch(tr.scrollIntoView());
-  editor.view.focus();
+  focusCodeBlockText(editor.view, codeBlockRangeAtSelection(editor.view.state), editor.view.state.selection.from);
+}
+
+function focusCodeBlockText(view: EditorView, range: { from: number; to: number } | undefined, preferredPosition: number) {
+  if (!range) {
+    view.focus();
+    return;
+  }
+  const position = Math.max(range.from + 1, Math.min(preferredPosition, range.to - 1));
+  view.dispatch(view.state.tr.setSelection(TextSelection.create(view.state.doc, position)).scrollIntoView());
+  view.focus();
+}
+
+function codeBlockRangeNearPosition(doc: ProseMirrorNode, position: number): { from: number; to: number; node: ProseMirrorNode } | undefined {
+  let match: { from: number; to: number; node: ProseMirrorNode } | undefined;
+  doc.descendants((node, pos) => {
+    if (match || node.type.name !== "codeBlock") {
+      return false;
+    }
+    const from = pos;
+    const to = pos + node.nodeSize;
+    if (position >= from - 1 && position <= to + 1) {
+      match = { from, to, node };
+      return false;
+    }
+    return true;
+  });
+  return match;
 }
 
 function insertMathBlockAndFocus(editor: NonNullable<ReturnType<typeof useEditor>>, latex: string) {
@@ -3032,18 +3113,16 @@ function listAttrsAfterSplit(listNode: ProseMirrorNode, itemIndex: number): Reco
 function IconButton({
   title,
   onClick,
-  icon,
-  primary = false
+  icon
 }: {
   title: string;
   onClick: (event: ReactMouseEvent<HTMLButtonElement>) => void;
   icon: ReactNode;
-  primary?: boolean;
 }) {
   return (
     <button
       type="button"
-      className={`toolbar-icon-button${primary ? " is-primary" : ""}`}
+      className="toolbar-icon-button"
       title={title}
       aria-label={title}
       onMouseDown={(event) => event.preventDefault()}

@@ -54,7 +54,7 @@ test("welcome screen renders with preload API mocked", async ({ page }) => {
   await expect(page.getByRole("heading", { name: "继续上次的工作" })).toBeVisible();
 });
 
-test("welcome recent workspace cards open available workspaces and explain unavailable paths", async ({ page }) => {
+test("welcome recent workspace cards open available workspaces and remove unavailable paths", async ({ page }) => {
   const now = Date.now();
   const recentWorkspaces: RecentWorkspace[] = [
     {
@@ -94,8 +94,8 @@ test("welcome recent workspace cards open available workspaces and explain unava
   await expect(page.getByRole("button", { name: /Missing Workspace/ })).toContainText("路径不可用");
 
   await page.getByRole("button", { name: /Missing Workspace/ }).click();
-  await expect(page.getByRole("status")).toContainText("路径不存在或无权访问");
-  await expect(page.getByRole("status")).toContainText("/tmp/nolia-missing-workspace");
+  await expect(page.getByRole("button", { name: /Missing Workspace/ })).toHaveCount(0);
+  await expect(page.getByRole("status")).toHaveCount(0);
   await expect(page.getByRole("heading", { name: "Nolia" })).toBeVisible();
 
   await page.getByRole("button", { name: /Available Workspace/ }).click();

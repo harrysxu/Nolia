@@ -3,6 +3,7 @@ export const IpcChannels = {
   workspaceOpen: "workspace.open",
   workspaceCreate: "workspace.create",
   workspaceListRecent: "workspace.listRecent",
+  workspaceRemoveRecent: "workspace.removeRecent",
   workspaceSwitch: "workspace.switch",
   workspaceListTags: "workspace.listTags",
   workspaceClose: "workspace.close",

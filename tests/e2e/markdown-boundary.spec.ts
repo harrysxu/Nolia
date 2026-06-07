@@ -156,7 +156,7 @@ test("source toolbar inserts and refreshes a Markdown table of contents", async 
   });
 
   await openWorkspaceNote(page, "toc.md");
-  await page.locator(".markdown-actionbar").getByRole("button", { name: "目录" }).click();
+  await page.locator(".markdown-actionbar").getByRole("button", { name: "插入目录" }).click();
   await expect.poll(() => sourceText(page)).toContain("<!-- nolia-toc:start -->");
   expect(await sourceContains(page, "- [Alpha](#alpha)")).toBe(true);
   expect(await sourceContains(page, "  - [Beta](#beta)")).toBe(true);
@@ -171,6 +171,78 @@ test("source toolbar inserts and refreshes a Markdown table of contents", async 
     .toContain("- [Renamed](#renamed)");
   await expect.poll(() => sourceText(page)).toContain("- [Renamed](#renamed)");
   expect(await sourceContains(page, "- [Alpha](#alpha)")).toBe(false);
+});
+
+test("WYSIWYG toolbar inserts a Markdown table of contents at the cursor", async ({ page }) => {
+  await setupBoundaryWorkspace(page, {
+    "toc-cursor.md": ["# Alpha", "", "Paragraph before.", "", "## Beta", "", "Paragraph after."].join("\n")
+  });
+
+  await openWorkspaceNote(page, "toc-cursor.md");
+  await page.getByRole("button", { name: "编辑", exact: true }).click();
+  const editor = page.locator(".ProseMirror");
+  await editor.locator("p", { hasText: "Paragraph before." }).click();
+  await page.keyboard.press("End");
+  await page.locator(".editor-toolbar").getByRole("button", { name: "插入目录" }).click();
+  await expect(editor.locator(".markdown-preview-block-toc")).toBeVisible();
+
+  await page.getByRole("button", { name: "MD", exact: true }).click();
+  const source = await sourceText(page);
+  const tocIndex = source.indexOf("<!-- nolia-toc:start -->");
+  expect(tocIndex).toBeGreaterThan(source.indexOf("Paragraph before."));
+  expect(tocIndex).toBeLessThan(source.indexOf("## Beta"));
+  expect(tocIndex).toBeLessThan(source.indexOf("Paragraph after."));
+});
+
+test("source toolbar toggles Markdown line numbers", async ({ page }) => {
+  await setupBoundaryWorkspace(page, {
+    "line-numbers.md": ["# Alpha", "", "Body."].join("\n")
+  });
+
+  await openWorkspaceNote(page, "line-numbers.md");
+  await expect(page.locator(".cm-gutters")).toBeVisible();
+  const lineNumberButton = page.locator(".markdown-actionbar").getByRole("button", { name: "行号" });
+  await expect(lineNumberButton).toHaveAttribute("aria-pressed", "true");
+
+  await lineNumberButton.click();
+  await expect(lineNumberButton).toHaveAttribute("aria-pressed", "false");
+  await expect(page.locator(".cm-gutters")).toHaveCount(0);
+
+  await lineNumberButton.click();
+  await expect(lineNumberButton).toHaveAttribute("aria-pressed", "true");
+  await expect(page.locator(".cm-gutters")).toBeVisible();
+});
+
+test("source editor inserts code blocks at the code body and isolates undo history per file", async ({ page }) => {
+  await setupBoundaryWorkspace(page, {
+    "code-insert.md": "",
+    "next.md": "# Next\n\nKeep this content."
+  });
+
+  await openWorkspaceNote(page, "code-insert.md");
+  await page.locator(".cm-content").click();
+  await page.locator(".markdown-actionbar").getByRole("button", { name: "代码块" }).click();
+  await page.keyboard.insertText("console.log(1);");
+  await expect.poll(() => sourceText(page)).toBe("```\nconsole.log(1);\n```");
+
+  await openWorkspaceNote(page, "next.md");
+  await expect.poll(() => sourceText(page)).toBe("# Next\n\nKeep this content.");
+  await page.locator(".cm-content").click();
+  await page.keyboard.press("Meta+Z");
+  await expect.poll(() => sourceText(page)).toBe("# Next\n\nKeep this content.");
+});
+
+test("wysiwyg code block toolbar keeps typing inside the inserted block", async ({ page }) => {
+  await setupBoundaryWorkspace(page, {
+    "wysiwyg-code.md": ""
+  });
+
+  await openWorkspaceNote(page, "wysiwyg-code.md");
+  await page.getByRole("button", { name: "编辑", exact: true }).click();
+  await page.getByRole("button", { name: "代码块", exact: true }).click();
+  await page.keyboard.insertText("const value = 1;");
+  await expect(page.locator(".ProseMirror pre code")).toHaveText("const value = 1;");
+  await expect(page.locator(".ProseMirror pre")).toHaveCount(1);
 });
 
 test("code block language controls update split preview and WYSIWYG source", async ({ page }) => {
