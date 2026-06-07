@@ -1,5 +1,5 @@
 /* eslint-disable react-hooks/exhaustive-deps -- Resource editors keep save handlers and parsed state in refs keyed by the active resource path. */
-import { forwardRef, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import { forwardRef, useEffect, useImperativeHandle, useMemo, useRef, useState, type ReactNode } from "react";
 import CodeMirror, { type ReactCodeMirrorRef } from "@uiw/react-codemirror";
 import { redo, undo } from "@codemirror/commands";
 import { html } from "@codemirror/lang-html";
@@ -70,7 +70,15 @@ export type TextResourceEditorProps = {
   onRegisterSaveHandler: (pathRel: string, handler: () => Promise<void>) => () => void;
 };
 
-export function TextResourceEditor({ resource, workspaceId, editorKind, onDirtyChange, onSaved, onStatus, onRegisterSaveHandler }: TextResourceEditorProps) {
+export type TextResourceEditorHandle = {
+  undoEdit: () => boolean;
+  redoEdit: () => boolean;
+};
+
+export const TextResourceEditor = forwardRef<TextResourceEditorHandle, TextResourceEditorProps>(function TextResourceEditor(
+  { resource, workspaceId, editorKind, onDirtyChange, onSaved, onStatus, onRegisterSaveHandler },
+  ref
+) {
   const { tr, locale } = useRendererI18n();
   const initialLanguage = editorKind === "json" ? "json" : languageForPath(resource.pathRel);
   const [content, setContent] = useState(resource.initialText ?? "");
@@ -253,14 +261,20 @@ export function TextResourceEditor({ resource, workspaceId, editorKind, onDirtyC
     setUserActionStatus(nextStatus, tr("已清理空白 {path}", { path: resource.pathRel }));
   };
 
-  const dispatchEditorCommand = (command: (target: EditorView) => boolean) => {
+  const dispatchEditorCommand = (command: (target: EditorView) => boolean): boolean => {
     const view = editorRef.current?.view;
     if (!view) {
-      return;
+      return false;
     }
-    command(view);
+    const handled = command(view);
     view.focus();
+    return handled;
   };
+
+  useImperativeHandle(ref, () => ({
+    undoEdit: () => dispatchEditorCommand(undo),
+    redoEdit: () => dispatchEditorCommand(redo)
+  }));
 
   const announceEditorOption = (label: string) => {
     setUserActionStatus(statusForContent(contentRef.current, language, label, resource.pathRel, tr, locale), `${label} ${resource.pathRel}`);
@@ -377,7 +391,7 @@ export function TextResourceEditor({ resource, workspaceId, editorKind, onDirtyC
       </footer>
     </div>
   );
-}
+});
 
 function ResourceToolbarButton({ title, ariaLabel, icon, active, pressed, primary, disabled, onClick }: { title: string; ariaLabel?: string; icon: ReactNode; active?: boolean; pressed?: boolean; primary?: boolean; disabled?: boolean; onClick: () => void }) {
   return (
@@ -566,10 +580,14 @@ function statusForContent(content: string, language: TextLanguageId, okLabel?: s
 
 function parseJsonDocument(content: string): { ok: true; value: unknown } | { ok: false; error: Error } {
   try {
-    return { ok: true, value: JSON.parse(content) as unknown };
+    return { ok: true, value: JSON.parse(stripLeadingBom(content)) as unknown };
   } catch (error) {
     return { ok: false, error: error instanceof Error ? error : new Error("无法解析 JSON") };
   }
+}
+
+export function stripLeadingBom(content: string): string {
+  return content.charCodeAt(0) === 0xfeff ? content.slice(1) : content;
 }
 
 function jsonIndent(value: JsonIndentValue): number | string {

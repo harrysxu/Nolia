@@ -1,4 +1,4 @@
-import { clipboard, shell, ipcMain } from "electron";
+import { BrowserWindow, clipboard, shell, ipcMain, type IpcMainInvokeEvent } from "electron";
 import type { ZodType } from "zod";
 
 import {
@@ -61,8 +61,12 @@ export function registerIpcHandlers(services: IpcServices): void {
       logsDirectory: services.diagnostics.logRoot
     }
   }));
-  handle(IpcChannels.workspaceOpen, WorkspaceOpenRequestSchema, (request) => services.workspaces.openWorkspace(request));
-  handle(IpcChannels.workspaceCreate, WorkspaceOpenRequestSchema, (request) => services.workspaces.createWorkspace(request));
+  handle(IpcChannels.workspaceOpen, WorkspaceOpenRequestSchema, (request, event) =>
+    services.workspaces.openWorkspace(request, BrowserWindow.fromWebContents(event.sender) ?? undefined)
+  );
+  handle(IpcChannels.workspaceCreate, WorkspaceOpenRequestSchema, (request, event) =>
+    services.workspaces.createWorkspace(request, BrowserWindow.fromWebContents(event.sender) ?? undefined)
+  );
   handle(IpcChannels.workspaceListRecent, EmptySchema, () => services.workspaces.listRecentWorkspaces());
   handle(IpcChannels.workspaceRemoveRecent, WorkspaceRemoveRecentRequestSchema, (request) => services.workspaces.removeRecentWorkspace(request));
   handle(IpcChannels.workspaceListTags, WorkspaceListTagsRequestSchema, (request) => {
@@ -96,8 +100,12 @@ export function registerIpcHandlers(services: IpcServices): void {
   });
 
   handle(IpcChannels.attachmentImport, AttachmentImportRequestSchema, (request) => services.attachments.importAttachment(request));
-  handle(IpcChannels.attachmentPickImage, AttachmentPickImageRequestSchema, (request) => services.attachments.pickImage(request));
-  handle(IpcChannels.exportDocument, ExportDocumentRequestSchema, (request) => services.exporter.exportDocument(request));
+  handle(IpcChannels.attachmentPickImage, AttachmentPickImageRequestSchema, (request, event) =>
+    services.attachments.pickImage(request, BrowserWindow.fromWebContents(event.sender) ?? undefined)
+  );
+  handle(IpcChannels.exportDocument, ExportDocumentRequestSchema, (request, event) =>
+    services.exporter.exportDocument(request, BrowserWindow.fromWebContents(event.sender) ?? undefined)
+  );
   handle(IpcChannels.clipboardWriteRich, ClipboardWriteRichRequestSchema, (request) => {
     clipboard.write({ html: request.html, text: request.text });
     return { ok: true };
@@ -119,10 +127,10 @@ export function registerIpcHandlers(services: IpcServices): void {
 function handle<TInput, TResult>(
   channel: string,
   schema: ZodType<TInput>,
-  handler: (input: TInput) => Promise<TResult> | TResult
+  handler: (input: TInput, event: IpcMainInvokeEvent) => Promise<TResult> | TResult
 ): void {
-  ipcMain.handle(channel, async (_event, raw: unknown) => {
+  ipcMain.handle(channel, async (event, raw: unknown) => {
     const input = schema.parse(raw ?? {});
-    return handler(input);
+    return handler(input, event);
   });
 }

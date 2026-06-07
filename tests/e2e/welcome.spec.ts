@@ -2,6 +2,9 @@ import { expect, test, type Locator } from "@playwright/test";
 import type { AppSettings, FileTreeNode, ParsedDocument, RecentWorkspace, WorkspaceInfo } from "../../src/shared/types";
 import { installMockNolia } from "./helpers/mockNolia";
 
+const shortcutModifier = process.platform === "darwin" ? "Meta" : "Control";
+const shortcut = (key: string) => `${shortcutModifier}+${key}`;
+
 const settings: AppSettings = {
   language: "zh-CN",
   theme: "light",
@@ -374,7 +377,16 @@ test("settings apply theme, focus, and editor width preferences", async ({ page 
 
     window.nolia = {
       workspace: {
-        bootstrap: async () => ({ activeWorkspace: workspace, recentWorkspaces: [], settings: mutableSettings }),
+        bootstrap: async () => ({
+          activeWorkspace: workspace,
+          recentWorkspaces: [],
+          settings: mutableSettings,
+          appInfo: {
+            platform: "linux",
+            pluginDirectory: "/tmp/nolia-full-selftest/plugins",
+            logsDirectory: "/tmp/nolia-full-selftest/logs"
+          }
+        }),
         open: async () => workspace,
         create: async () => workspace,
         listRecent: async () => [],
@@ -452,7 +464,7 @@ test("settings apply theme, focus, and editor width preferences", async ({ page 
   });
   expect(pluginSafeModeRow.bottom).toBeLessThan(externalPluginHeader.top);
   await expect(settingsDialog.locator(".plugin-settings header").getByText("外部插件", { exact: true })).toBeVisible();
-  await expect(settingsDialog.getByText("插件目录：~/Library/Application Support/Nolia/plugins")).toBeVisible();
+  await expect(settingsDialog.getByText("插件目录：/tmp/nolia-full-selftest/plugins")).toBeVisible();
   await expect(settingsDialog.locator(".plugin-settings header").getByText("内置扩展", { exact: true })).toBeVisible();
   const dialogBoxAfter = await settingsDialog.locator(".settings-dialog").evaluate((element) => {
     const box = element.getBoundingClientRect();
@@ -560,7 +572,7 @@ test("split source typing keeps latest text while parse and autosave resolve out
   const source = page.locator(".split-editor .source-editor .cm-content");
   await expect(source).toBeVisible();
   await source.click();
-  await page.keyboard.press("Meta+End");
+  await page.keyboard.press(shortcut("End"));
   await page.keyboard.type("a");
   await page.waitForTimeout(70);
   await page.keyboard.type("bc");
@@ -911,7 +923,7 @@ test("workspace shell creates notes without native dialogs", async ({ page }) =>
   expect(sourceContentWidth).toBeLessThanOrEqual(sourceEditorWidth);
 
   await page.locator(".cm-content").click();
-  await page.keyboard.press("Meta+End");
+  await page.keyboard.press(shortcut("End"));
   await page.getByRole("button", { name: "链接" }).click();
   await page.getByRole("textbox", { name: "链接文本" }).fill("Docs");
   await page.getByRole("textbox", { name: "链接地址" }).fill("https://example.com/docs");
@@ -966,7 +978,7 @@ test("workspace shell creates notes without native dialogs", async ({ page }) =>
   const textCode = page.getByTestId("builtin-text-editor").locator(".cm-content");
   await expect(textCode).toContainText("Plain text resource");
   await textCode.click();
-  await page.keyboard.press("Meta+A");
+  await page.keyboard.press(shortcut("A"));
   await page.keyboard.insertText("Plain text resource\nEdited in text editor.");
   await expect.poll(() => page.evaluate(() => (window as Window & { __savedTextContent?: string }).__savedTextContent)).toBe("Plain text resource\nEdited in text editor.");
   await expect(page.getByRole("toolbar", { name: "Markdown 工具" })).toHaveCount(0);
@@ -1120,7 +1132,7 @@ test("immersive mode supports menu toggling and direct system Markdown files", a
       ["alpha.md", "# Alpha\n\nWorkspace body.\n"]
     ]);
     const externalFiles = new Map<string, string>([
-      ["/tmp/direct-note.md", "# Direct\n\nOpened from Finder.\n"]
+      ["/tmp/direct-note.md", "# Direct\n\nOpened from the system file manager.\n"]
     ]);
     const testWindow = window as Window & {
       __emitAppCommand?: (command: string) => void;
@@ -1258,9 +1270,9 @@ test("immersive mode supports menu toggling and direct system Markdown files", a
 
   await page.evaluate(() => (window as Window & { __emitAppCommand?: (command: string) => void }).__emitAppCommand?.("mode.source"));
   await page.locator(".cm-content").click();
-  await page.keyboard.press("Meta+A");
+  await page.keyboard.press(shortcut("A"));
   await page.keyboard.type("# Direct Changed\n\nSaved as one file.\n");
-  await page.keyboard.press("Meta+S");
+  await page.keyboard.press(shortcut("S"));
   await expect.poll(() => page.evaluate(() => (window as Window & { __externalSaved?: string }).__externalSaved)).toContain("Direct Changed");
 
   await page.evaluate(() => (window as Window & { __emitAppCommand?: (command: string) => void }).__emitAppCommand?.("view.immersive.toggle"));
@@ -1355,7 +1367,7 @@ test("wysiwyg keeps Markdown list and code block editing behavior", async ({ pag
 
   await editor.click();
   await page.keyboard.type("link text");
-  await page.keyboard.press("Meta+A");
+  await page.keyboard.press(shortcut("A"));
   await expect(page.locator(".statusbar")).toContainText("选中");
   await expect(page.getByRole("toolbar", { name: "文本选择工具" })).toHaveCount(0);
   const copiedText = await editor.evaluate((element) => {
@@ -1379,7 +1391,7 @@ test("wysiwyg keeps Markdown list and code block editing behavior", async ({ pag
   await page.getByRole("button", { name: "确定" }).click();
   await expect(editor.locator("a", { hasText: "OpenAI Docs" })).toHaveAttribute("href", "https://openai.com/docs");
 
-  await page.keyboard.press("Meta+A");
+  await page.keyboard.press(shortcut("A"));
   await page.keyboard.press("Backspace");
   await editor.evaluate((element) => {
     const clipboardData = new DataTransfer();
@@ -1389,7 +1401,7 @@ test("wysiwyg keeps Markdown list and code block editing behavior", async ({ pag
   await expect(editor).toContainText("粘贴第一行");
   await expect(editor).toContainText("粘贴第二行");
 
-  await page.keyboard.press("Meta+A");
+  await page.keyboard.press(shortcut("A"));
   await page.keyboard.press("Backspace");
   await editor.evaluate((element) => {
     const clipboardData = new DataTransfer();
@@ -1399,12 +1411,12 @@ test("wysiwyg keeps Markdown list and code block editing behavior", async ({ pag
   await expect(editor.locator("ul[data-type='taskList'] li[data-checked]")).toHaveCount(2);
   await expect(editor.locator("pre code")).toContainText("const value = 1;");
 
-  await page.keyboard.press("Meta+A");
+  await page.keyboard.press(shortcut("A"));
   await page.keyboard.press("Backspace");
   await page.getByRole("button", { name: "图片" }).click();
   await expect(editor.locator("img")).toHaveAttribute("src", "nolia-asset://workspace/ws_wysiwyg/assets/mock.png");
 
-  await page.keyboard.press("Meta+A");
+  await page.keyboard.press(shortcut("A"));
   await page.keyboard.press("Backspace");
   const tableButton = page.getByRole("button", { name: "表格" });
   const tableButtonBox = await tableButton.boundingBox();
@@ -1448,7 +1460,7 @@ test("wysiwyg keeps Markdown list and code block editing behavior", async ({ pag
   await expect(page.getByRole("menuitem", { name: "在右侧新增列" })).toHaveCount(0);
   await page.locator(".wysiwyg-editor").evaluate((element) => element.querySelector("[data-test-filler='table-scroll']")?.remove());
 
-  await page.keyboard.press("Meta+A");
+  await page.keyboard.press(shortcut("A"));
   await page.keyboard.press("Backspace");
   await page.getByRole("button", { name: "公式" }).click();
   await expect(editor.locator(".math-block .katex")).toContainText("E");
@@ -1457,7 +1469,7 @@ test("wysiwyg keeps Markdown list and code block editing behavior", async ({ pag
   await expect(editor.locator(".math-block .math-block-input")).toBeHidden();
 
   await editor.click();
-  await page.keyboard.press("Meta+A");
+  await page.keyboard.press(shortcut("A"));
   await page.keyboard.press("Backspace");
   await page.keyboard.type("$$");
   await page.keyboard.press("Enter");
@@ -1466,7 +1478,7 @@ test("wysiwyg keeps Markdown list and code block editing behavior", async ({ pag
   await expect(editor.locator(".math-block .math-block-input")).toBeVisible();
 
   await editor.click();
-  await page.keyboard.press("Meta+A");
+  await page.keyboard.press(shortcut("A"));
   await page.keyboard.press("Backspace");
   await page.getByRole("button", { name: "复选框" }).click();
   await page.keyboard.type("checkbox text");
@@ -1475,14 +1487,14 @@ test("wysiwyg keeps Markdown list and code block editing behavior", async ({ pag
   await page.getByRole("button", { name: "MD", exact: true }).click();
   await expect(page.locator(".cm-content")).toContainText("- [ ] checkbox text");
   await page.locator(".cm-content").click();
-  await page.keyboard.press("Meta+A");
+  await page.keyboard.press(shortcut("A"));
   await page.keyboard.insertText("- [ ]\n- [ ]\n- [ ]\n");
   await page.getByRole("button", { name: "编辑", exact: true }).click();
   await expect(editor.locator("ul[data-type='taskList'] li[data-checked]")).toHaveCount(3);
   await expect(editor).not.toContainText("[ ]");
 
   await editor.click();
-  await page.keyboard.press("Meta+A");
+  await page.keyboard.press(shortcut("A"));
   await page.keyboard.press("Backspace");
   await page.getByRole("button", { name: "无序列表" }).click();
   await page.keyboard.type("one");
@@ -1490,7 +1502,7 @@ test("wysiwyg keeps Markdown list and code block editing behavior", async ({ pag
   await page.keyboard.type("two");
   await expect(editor.locator("li")).toHaveCount(2);
 
-  await page.keyboard.press("Meta+A");
+  await page.keyboard.press(shortcut("A"));
   await page.keyboard.press("Backspace");
   await page.getByRole("button", { name: "代码块", exact: true }).click();
   await expect(editor.locator("pre code")).toHaveCount(1);

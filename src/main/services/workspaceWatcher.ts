@@ -8,6 +8,7 @@ import { isAlwaysIgnoredWorkspacePath, toWorkspaceRelative } from "../utils/file
 export class WorkspaceWatcher {
   private watcher?: FSWatcher;
   private readonly pending = new Map<string, NodeJS.Timeout>();
+  private readonly activeTasks = new Set<Promise<void>>();
 
   constructor(
     private readonly rootPath: string,
@@ -37,6 +38,7 @@ export class WorkspaceWatcher {
     }
     this.pending.clear();
     await this.watcher?.close();
+    await Promise.allSettled([...this.activeTasks]);
   }
 
   private queueIndex(filePath: string): void {
@@ -66,17 +68,18 @@ export class WorkspaceWatcher {
       pathRel,
       setTimeout(() => {
         this.pending.delete(pathRel);
-        void task(pathRel);
+        const activeTask = task(pathRel).finally(() => {
+          this.activeTasks.delete(activeTask);
+        });
+        this.activeTasks.add(activeTask);
       }, 250)
     );
   }
 
   private shouldIgnore(filePath: string): boolean {
-    if (filePath.includes(`/${WORKSPACE_META_DIR}/`)) {
-      return true;
-    }
     try {
-      return isAlwaysIgnoredWorkspacePath(toWorkspaceRelative(this.rootPath, filePath));
+      const pathRel = toWorkspaceRelative(this.rootPath, filePath);
+      return pathRel === WORKSPACE_META_DIR || pathRel.startsWith(`${WORKSPACE_META_DIR}/`) || isAlwaysIgnoredWorkspacePath(pathRel);
     } catch {
       return false;
     }

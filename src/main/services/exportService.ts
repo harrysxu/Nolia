@@ -1,6 +1,6 @@
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
-import { BrowserWindow, dialog } from "electron";
+import { BrowserWindow, dialog, type SaveDialogOptions } from "electron";
 
 import type { ExportDocumentRequest } from "../../shared/ipc";
 import { APP_NAME, WORKSPACE_DIRECTORIES, WORKSPACE_META_DIR } from "../../shared/constants";
@@ -17,7 +17,7 @@ export class ExportService {
     this.tr = createTranslator(locale);
   }
 
-  async exportDocument(request: ExportDocumentRequest): Promise<{
+  async exportDocument(request: ExportDocumentRequest, parentWindow?: BrowserWindow): Promise<{
     status: "completed" | "failed";
     outputPath?: string;
     warnings: string[];
@@ -30,10 +30,11 @@ export class ExportService {
       runtime.info.rootPath,
       `${path.basename(normalized, path.extname(normalized))}.${request.format === "markdown" ? "md" : request.format}`
     );
-    const result = await dialog.showSaveDialog({
+    const options: SaveDialogOptions = {
       title: this.tr("导出文档对话框"),
       defaultPath
-    });
+    };
+    const result = parentWindow && !parentWindow.isDestroyed() ? await dialog.showSaveDialog(parentWindow, options) : await dialog.showSaveDialog(options);
     if (result.canceled || !result.filePath) {
       return { status: "failed", warnings: [this.tr("已取消导出")] };
     }

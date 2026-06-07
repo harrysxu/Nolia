@@ -11,7 +11,7 @@ Nolia is an Electron + React + TypeScript desktop app. Source lives in `src/`:
 - `tests/`: Vitest unit tests; `tests/e2e/` contains Playwright browser tests.
 - `docs/`: consolidated user, plugin, architecture, release, legal, and English help docs.
 - `examples/plugins/`: local plugin examples.
-- `build/`: packaging scripts and macOS signing assets.
+- `build/`: packaging scripts, icons, and platform-specific signing/resource assets.
 
 Treat `dist/`, `release/`, `release-arch-compare/`, `test-results/`, `coverage/`, `playwright-report/`, `output/`, and `node_modules/` as generated output.
 
@@ -25,6 +25,8 @@ Treat `dist/`, `release/`, `release-arch-compare/`, `test-results/`, `coverage/`
 - `npm test`: run Vitest unit tests matching `tests/**/*.test.ts`.
 - `npm run e2e`: run Playwright tests in `tests/e2e/`.
 - `npm run package:unsigned`: create an unsigned macOS package.
+- `npm run package:win`: create Windows installer and zip artifacts.
+- `npm run package:linux`: create Linux AppImage/deb artifacts.
 
 Run `npm run typecheck`, `npm run lint`, and relevant tests before submission.
 

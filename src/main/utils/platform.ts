@@ -45,7 +45,7 @@ export function createMainWindowOptions(
     minWidth: 780,
     minHeight: 520,
     show: false,
-    ...(platform === "linux" && windowIconPath ? { icon: windowIconPath } : {}),
+    ...((platform === "linux" || platform === "win32") && windowIconPath ? { icon: windowIconPath } : {}),
     ...(platform === "darwin" ? {
       titleBarStyle: "hiddenInset" as const,
       trafficLightPosition: { x: 16, y: 16 }
@@ -66,13 +66,14 @@ export function resolveWindowIconPath(
   cwd = process.cwd(),
   exists: (filePath: string) => boolean = fs.existsSync
 ): string | undefined {
-  if (platform !== "linux") {
+  if (platform !== "linux" && platform !== "win32") {
     return undefined;
   }
 
+  const iconFileName = platform === "win32" ? "icon.ico" : "icon.png";
   const candidates = [
-    path.join(resourcesPath, "assets", "icon.png"),
-    path.join(cwd, "build", "icon.png")
+    path.join(resourcesPath, "assets", iconFileName),
+    path.join(cwd, "build", iconFileName)
   ];
   return candidates.find((candidate) => exists(candidate));
 }
@@ -108,6 +109,9 @@ export function acceleratorForCommand(command: string | undefined, platform: Nod
     case "mode.split":
       return acceleratorForModifier("Alt+3", platform);
     case "view.immersive.toggle":
+      if (platform === "win32") {
+        return "Control+Alt+I";
+      }
       return acceleratorForModifier("Shift+I", platform);
     case "view.toolbar.toggle":
       return acceleratorForModifier("Shift+T", platform);

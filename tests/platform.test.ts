@@ -20,6 +20,7 @@ describe("platform helpers", () => {
     expect(options.webPreferences?.preload).toBe("/tmp/preload.js");
 
     expect(acceleratorForCommand("document.save", "darwin")).toBe("Command+S");
+    expect(acceleratorForCommand("view.immersive.toggle", "darwin")).toBe("Command+Shift+I");
     expect(acceleratorForCommand("view.lineNumbers.toggle", "darwin")).toBe("Command+Shift+L");
     expect(acceleratorForFullScreen("darwin")).toBe("Control+Command+F");
   });
@@ -41,14 +42,43 @@ describe("platform helpers", () => {
     expect(options.height).toBe(700);
 
     expect(acceleratorForCommand("document.save", "linux")).toBe("Control+S");
+    expect(acceleratorForCommand("view.immersive.toggle", "linux")).toBe("Control+Shift+I");
     expect(acceleratorForCommand("view.lineNumbers.toggle", "linux")).toBe("Control+Shift+L");
     expect(acceleratorForFullScreen("linux")).toBe("F11");
   });
 
-  it("resolves Linux window icons from packaged resources before development assets", () => {
+  it("uses Windows-native state paths, window chrome, icons, and shortcuts", () => {
+    expect(resolveDiagnosticsLogRoot("C:\\Users\\test", "win32", { LOCALAPPDATA: "C:\\Users\\test\\AppData\\Local" })).toBe(
+      path.join("C:\\Users\\test\\AppData\\Local", "Nolia", "Logs")
+    );
+    expect(resolveDiagnosticsLogRoot("C:\\Users\\test", "win32", { APPDATA: "C:\\Users\\test\\AppData\\Roaming" })).toBe(
+      path.join("C:\\Users\\test\\AppData\\Roaming", "Nolia", "Logs")
+    );
+
+    const options = createMainWindowOptions(
+      { bounds: { x: 11, y: 22, width: 900, height: 700 } },
+      "win32",
+      "C:\\preload.js",
+      "C:\\icon.ico"
+    );
+    expect(options.titleBarStyle).toBeUndefined();
+    expect(options.trafficLightPosition).toBeUndefined();
+    expect(options.icon).toBe("C:\\icon.ico");
+    expect(options.width).toBe(900);
+    expect(options.height).toBe(700);
+
+    expect(acceleratorForCommand("document.save", "win32")).toBe("Control+S");
+    expect(acceleratorForCommand("view.immersive.toggle", "win32")).toBe("Control+Alt+I");
+    expect(acceleratorForCommand("view.lineNumbers.toggle", "win32")).toBe("Control+Shift+L");
+    expect(acceleratorForFullScreen("win32")).toBe("F11");
+  });
+
+  it("resolves Linux and Windows window icons from packaged resources before development assets", () => {
     const existing = new Set([
       path.join("/opt/Nolia/resources", "assets", "icon.png"),
-      path.join("/workspace/Nolia", "build", "icon.png")
+      path.join("/workspace/Nolia", "build", "icon.png"),
+      path.join("C:\\Program Files\\Nolia", "resources", "assets", "icon.ico"),
+      path.join("C:\\workspace\\Nolia", "build", "icon.ico")
     ]);
 
     expect(resolveWindowIconPath(
@@ -72,5 +102,20 @@ describe("platform helpers", () => {
       "/workspace/Nolia",
       () => true
     )).toBeUndefined();
+
+    expect(resolveWindowIconPath(
+      "win32",
+      path.join("C:\\Program Files\\Nolia", "resources"),
+      "C:\\workspace\\Nolia",
+      (filePath) => existing.has(filePath)
+    )).toBe(path.join("C:\\Program Files\\Nolia", "resources", "assets", "icon.ico"));
+
+    existing.delete(path.join("C:\\Program Files\\Nolia", "resources", "assets", "icon.ico"));
+    expect(resolveWindowIconPath(
+      "win32",
+      path.join("C:\\Program Files\\Nolia", "resources"),
+      "C:\\workspace\\Nolia",
+      (filePath) => existing.has(filePath)
+    )).toBe(path.join("C:\\workspace\\Nolia", "build", "icon.ico"));
   });
 });

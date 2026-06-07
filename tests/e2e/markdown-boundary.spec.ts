@@ -1,6 +1,9 @@
 import { expect, test, type Page } from "@playwright/test";
 import type { AppSettings, FileTreeNode, ParsedDocument, WorkspaceInfo } from "../../src/shared/types";
 
+const shortcutModifier = process.platform === "darwin" ? "Meta" : "Control";
+const shortcut = (key: string) => `${shortcutModifier}+${key}`;
+
 const settings: AppSettings = {
   language: "zh-CN",
   theme: "light",
@@ -164,7 +167,7 @@ test("source toolbar inserts and refreshes a Markdown table of contents", async 
   const withToc = await sourceText(page);
   await setSourceText(page, withToc.replace("# Alpha", "# Renamed"));
   await expect.poll(() => sourceText(page)).toContain("# Renamed");
-  await page.keyboard.press("Meta+S");
+  await page.keyboard.press(shortcut("S"));
 
   await expect
     .poll(() => page.evaluate(() => (window as typeof window & { __getFileContent?: (pathRel: string) => string }).__getFileContent?.("toc.md") ?? ""))
@@ -228,7 +231,7 @@ test("source editor inserts code blocks at the code body and isolates undo histo
   await openWorkspaceNote(page, "next.md");
   await expect.poll(() => sourceText(page)).toBe("# Next\n\nKeep this content.");
   await page.locator(".cm-content").click();
-  await page.keyboard.press("Meta+Z");
+  await page.keyboard.press(shortcut("Z"));
   await expect.poll(() => sourceText(page)).toBe("# Next\n\nKeep this content.");
 });
 
@@ -345,7 +348,7 @@ test("WYSIWYG block source editors stay editable after clearing and typing Markd
   await expect(mathSource).toBeFocused();
   await replaceFocusedText(page, "$$\nF = ma\n$$");
   await expect(mathSource).toHaveValue("$$\nF = ma\n$$");
-  await page.keyboard.press("Meta+Enter");
+  await page.keyboard.press(shortcut("Enter"));
   await expect(mathSource).toBeHidden();
   await expect(mathBlock.locator(".katex")).toContainText("F");
 
@@ -599,7 +602,7 @@ test("WYSIWYG exposes direct editors for image and inline-only Markdown syntax",
   await expect(imageSource).toBeVisible();
   await expect(imageSource).toBeFocused();
   await expect(imageSource).toHaveValue('![old alt](assets/mock.png "old title")');
-  await page.keyboard.press("Meta+A");
+  await page.keyboard.press(shortcut("A"));
   await page.keyboard.press("Backspace");
   await expect(imageSource).toHaveValue("");
   await expect(imageSource).toBeFocused();
@@ -1297,21 +1300,21 @@ async function assertFullWysiwygRender(page: Page) {
 
 async function copyAllFromSource(page: Page) {
   await page.locator(".cm-content").click();
-  await page.keyboard.press("Meta+A");
-  await page.keyboard.press("Meta+C");
+  await page.keyboard.press(shortcut("A"));
+  await page.keyboard.press(shortcut("C"));
 }
 
 async function pasteIntoSource(page: Page) {
   await page.locator(".cm-content").click();
-  await page.keyboard.press("Meta+A");
+  await page.keyboard.press(shortcut("A"));
   await page.keyboard.press("Backspace");
-  await page.keyboard.press("Meta+V");
+  await page.keyboard.press(shortcut("V"));
 }
 
 async function pasteMarkdownIntoWysiwyg(page: Page, markdown: string) {
   const editor = page.locator(".ProseMirror");
   await editor.click();
-  await page.keyboard.press("Meta+A");
+  await page.keyboard.press(shortcut("A"));
   await page.keyboard.press("Backspace");
   await editor.evaluate((element, text) => {
     const clipboardData = new DataTransfer();
@@ -1323,7 +1326,7 @@ async function pasteMarkdownIntoWysiwyg(page: Page, markdown: string) {
 async function copyAllFromWysiwyg(page: Page): Promise<{ html: string; text: string }> {
   const editor = page.locator(".ProseMirror");
   await editor.click();
-  await page.keyboard.press("Meta+A");
+  await page.keyboard.press(shortcut("A"));
   return editor.evaluate((element) => {
     const clipboardData = new DataTransfer();
     const event = new ClipboardEvent("copy", { bubbles: true, cancelable: true, clipboardData });
@@ -1338,7 +1341,7 @@ async function copyAllFromWysiwyg(page: Page): Promise<{ html: string; text: str
 async function pasteRichIntoWysiwyg(page: Page, clipboard: { html: string; text: string }) {
   const editor = page.locator(".ProseMirror");
   await editor.click();
-  await page.keyboard.press("Meta+A");
+  await page.keyboard.press(shortcut("A"));
   await page.keyboard.press("Backspace");
   await editor.evaluate((element, data) => {
     const clipboardData = new DataTransfer();
@@ -1351,7 +1354,7 @@ async function pasteRichIntoWysiwyg(page: Page, clipboard: { html: string; text:
 }
 
 async function replaceFocusedText(page: Page, text: string) {
-  await page.keyboard.press("Meta+A");
+  await page.keyboard.press(shortcut("A"));
   await page.keyboard.press("Backspace");
   await page.keyboard.insertText(text);
 }

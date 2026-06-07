@@ -1,6 +1,6 @@
 # Nolia
 
-Nolia is a macOS local-first Markdown knowledge workstation for writing notes, organizing project documents, editing developer-friendly text resources, and extending the app with local plugins.
+Nolia is a local-first Markdown knowledge workstation for writing notes, organizing project documents, editing developer-friendly text resources, and extending the app with local plugins.
 
 The app keeps user documents in the workspace folder selected by the user. Markdown files remain the primary data source; indexes, previews, and caches are derived data that can be rebuilt.
 
@@ -42,6 +42,18 @@ Unsigned local macOS build:
 
 ```sh
 npm run package:unsigned
+```
+
+Windows installer and zip build:
+
+```sh
+npm run package:win
+```
+
+Linux build:
+
+```sh
+npm run package:linux
 ```
 
 Per-architecture comparison builds:

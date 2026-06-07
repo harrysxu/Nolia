@@ -4,7 +4,7 @@ import { app, BrowserWindow, Menu, shell, type MenuItemConstructorOptions } from
 
 import { getBuiltInMenuContributions } from "../shared/builtinExtensions";
 import { APP_NAME } from "../shared/constants";
-import { createTranslator } from "../shared/i18n";
+import { createTranslator, type Translator } from "../shared/i18n";
 import type { MenuContribution } from "../shared/extensions";
 import type { ResolvedLocale } from "../shared/types";
 import { acceleratorForCommand, acceleratorForFullScreen, acceleratorForModifier } from "./utils/platform";
@@ -43,6 +43,7 @@ export function installApplicationMenu(
   const appMenuItems = menuItemsForLocation(menuContributions, "app", send);
   const fileMenuItems = menuItemsForLocation(menuContributions, "file", send);
   const viewMenuItems = menuItemsForLocation(menuContributions, "view", send);
+  const editMenuItems = editMenuItemsForPlatform(process.platform, tr, send);
   const template: MenuItemConstructorOptions[] = [
     {
       label: APP_NAME,
@@ -68,15 +69,7 @@ export function installApplicationMenu(
     },
     {
       label: tr("编辑菜单"),
-      submenu: [
-        { label: tr("撤销"), role: "undo" },
-        { label: tr("重做"), role: "redo" },
-        { type: "separator" },
-        { label: tr("剪切"), role: "cut" },
-        { label: tr("复制"), role: "copy" },
-        { label: tr("粘贴"), role: "paste" },
-        { label: tr("全选"), role: "selectAll" }
-      ]
+      submenu: editMenuItems
     },
     {
       label: tr("视图"),
@@ -138,6 +131,31 @@ function menuItemsForLocation(menuContributions: MenuContribution[], location: M
     previousGroup = item.group;
   }
   return trimMenuSeparators(menuItems);
+}
+
+function editMenuItemsForPlatform(platform: NodeJS.Platform, tr: Translator, send: (command: string) => void): MenuItemConstructorOptions[] {
+  const nativeEditItems: MenuItemConstructorOptions[] = [
+    { label: tr("撤销"), role: "undo" },
+    { label: tr("重做"), role: "redo" },
+    { type: "separator" },
+    { label: tr("剪切"), role: "cut" },
+    { label: tr("复制"), role: "copy" },
+    { label: tr("粘贴"), role: "paste" },
+    { label: tr("全选"), role: "selectAll" }
+  ];
+  if (platform !== "win32") {
+    return nativeEditItems;
+  }
+
+  return [
+    { label: tr("撤销"), accelerator: acceleratorForModifier("Z", platform), click: () => send("edit.undo") },
+    { label: tr("重做"), accelerator: acceleratorForModifier("Y", platform), click: () => send("edit.redo") },
+    { type: "separator" },
+    { label: tr("剪切"), role: "cut" },
+    { label: tr("复制"), role: "copy" },
+    { label: tr("粘贴"), role: "paste" },
+    { label: tr("全选"), role: "selectAll" }
+  ];
 }
 
 function trimMenuSeparators(items: MenuItemConstructorOptions[]): MenuItemConstructorOptions[] {

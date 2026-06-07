@@ -205,10 +205,14 @@ button {
   align-items: center;
   justify-content: space-between;
   gap: 16px;
-  padding: 0 14px 0 92px;
+  padding: 0 14px;
   border-bottom: 1px solid var(--border);
   background: var(--titlebar-bg);
   -webkit-app-region: drag;
+}
+
+.app-shell.is-platform-darwin .titlebar {
+  padding-left: 92px;
 }
 
 .titlebar button,
@@ -294,17 +298,15 @@ button {
   justify-content: center;
 }
 
-.nav-avatar span {
+.nav-avatar-logo {
   width: 38px;
   height: 38px;
-  display: grid;
-  place-items: center;
   border-radius: 999px;
   background: var(--avatar-bg);
   border: 1px solid var(--border);
-  color: var(--accent);
-  font-size: 13px;
-  font-weight: 700;
+  box-shadow: 0 8px 18px rgba(15, 23, 42, 0.12);
+  display: block;
+  object-fit: contain;
 }
 
 .app-nav-main {

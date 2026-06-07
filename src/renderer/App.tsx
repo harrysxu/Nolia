@@ -84,10 +84,11 @@ import type { AppSettings, BacklinksResponse, EditorMode, FileBinaryReadResponse
 import { CommandPalette, type PaletteAction } from "./components/CommandPalette";
 import { MarkdownPreview } from "./components/MarkdownPreview";
 import { SourceEditor } from "./components/SourceEditor";
-import { TextResourceEditor } from "./components/TextResourceEditor";
+import { TextResourceEditor, type TextResourceEditorHandle } from "./components/TextResourceEditor";
 import { WelcomeScreen } from "./components/WelcomeScreen";
 import { WysiwygEditor, type WysiwygEditorHandle } from "./components/WysiwygEditor";
 import type { MarkdownOpenTarget } from "./components/markdownOpenTarget";
+import noliaIconUrl from "../../build/icon.svg";
 import { RendererI18nProvider, useRendererI18n } from "./app/i18n";
 import { useUiStore } from "./app/store";
 import type {
@@ -239,6 +240,7 @@ export function App() {
   const htmlDraftsRef = useRef<Map<string, string>>(new Map());
   const pluginCommandHandlersRef = useRef<Map<string, () => void | Promise<void>>>(new Map());
   const pluginEditorSaveHandlersRef = useRef<Map<string, () => Promise<void>>>(new Map());
+  const runCommandRef = useRef<(command: string) => void | Promise<void>>(() => undefined);
   const theme = useUiStore((state) => state.theme);
   const setTheme = useUiStore((state) => state.setTheme);
   const sidebarView = useUiStore((state) => state.sidebarView);
@@ -489,8 +491,14 @@ export function App() {
 
   useEffect(() => {
     const commandUnsub = window.nolia.events.onAppCommand((command) => {
-      void runCommand(command);
+      void runCommandRef.current(command);
     });
+    return () => {
+      commandUnsub();
+    };
+  }, []);
+
+  useEffect(() => {
     const externalUnsub = window.nolia.events.onExternalFileOpen((filePath) => {
       void handleExternalFileOpen(filePath);
     });
@@ -500,10 +508,9 @@ export function App() {
       }
     });
     return () => {
-      commandUnsub();
       externalUnsub();
     };
-  }, [workspace?.rootPath, openDocs, immersiveMode, toolbarVisible, lineNumbersVisible]);
+  }, [workspace?.rootPath, openDocs, immersiveMode]);
 
   useEffect(() => {
     const updateFromKeyboardEvent = (event: KeyboardEvent) => {
@@ -571,6 +578,8 @@ export function App() {
       "file.new": () => openNewNoteDialog(),
       "document.save": () => saveActiveDocument(),
       "document.export": () => exportActiveDocument(),
+      "edit.undo": () => runEditorHistoryCommand("undo"),
+      "edit.redo": () => runEditorHistoryCommand("redo"),
       "commandPalette.open": () => setCommandPaletteOpen(true),
       "view.files": () => setSidebarView("files"),
       "view.favorites": () => setSidebarView("favorites"),
@@ -588,6 +597,10 @@ export function App() {
     }),
     [workspace?.workspaceId, visibleDocument?.pathRel, immersiveMode, toolbarVisible, lineNumbersVisible, setCommandPaletteOpen, setLineNumbersVisible, setSidebarView, setToolbarVisible]
   );
+
+  useEffect(() => {
+    runCommandRef.current = runCommand;
+  }, [commandHandlers]);
 
   const paletteActions = useMemo<PaletteAction[]>(
     () =>
@@ -653,10 +666,11 @@ export function App() {
 
   const shellTitle = isExternalDocument && visibleDocument ? fileNameFor(visibleDocument.pathRel) : workspace?.name ?? tr("单文件编辑");
   const shellSubtitle = isExternalDocument && visibleDocument ? visibleDocument.filePath ?? visibleDocument.pathRel : workspace?.rootPath;
+  const platformClass = appInfo?.platform ? ` is-platform-${appInfo.platform}` : "";
 
   return (
     <RendererI18nProvider locale={startupLocale}>
-    <div className={`app-shell${focusMode ? " is-focus" : ""}${immersiveMode ? " is-immersive" : ""}${modifiedOpenCursorActive ? " is-modified-open-cursor" : ""}`}>
+    <div className={`app-shell${platformClass}${focusMode ? " is-focus" : ""}${immersiveMode ? " is-immersive" : ""}${modifiedOpenCursorActive ? " is-modified-open-cursor" : ""}`}>
       <CommandPalette
         open={commandPaletteOpen}
         query={commandQuery}
@@ -850,6 +864,7 @@ export function App() {
             document={visibleDocument}
             resource={visibleResource}
             html={activeHtml}
+            platform={appInfo?.platform}
             workspaceId={visibleDocument?.sourceKind === "external" ? undefined : workspace?.workspaceId}
             pluginFileViewers={pluginFileViewers}
             pluginFileEditors={pluginFileEditors}
@@ -928,6 +943,14 @@ export function App() {
     </div>
     </RendererI18nProvider>
   );
+
+  function runEditorHistoryCommand(kind: "undo" | "redo") {
+    const handled = kind === "undo" ? editorPaneRef.current?.undoEdit() : editorPaneRef.current?.redoEdit();
+    if (handled) {
+      return;
+    }
+    document.execCommand(kind);
+  }
 
   function currentDocument(): OpenDocumentTab | undefined {
     return openDocs.find((doc) => doc.pathRel === activePathRel) ?? openDocs[0];
@@ -3125,6 +3148,26 @@ function commandLabel(commandId: string, fallback: string, state: { immersiveMod
   return fallback;
 }
 
+function revealInFileManagerLabel(platform: NodeJS.Platform | undefined, tr = createTranslator("zh-CN")): string {
+  if (platform === "win32") {
+    return tr("在资源管理器中显示");
+  }
+  if (platform === "darwin") {
+    return tr("在访达中显示");
+  }
+  return tr("在文件管理器中显示");
+}
+
+function archiveResourceDescription(platform: NodeJS.Platform | undefined, tr = createTranslator("zh-CN")): string {
+  if (platform === "win32") {
+    return tr("压缩包不会在笔记内解压预览，可以用系统应用打开或在资源管理器中查看。");
+  }
+  if (platform === "darwin") {
+    return tr("压缩包不会在笔记内解压预览，可以用系统应用打开或在访达中查看。");
+  }
+  return tr("压缩包不会在笔记内解压预览，可以用系统应用打开或在文件管理器中查看。");
+}
+
 function isExtensionManifest(value: ExtensionManifest | undefined): value is ExtensionManifest {
   return Boolean(value);
 }
@@ -3570,8 +3613,8 @@ function AppNav({
   const items = panels.filter((panel) => panel.visibleInNav !== false);
   return (
     <nav className="app-nav" aria-label={tr("工作区导航")}>
-      <div className="nav-avatar">
-        <span>XX</span>
+      <div className="nav-avatar" role="img" aria-label="Nolia">
+        <img className="nav-avatar-logo" src={noliaIconUrl} alt="" />
       </div>
       <div className="app-nav-main">
         {items.map((item) => (
@@ -3703,6 +3746,8 @@ type EditorScrollSnapshot = {
 };
 
 type EditorPaneHandle = {
+  undoEdit: () => boolean;
+  redoEdit: () => boolean;
   captureScrollForModeSwitch: () => void;
   jumpToHeading: (line: number, headingIndex: number) => boolean;
 };
@@ -3711,6 +3756,7 @@ const EditorPane = forwardRef<EditorPaneHandle, {
   document?: OpenDocumentTab;
   resource?: ActiveResource;
   html: string;
+  platform?: NodeJS.Platform;
   workspaceId?: string;
   pluginFileViewers: Map<string, RegisteredPluginRenderer<PluginFileViewerContext>>;
   pluginFileEditors: Map<string, RegisteredPluginRenderer<PluginFileEditorContext>>;
@@ -3735,6 +3781,7 @@ const EditorPane = forwardRef<EditorPaneHandle, {
     document,
     resource,
     html,
+    platform,
     workspaceId,
     pluginFileViewers,
     pluginFileEditors,
@@ -3761,6 +3808,7 @@ const EditorPane = forwardRef<EditorPaneHandle, {
   const editorPaneRootRef = useRef<HTMLDivElement>(null);
   const sourceEditorRef = useRef<ReactCodeMirrorRef>(null);
   const wysiwygEditorRef = useRef<WysiwygEditorHandle>(null);
+  const textResourceEditorRef = useRef<TextResourceEditorHandle>(null);
   const splitPreviewRef = useRef<HTMLDivElement>(null);
   const splitScrollSyncLock = useRef<"source" | "preview" | undefined>(undefined);
   const pendingScrollRestoreRef = useRef<EditorScrollSnapshot | undefined>(undefined);
@@ -3799,7 +3847,35 @@ const EditorPane = forwardRef<EditorPaneHandle, {
       onSourceChange(nextSource);
     }
   };
+  const dispatchSourceCommand = (command: (target: NonNullable<ReactCodeMirrorRef["view"]>) => boolean): boolean => {
+    const view = sourceEditorRef.current?.view;
+    if (!view) {
+      return false;
+    }
+    const handled = command(view);
+    view.focus();
+    return handled;
+  };
+  const undoSourceEdit = () => dispatchSourceCommand(undoCodeMirror);
+  const redoSourceEdit = () => dispatchSourceCommand(redoCodeMirror);
+  const runHistoryCommand = (kind: "undo" | "redo"): boolean => {
+    if (resource) {
+      return kind === "undo" ? (textResourceEditorRef.current?.undoEdit() ?? false) : (textResourceEditorRef.current?.redoEdit() ?? false);
+    }
+    if (!document) {
+      return false;
+    }
+    if (document.mode === "wysiwyg") {
+      return kind === "undo" ? (wysiwygEditorRef.current?.undoEdit() ?? false) : (wysiwygEditorRef.current?.redoEdit() ?? false);
+    }
+    if (document.mode === "source" || document.mode === "split") {
+      return kind === "undo" ? undoSourceEdit() : redoSourceEdit();
+    }
+    return false;
+  };
   useImperativeHandle(ref, () => ({
+    undoEdit: () => runHistoryCommand("undo"),
+    redoEdit: () => runHistoryCommand("redo"),
     captureScrollForModeSwitch: () => {
       if (!document) {
         return;
@@ -3821,7 +3897,7 @@ const EditorPane = forwardRef<EditorPaneHandle, {
       }
       return false;
     }
-  }), [document?.mode, document?.pathRel]);
+  }), [document?.mode, document?.pathRel, resource?.pathRel]);
 
   useLayoutEffect(() => {
     if (!document) {
@@ -3866,16 +3942,6 @@ const EditorPane = forwardRef<EditorPaneHandle, {
       }
     };
   }, [document?.mode, document?.pathRel, html]);
-  const dispatchSourceCommand = (command: (target: NonNullable<ReactCodeMirrorRef["view"]>) => boolean) => {
-    const view = sourceEditorRef.current?.view;
-    if (!view) {
-      return;
-    }
-    command(view);
-    view.focus();
-  };
-  const undoSourceEdit = () => dispatchSourceCommand(undoCodeMirror);
-  const redoSourceEdit = () => dispatchSourceCommand(redoCodeMirror);
   const insertSourceImage = async () => {
     if (!workspaceId || !document) {
       return;
@@ -4059,6 +4125,7 @@ const EditorPane = forwardRef<EditorPaneHandle, {
         <PluginResourceEditor
           resource={resource}
           workspaceId={workspaceId}
+          platform={platform}
           pluginId={pluginEditor.pluginId}
           render={pluginEditor.render}
           onReadText={onReadPluginFile}
@@ -4075,6 +4142,7 @@ const EditorPane = forwardRef<EditorPaneHandle, {
     if (resource.editorId === "json.editor.fileEditor") {
       return (
         <BuiltInJsonEditor
+          ref={textResourceEditorRef}
           resource={resource}
           workspaceId={workspaceId}
           onDirtyChange={onPluginEditorDirtyChange}
@@ -4087,6 +4155,7 @@ const EditorPane = forwardRef<EditorPaneHandle, {
     if (resource.editorId === "text.editor.fileEditor") {
       return (
         <BuiltInTextEditor
+          ref={textResourceEditorRef}
           resource={resource}
           workspaceId={workspaceId}
           onDirtyChange={onPluginEditorDirtyChange}
@@ -4101,9 +4170,9 @@ const EditorPane = forwardRef<EditorPaneHandle, {
     }
     const pluginViewer = resource.viewerId ? pluginFileViewers.get(resource.viewerId) : undefined;
     if (pluginViewer) {
-      return <PluginResourceViewer resource={resource} workspaceId={workspaceId} pluginId={pluginViewer.pluginId} render={pluginViewer.render} onReadText={onReadPluginFile} onReadBinary={onReadPluginBinaryFile} />;
+      return <PluginResourceViewer resource={resource} workspaceId={workspaceId} platform={platform} pluginId={pluginViewer.pluginId} render={pluginViewer.render} onReadText={onReadPluginFile} onReadBinary={onReadPluginBinaryFile} />;
     }
-    return <ResourcePreview resource={resource} workspaceId={workspaceId} />;
+    return <ResourcePreview resource={resource} workspaceId={workspaceId} platform={platform} />;
   }
 
   if (!document) {
@@ -4213,22 +4282,30 @@ type BuiltInResourceEditorProps = {
   onRegisterSaveHandler: (pathRel: string, handler: () => Promise<void>) => () => void;
 };
 
-function BuiltInJsonEditor({ resource, workspaceId, onDirtyChange, onSaved, onStatus, onRegisterSaveHandler }: BuiltInResourceEditorProps) {
+const BuiltInJsonEditor = forwardRef<TextResourceEditorHandle, BuiltInResourceEditorProps>(function BuiltInJsonEditor(
+  { resource, workspaceId, onDirtyChange, onSaved, onStatus, onRegisterSaveHandler },
+  ref
+) {
   return (
-    <TextResourceEditor resource={resource} workspaceId={workspaceId} editorKind="json" onDirtyChange={onDirtyChange} onSaved={onSaved} onStatus={onStatus} onRegisterSaveHandler={onRegisterSaveHandler} />
+    <TextResourceEditor ref={ref} resource={resource} workspaceId={workspaceId} editorKind="json" onDirtyChange={onDirtyChange} onSaved={onSaved} onStatus={onStatus} onRegisterSaveHandler={onRegisterSaveHandler} />
   );
-}
+});
 
-function BuiltInTextEditor({ resource, workspaceId, onDirtyChange, onSaved, onStatus, onRegisterSaveHandler }: BuiltInResourceEditorProps) {
+const BuiltInTextEditor = forwardRef<TextResourceEditorHandle, BuiltInResourceEditorProps>(function BuiltInTextEditor(
+  { resource, workspaceId, onDirtyChange, onSaved, onStatus, onRegisterSaveHandler },
+  ref
+) {
   return (
-    <TextResourceEditor resource={resource} workspaceId={workspaceId} editorKind="text" onDirtyChange={onDirtyChange} onSaved={onSaved} onStatus={onStatus} onRegisterSaveHandler={onRegisterSaveHandler} />
+    <TextResourceEditor ref={ref} resource={resource} workspaceId={workspaceId} editorKind="text" onDirtyChange={onDirtyChange} onSaved={onSaved} onStatus={onStatus} onRegisterSaveHandler={onRegisterSaveHandler} />
   );
-}
+});
 
-function ResourcePreview({ resource, workspaceId }: { resource: ActiveResource; workspaceId?: string }) {
+function ResourcePreview({ resource, workspaceId, platform }: { resource: ActiveResource; workspaceId?: string; platform?: NodeJS.Platform }) {
   const { tr, locale } = useRendererI18n();
   const category = resource.category ?? resourceCategoryFor(resource.pathRel);
   const url = workspaceId ? assetUrl(workspaceId, resource.pathRel) : "";
+  const revealLabel = revealInFileManagerLabel(platform, tr);
+  const archiveDescription = archiveResourceDescription(platform, tr);
   const [textPreview, setTextPreview] = useState<{ loading: boolean; content: string; error?: string }>({ loading: false, content: "" });
   const [imageState, setImageState] = useState<{ loading: boolean; error?: string; naturalSize?: string }>({ loading: category === "image" && Boolean(url) });
   const canLoadAsText = category === "text" || category === "diagram";
@@ -4290,7 +4367,7 @@ function ResourcePreview({ resource, workspaceId }: { resource: ActiveResource; 
             <ExternalLink size={14} /> {tr("用系统应用打开")}
           </button>
           <button type="button" className="secondary-button" onClick={() => void revealInFinder()}>
-            <FolderSearch size={14} /> {tr("在访达中显示")}
+            <FolderSearch size={14} /> {revealLabel}
           </button>
         </div>
       </header>
@@ -4336,7 +4413,7 @@ function ResourcePreview({ resource, workspaceId }: { resource: ActiveResource; 
           <div className="resource-placeholder">
             <FileArchive size={46} />
             <strong>{tr("压缩包资源")}</strong>
-            <span>{tr("压缩包不会在笔记内解压预览，可以用系统应用打开或在访达中查看。")}</span>
+            <span>{archiveDescription}</span>
           </div>
         ) : null}
         {category === "other" ? (
@@ -4441,6 +4518,7 @@ function PluginResourceUnavailable({ resource, workspaceId }: { resource: Active
 function PluginResourceEditor({
   resource,
   workspaceId,
+  platform,
   pluginId,
   render,
   onReadText,
@@ -4454,6 +4532,7 @@ function PluginResourceEditor({
 }: {
   resource: ActiveResource;
   workspaceId?: string;
+  platform?: NodeJS.Platform;
   pluginId: string;
   render: PluginRenderProvider<PluginFileEditorContext>;
   onReadText: (pluginId: string, pathRel: string) => Promise<FileReadResponse>;
@@ -4468,6 +4547,7 @@ function PluginResourceEditor({
   const { tr, locale } = useRendererI18n();
   const category = resource.category ?? resourceCategoryFor(resource.pathRel);
   const url = workspaceId ? assetUrl(workspaceId, resource.pathRel) : "";
+  const revealLabel = revealInFileManagerLabel(platform, tr);
   const contentRef = useRef(resource.initialText ?? "");
   const binaryRef = useRef<ArrayBuffer | undefined>(resource.initialBytes);
   const baseHashRef = useRef(resource.baseHash);
@@ -4609,7 +4689,7 @@ function PluginResourceEditor({
             <ExternalLink size={14} /> {tr("用系统应用打开")}
           </button>
           <button type="button" className="secondary-button" onClick={() => void revealInFinder()}>
-            <FolderSearch size={14} /> {tr("在访达中显示")}
+            <FolderSearch size={14} /> {revealLabel}
           </button>
         </div>
       </header>
@@ -4623,6 +4703,7 @@ function PluginResourceEditor({
 function PluginResourceViewer({
   resource,
   workspaceId,
+  platform,
   pluginId,
   render,
   onReadText,
@@ -4630,6 +4711,7 @@ function PluginResourceViewer({
 }: {
   resource: ActiveResource;
   workspaceId?: string;
+  platform?: NodeJS.Platform;
   pluginId: string;
   render: PluginRenderProvider<PluginFileViewerContext>;
   onReadText: (pluginId: string, pathRel: string) => Promise<FileReadResponse>;
@@ -4638,6 +4720,7 @@ function PluginResourceViewer({
   const { tr, locale } = useRendererI18n();
   const category = resource.category ?? resourceCategoryFor(resource.pathRel);
   const url = workspaceId ? assetUrl(workspaceId, resource.pathRel) : "";
+  const revealLabel = revealInFileManagerLabel(platform, tr);
   const [output, setOutput] = useState<PluginRenderResult>();
   const [error, setError] = useState<string>();
   const openExternal = async () => {
@@ -4703,7 +4786,7 @@ function PluginResourceViewer({
             <ExternalLink size={14} /> {tr("用系统应用打开")}
           </button>
           <button type="button" className="secondary-button" onClick={() => void revealInFinder()}>
-            <FolderSearch size={14} /> {tr("在访达中显示")}
+            <FolderSearch size={14} /> {revealLabel}
           </button>
         </div>
       </header>
@@ -5915,7 +5998,7 @@ function PluginSettingsList({
       ) : null}
       <header>
         <strong>{tr("外部插件")}</strong>
-        <span>{pluginDirectory ? tr("插件目录：{path}", { path: pluginDirectory }) : tr("插件目录：~/Library/Application Support/Nolia/plugins")}</span>
+        <span>{pluginDirectory ? tr("插件目录：{path}", { path: pluginDirectory }) : tr("插件目录：等待应用启动信息")}</span>
       </header>
       <div className="plugin-settings-list">
         {externalManifests.length === 0 && invalidPlugins.length === 0 ? (

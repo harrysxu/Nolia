@@ -1,10 +1,10 @@
 # Nolia 使用手册
 
-Nolia 是一款 macOS 本地优先 Markdown 知识工作台。用户正文保存在自己选择的工作区目录中；`.nolia/` 目录只保存索引、快照、缓存和应用元数据。
+Nolia 是一款跨平台本地优先 Markdown 知识工作台。用户正文保存在自己选择的工作区目录中；`.nolia/` 目录只保存索引、快照、缓存和应用元数据。
 
 ## 快速开始
 
-1. 安装 `Nolia.app`，首次打开如遇 macOS 安全提示，可在「系统设置 -> 隐私与安全性」中允许打开。
+1. 安装适合当前系统的 Nolia 包。macOS 使用 `.dmg` / `.zip`，Windows 使用安装器或 `.zip`，Linux 使用 AppImage / deb。
 2. 在首页选择「打开工作区」或「创建工作区」，工作区就是 Nolia 读写文件的根目录。
 3. 在文件树中新建 Markdown 文档，或打开已有 `.md` / `.markdown` 文件。
 4. 使用顶部工具栏在「编辑」「Markdown 源码」「分屏预览」之间切换。
@@ -12,11 +12,11 @@ Nolia 是一款 macOS 本地优先 Markdown 知识工作台。用户正文保存
 
 ## 安装与数据
 
-- 支持 macOS 13 及以上版本。
-- 正式发布包应优先选择与本机架构匹配的 DMG；通用包体积更大。
-- 升级时直接替换 `/Applications/Nolia.app`，不会主动迁移或删除工作区文件。
-- 卸载应用不会删除工作区；如需清理全局状态，可删除 `~/Library/Application Support/Nolia/`。
-- 推荐把工作区纳入 Time Machine、Git 或云盘备份，但同步目录可能产生外部修改冲突。
+- 支持 macOS、Windows 和 Linux 桌面环境。
+- 正式发布包应优先选择与当前系统和架构匹配的产物。
+- 升级或卸载应用不会主动迁移或删除工作区文件。
+- 如需清理全局状态，可删除当前系统的 Nolia 应用数据目录。
+- 推荐把工作区纳入 Time Machine、文件历史记录、Git 或云盘备份，但同步目录可能产生外部修改冲突。
 
 ## 主界面
 
@@ -86,20 +86,20 @@ $$
 
 ## 设置与快捷键
 
-设置入口：`Command+,` 或菜单「Nolia -> 设置」。
+设置入口：macOS 使用 `Command+,` 或菜单「Nolia -> 设置」；Windows/Linux 使用菜单中的设置入口。
 
 常用快捷键：
 
 | 快捷键 | 功能 |
 | --- | --- |
-| `Command+N` | 新建文档 |
-| `Command+O` | 打开工作区或文件 |
-| `Command+S` | 保存当前文档 |
-| `Command+Shift+P` | 命令面板 |
-| `Command+F` | 当前编辑器搜索 |
-| `Command+B` | 加粗 |
-| `Command+I` | 斜体 |
-| `Command+Shift+E` | 导出 |
+| `Command/Ctrl+N` | 新建文档 |
+| `Command/Ctrl+O` | 打开工作区或文件 |
+| `Command/Ctrl+S` | 保存当前文档 |
+| `Command/Ctrl+K` | 命令面板 |
+| `Command/Ctrl+F` | 当前编辑器搜索 |
+| `Command/Ctrl+B` | 加粗 |
+| `Command/Ctrl+I` | 斜体 |
+| `Command/Ctrl+Shift+E` | 导出 |
 
 设置项包括主题、编辑模式、编辑区宽度、字体大小、专注模式和插件管理。
 
@@ -108,14 +108,16 @@ $$
 外部插件目录：
 
 ```text
-~/Library/Application Support/Nolia/plugins/<pluginId>/
+macOS:   ~/Library/Application Support/Nolia/plugins/<pluginId>/
+Windows: %APPDATA%\Nolia\plugins\<pluginId>\
+Linux:   ~/.config/Nolia/plugins/<pluginId>/
 ```
 
 插件默认需要在设置中接受权限并手动启用。权限变化后必须重新确认。开发说明见 [插件开发指南](../plugins/PLUGIN_DEVELOPMENT.md)。
 
 ## 故障排查
 
-- 应用无法打开：确认 macOS 安全设置、架构匹配和应用完整性。
+- 应用无法打开：确认系统安全设置、架构匹配、文件权限和应用完整性。
 - 最近工作区无法打开：确认目录仍存在且当前用户有读写权限。
 - 文件树不刷新：点击刷新、重启应用，或确认外部同步工具未锁定文件。
 - 自动保存异常：检查状态栏提示，避免同时用其他编辑器修改同一文件。

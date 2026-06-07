@@ -124,6 +124,8 @@ interface WysiwygEditorProps {
 }
 
 export interface WysiwygEditorHandle {
+  undoEdit: () => boolean;
+  redoEdit: () => boolean;
   scrollToHeading: (headingIndex: number) => boolean;
 }
 
@@ -822,6 +824,20 @@ export const WysiwygEditor = forwardRef<WysiwygEditorHandle, WysiwygEditorProps>
   }, [onOpenMarkdownTarget]);
 
   useImperativeHandle(ref, () => ({
+    undoEdit: () => {
+      if (!editor) {
+        return false;
+      }
+      markUserEditIntent();
+      return editor.chain().focus().undo().run();
+    },
+    redoEdit: () => {
+      if (!editor) {
+        return false;
+      }
+      markUserEditIntent();
+      return editor.chain().focus().redo().run();
+    },
     scrollToHeading: (headingIndex: number) => scrollToEditorHeading(editor, headingIndex)
   }), [editor]);
 

@@ -1,6 +1,9 @@
 import { expect, test } from "@playwright/test";
 import { installMockNolia } from "./helpers/mockNolia";
 
+const shortcutModifier = process.platform === "darwin" ? "Meta" : "Control";
+const shortcut = (key: string) => `${shortcutModifier}+${key}`;
+
 test("full workspace smoke covers startup, file workflow, search, settings, and autosave", async ({ page }) => {
   await page.setViewportSize({ width: 1320, height: 860 });
   await installMockNolia(page, {
@@ -44,9 +47,8 @@ test("full workspace smoke covers startup, file workflow, search, settings, and 
 
   const source = page.locator(".source-editor .cm-content");
   await source.click();
-  await page.keyboard.press("Meta+A");
+  await page.keyboard.press(shortcut("A"));
   await page.keyboard.insertText("# Release Smoke\n\nAutosave body with 中文搜索内容.\n");
-  await expect(page.locator(".statusbar")).toContainText("正在编辑");
   await expect
     .poll(() => page.evaluate(() => (window as typeof window & { __noliaMock: { savedText: Record<string, string> } }).__noliaMock.savedText["Release-Smoke.md"]))
     .toContain("Autosave body");

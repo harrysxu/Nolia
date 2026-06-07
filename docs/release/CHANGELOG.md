@@ -6,7 +6,7 @@
 
 ### Added
 
-- macOS Electron 应用基础框架。
+- Electron 桌面应用基础框架。
 - 本地工作区、文件树、最近、收藏、搜索、反向链接。
 - Markdown 编辑、源码、分屏预览三种模式。
 - Markdown 工具栏、表格、图片、链接、公式、任务列表、代码块。
@@ -16,6 +16,8 @@
 - 设置页，支持主题、编辑模式、编辑区宽度、字体大小、专注模式和插件安全模式。
 - 外部插件加载、权限确认、启用/停用和诊断。
 - macOS unsigned 打包，支持 universal、x64、arm64 对比构建。
+- Windows NSIS 安装器和 zip 打包，包含 Windows 图标、快捷方式和可执行文件资源信息。
+- Linux AppImage/deb 打包。
 
 ### Changed
 

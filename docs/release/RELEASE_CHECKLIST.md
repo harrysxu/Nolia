@@ -51,7 +51,48 @@ npm run package:unsigned
 
 如果 universal signing 阶段卡住，按 [Universal 构建异常处理](MACOS_SIGNING_NOTARIZATION.md#universal-构建异常处理) 处理。
 
-## 4. 产物校验
+## 4. Windows 打包
+
+Windows 发布包包含 NSIS 安装器和 zip。当前默认不做代码签名，发布前如需签名，应补充证书配置并重新验证 SmartScreen 行为。
+
+```sh
+npm run package:win
+```
+
+本地目录包验证：
+
+```sh
+npm run package:win:dir
+```
+
+验收重点：
+
+- [ ] 安装器显示 Nolia 名称和图标。
+- [ ] 开始菜单、桌面快捷方式和任务栏图标为 Nolia 图标。
+- [ ] 安装后可打开工作区、新建目录、新建文件、打开系统文件选择器。
+- [ ] Windows 菜单 Undo/Redo、复制粘贴、导出和资源“在资源管理器中显示”正常。
+
+## 5. Linux 打包
+
+Linux 发布包包含 AppImage 和 deb。
+
+```sh
+npm run package:linux
+```
+
+本地目录包验证：
+
+```sh
+npm run package:linux:dir
+```
+
+验收重点：
+
+- [ ] AppImage 可执行并显示 Nolia 图标。
+- [ ] deb 安装后菜单项、图标和应用名称正确。
+- [ ] 打开工作区、文件系统对话框、系统文件管理器定位和资源预览正常。
+
+## 6. 产物校验
 
 ```sh
 codesign --verify --deep --strict --verbose=2 "release/mac-arm64/Nolia.app"
@@ -75,23 +116,47 @@ unzip -tq "release/Nolia-0.1.0-mac.zip"
 unzip -tq "release/Nolia-0.1.0-universal-mac.zip"
 ```
 
-`spctl` 必须显示 `source=Notarized Developer ID`。分别记录 arm64、x64 和 universal 的 DMG/ZIP 体积。确认安装包内包含 `docs/`，并且没有打入 `test-results/`、`coverage/`、`output/` 等临时目录。
+Windows 产物校验：
 
-## 5. 安装版冒烟测试
+```powershell
+Get-ChildItem release -Filter "*.exe"
+Get-ChildItem release -Filter "*.zip"
+```
+
+Linux 产物校验：
+
+```sh
+ls -lh release/*.AppImage release/*.deb
+```
+
+`spctl` 必须显示 `source=Notarized Developer ID`。分别记录 macOS arm64、x64、universal，Windows installer/zip，Linux AppImage/deb 的体积。确认安装包内包含 `docs/`，并且没有打入 `test-results/`、`coverage/`、`output/` 等临时目录。
+
+## 7. 安装版冒烟测试
 
 1. 备份全局状态：
 
 ```sh
+# macOS
 cp "$HOME/Library/Application Support/Nolia/global-state.json" "/tmp/nolia-global-state.backup.json"
+
+# Windows PowerShell
+Copy-Item "$env:APPDATA\Nolia\global-state.json" "$env:TEMP\nolia-global-state.backup.json" -ErrorAction SilentlyContinue
+
+# Linux
+cp "$HOME/.config/Nolia/global-state.json" "/tmp/nolia-global-state.backup.json"
 ```
 
 2. 创建临时工作区：
 
 ```sh
+# macOS/Linux
 mktemp -d /tmp/nolia-release-test-XXXXXX
+
+# Windows PowerShell
+New-Item -ItemType Directory -Path "$env:TEMP\nolia-release-test"
 ```
 
-3. 安装到 `/Applications/Nolia.app` 并启动。
+3. 安装或启动当前系统的发布包。
 
 验收项：
 
@@ -109,7 +174,7 @@ mktemp -d /tmp/nolia-release-test-XXXXXX
 - [ ] 最近、收藏、反向链接页面可打开。
 - [ ] 设置页主题、字体、宽度、专注模式和插件管理正常。
 
-## 6. 国际化与界面验收
+## 8. 国际化与界面验收
 
 语言矩阵：
 
@@ -142,10 +207,11 @@ mktemp -d /tmp/nolia-release-test-XXXXXX
 - [ ] 弹窗、上下文菜单和表格选择器层级正确。
 - [ ] 用户内容、文件名和路径不被错误翻译。
 
-## 7. 发布后
+## 9. 发布后
 
-- [ ] 上传 arm64 包。
-- [ ] 上传 x64 包。
-- [ ] 如保留 universal 包，明确说明体积更大。
+- [ ] 上传 macOS arm64/x64 包。
+- [ ] 如保留 macOS universal 包，明确说明体积更大。
+- [ ] 上传 Windows 安装器和 zip。
+- [ ] 上传 Linux AppImage 和 deb。
 - [ ] 发布更新日志。
 - [ ] 保留校验记录和测试报告。

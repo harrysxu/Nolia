@@ -25,6 +25,7 @@ export interface MockBinaryFile {
 
 export interface MockWorkspaceOptions {
   activeWorkspace?: boolean;
+  platform?: NodeJS.Platform;
   workspace?: Partial<WorkspaceInfo>;
   settings?: Partial<AppSettings>;
   files?: Record<string, string>;
@@ -37,7 +38,7 @@ export interface MockWorkspaceOptions {
 }
 
 export async function installMockNolia(page: Page, options: MockWorkspaceOptions = {}) {
-  await page.addInitScript((rawOptions: MockWorkspaceOptions & { defaultSettings: AppSettings }) => {
+  await page.addInitScript((rawOptions: MockWorkspaceOptions & { defaultSettings: AppSettings; platform: NodeJS.Platform }) => {
     type MockFileNode = { pathRel: string; name: string; kind: FileTreeNode["kind"]; size: number; mtimeMs: number; children?: MockFileNode[] };
     type MockWindow = typeof window & {
       __emitWorkspaceIndexed?: (event?: Partial<WorkspaceIndexedEvent>) => void;
@@ -210,7 +211,16 @@ export async function installMockNolia(page: Page, options: MockWorkspaceOptions
 
     window.nolia = {
       workspace: {
-        bootstrap: async () => ({ activeWorkspace: workspaceOpen ? workspace : undefined, recentWorkspaces, settings: mutableSettings }),
+        bootstrap: async () => ({
+          activeWorkspace: workspaceOpen ? workspace : undefined,
+          recentWorkspaces,
+          settings: mutableSettings,
+          appInfo: {
+            platform: rawOptions.platform,
+            pluginDirectory: "/tmp/nolia-full-selftest/plugins",
+            logsDirectory: "/tmp/nolia-full-selftest/logs"
+          }
+        }),
         open: async () => {
           workspaceOpen = true;
           window.localStorage.removeItem(workspaceClosedStorageKey);
@@ -372,5 +382,5 @@ export async function installMockNolia(page: Page, options: MockWorkspaceOptions
         }
       }
     };
-  }, { ...options, defaultSettings: defaultTestSettings });
+  }, { ...options, defaultSettings: defaultTestSettings, platform: options.platform ?? process.platform });
 }

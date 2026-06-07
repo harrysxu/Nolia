@@ -12,7 +12,7 @@ Notes, documents, attachments, and workspace data created or imported by users b
 
 ## Permitted Use
 
-Users may install and use Nolia on their own macOS devices to create, edit, organize, and preview local documents.
+Users may install and use Nolia on their own macOS, Windows, or Linux devices to create, edit, organize, and preview local documents.
 
 When using or redistributing Nolia, users must comply with GPLv3 and applicable law. Users may not:
 

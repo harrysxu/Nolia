@@ -81,10 +81,15 @@ describe("workspace service startup", () => {
     const home = await makeTempDir();
     const workspaceRoot = await makeTempDir();
     let finishIndex!: () => void;
+    let markIndexStarted!: () => void;
+    const indexStartedPromise = new Promise<void>((resolve) => {
+      markIndexStarted = resolve;
+    });
     const indexStarted = vi.fn();
     const indexedEvents: string[] = [];
     const rebuildSpy = vi.spyOn(WorkspaceIndexService.prototype, "rebuildWorkspace").mockImplementation(async () => {
       indexStarted();
+      markIndexStarted();
       await new Promise<void>((resolve) => {
         finishIndex = resolve;
       });
@@ -99,9 +104,11 @@ describe("workspace service startup", () => {
         indexedEvents.push(event.pathRel);
       });
 
+      const createPromise = service.createWorkspace({ path: workspaceRoot });
+      await indexStartedPromise;
       const opened = await Promise.race([
-        service.createWorkspace({ path: workspaceRoot }),
-        sleep(50).then(() => "blocked" as const)
+        createPromise,
+        sleep(1000).then(() => "blocked" as const)
       ]);
 
       expect(opened).not.toBe("blocked");

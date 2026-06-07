@@ -1,6 +1,6 @@
 # Nolia 文档入口
 
-Nolia 是一款 macOS 本地优先 Markdown 知识工作台，基于 Electron、React、Vite 和 TypeScript 构建。
+Nolia 是一款跨平台本地优先 Markdown 知识工作台，基于 Electron、React、Vite 和 TypeScript 构建，面向 macOS、Windows 和 Linux 桌面环境。
 
 ## 用户文档
 
@@ -45,8 +45,12 @@ npm run e2e
 npm run build
 ```
 
-正式发布路径要求 Developer ID 签名和 notarization。`npm run package` 会先校验发布凭证；本地 unsigned 打包使用：
+打包命令：
 
 ```sh
 npm run package:unsigned
+npm run package:win
+npm run package:linux
 ```
+
+macOS 正式发布要求 Developer ID 签名和 notarization。`npm run package` 会先校验 macOS 发布凭证；Windows 和 Linux 发布校验见 [发布检查清单](release/RELEASE_CHECKLIST.md)。

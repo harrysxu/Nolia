@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { access, mkdir, readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
-import { dialog } from "electron";
+import { dialog, type BrowserWindow, type OpenDialogOptions } from "electron";
 
 import {
   WORKSPACE_CONFIG_FILE,
@@ -62,8 +62,8 @@ export class WorkspaceService {
     };
   }
 
-  async openWorkspace(request: WorkspaceOpenRequest): Promise<WorkspaceInfo | undefined> {
-    const selectedPath = request.path ?? (await this.pickWorkspaceDirectory(this.tr("打开工作区"), false));
+  async openWorkspace(request: WorkspaceOpenRequest, parentWindow?: BrowserWindow): Promise<WorkspaceInfo | undefined> {
+    const selectedPath = request.path ?? (await this.pickWorkspaceDirectory(this.tr("打开工作区"), false, parentWindow));
     if (!selectedPath) {
       return undefined;
     }
@@ -91,8 +91,8 @@ export class WorkspaceService {
     return runtime.info;
   }
 
-  async createWorkspace(request: WorkspaceOpenRequest): Promise<WorkspaceInfo | undefined> {
-    const selectedPath = request.path ?? (await this.pickWorkspaceDirectory(this.tr("创建工作区"), true));
+  async createWorkspace(request: WorkspaceOpenRequest, parentWindow?: BrowserWindow): Promise<WorkspaceInfo | undefined> {
+    const selectedPath = request.path ?? (await this.pickWorkspaceDirectory(this.tr("创建工作区"), true, parentWindow));
     if (!selectedPath) {
       return undefined;
     }
@@ -247,11 +247,12 @@ export class WorkspaceService {
       });
   }
 
-  private async pickWorkspaceDirectory(title: string, allowCreate: boolean): Promise<string | undefined> {
-    const result = await dialog.showOpenDialog({
+  private async pickWorkspaceDirectory(title: string, allowCreate: boolean, parentWindow?: BrowserWindow): Promise<string | undefined> {
+    const options: OpenDialogOptions = {
       title,
       properties: allowCreate ? ["openDirectory", "createDirectory"] : ["openDirectory"]
-    });
+    };
+    const result = parentWindow && !parentWindow.isDestroyed() ? await dialog.showOpenDialog(parentWindow, options) : await dialog.showOpenDialog(options);
     return result.canceled ? undefined : result.filePaths[0];
   }
 }

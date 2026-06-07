@@ -2,7 +2,7 @@
   "name": "nolia",
   "version": "0.1.0",
   "private": true,
-  "description": "Nolia macOS local-first Markdown knowledge workstation",
+  "description": "Nolia local-first Markdown knowledge workstation",
   "author": "Nolia Contributors",
   "license": "GPL-3.0-or-later",
   "main": "dist/main/index.js",
@@ -20,6 +20,8 @@
     "package:unsigned": "npm run build && NOLIA_SKIP_NOTARIZE=1 CSC_IDENTITY_AUTO_DISCOVERY=false electron-builder --mac --universal --publish never",
     "package:linux": "npm run build && electron-builder --linux --publish never",
     "package:linux:dir": "npm run build && electron-builder --linux --dir --publish never",
+    "package:win": "npm run build && node build/withWinPackagingEnv.cjs",
+    "package:win:dir": "npm run build && node build/withWinPackagingEnv.cjs --dir",
     "typecheck": "tsc --noEmit",
     "lint": "eslint --no-error-on-unmatched-pattern \"src/**/*.{ts,tsx}\" \"tests/**/*.ts\"",
     "test": "vitest run",
@@ -44,6 +46,9 @@
     ],
     "directories": {
       "output": "release"
+    },
+    "toolsets": {
+      "winCodeSign": "1.1.0"
     },
     "mac": {
       "icon": "build/icon.icns",
@@ -73,6 +78,33 @@
         "deb"
       ]
     },
+    "win": {
+      "icon": "build/icon.ico",
+      "compression": "normal",
+      "signAndEditExecutable": false,
+      "signExts": [
+        "!.exe"
+      ],
+      "extraResources": [
+        {
+          "from": "build/icon.ico",
+          "to": "assets/icon.ico"
+        }
+      ],
+      "target": [
+        "nsis",
+        "zip"
+      ]
+    },
+    "nsis": {
+      "oneClick": false,
+      "perMachine": false,
+      "allowElevation": true,
+      "allowToChangeInstallationDirectory": true,
+      "createDesktopShortcut": true,
+      "createStartMenuShortcut": true,
+      "shortcutName": "Nolia"
+    },
     "fileAssociations": [
       {
         "ext": "md",
@@ -85,7 +117,8 @@
         "role": "Editor"
       }
     ],
-    "afterSign": "build/afterSign.cjs"
+    "afterSign": "build/afterSign.cjs",
+    "afterPack": "build/afterPack.cjs"
   },
   "dependencies": {
     "@codemirror/commands": "^6.10.3",
@@ -158,6 +191,7 @@
     "eslint-plugin-react-hooks": "^7.1.1",
     "globals": "^17.6.0",
     "playwright": "^1.60.0",
+    "resedit": "^1.7.2",
     "tsup": "^8.5.1",
     "typescript": "^6.0.3",
     "vite": "^8.0.14",

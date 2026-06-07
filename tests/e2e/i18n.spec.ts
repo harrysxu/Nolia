@@ -111,7 +111,7 @@ test("English workspace pages stay localized and readable across key surfaces", 
   await settingsDialog.getByRole("tab", { name: "Plugin Management" }).click();
   await expect(settingsDialog.locator(".plugin-settings header").getByText("External Plugins", { exact: true })).toBeVisible();
   await expect(settingsDialog.locator(".plugin-settings header").getByText("Built-in Extensions", { exact: true })).toBeVisible();
-  await expect(settingsDialog.getByText("Plugin directory: ~/Library/Application Support/Nolia/plugins")).toBeVisible();
+  await expect(settingsDialog.getByText("Plugin directory: /tmp/nolia-full-selftest/plugins")).toBeVisible();
   const englishPluginItem = settingsDialog.locator(".plugin-settings-item").filter({ hasText: "Local I18n Plugin" }).first();
   await expect(englishPluginItem).toContainText("Contribute UI");
   await expect(englishPluginItem).toContainText("Read workspace files");

@@ -26,7 +26,9 @@ The app accesses:
 Global app data directory:
 
 ```text
-~/Library/Application Support/Nolia/
+macOS:   ~/Library/Application Support/Nolia/
+Windows: %APPDATA%\Nolia\
+Linux:   ~/.config/Nolia/
 ```
 
 ## Derived Data

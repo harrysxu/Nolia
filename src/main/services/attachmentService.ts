@@ -1,6 +1,6 @@
 import { copyFile, mkdir, stat } from "node:fs/promises";
 import path from "node:path";
-import { dialog } from "electron";
+import { dialog, type BrowserWindow, type OpenDialogOptions } from "electron";
 import { lookup } from "mime-types";
 import sanitize from "sanitize-filename";
 
@@ -19,9 +19,9 @@ export class AttachmentService {
     this.tr = createTranslator(locale);
   }
 
-  async pickImage(request: AttachmentPickImageRequest): Promise<{ path?: string }> {
+  async pickImage(request: AttachmentPickImageRequest, parentWindow?: BrowserWindow): Promise<{ path?: string }> {
     this.workspaces.requireWorkspace(request.workspaceId);
-    const result = await dialog.showOpenDialog({
+    const options: OpenDialogOptions = {
       title: this.tr("选择图片"),
       properties: ["openFile"],
       filters: [
@@ -30,7 +30,8 @@ export class AttachmentService {
           extensions: ["png", "jpg", "jpeg", "gif", "webp", "svg"]
         }
       ]
-    });
+    };
+    const result = parentWindow && !parentWindow.isDestroyed() ? await dialog.showOpenDialog(parentWindow, options) : await dialog.showOpenDialog(options);
     return result.canceled ? {} : { path: result.filePaths[0] };
   }
 
