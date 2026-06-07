@@ -1,14 +1,14 @@
 import { appendFile, mkdir } from "node:fs/promises";
 import path from "node:path";
 
-import { APP_NAME } from "../../shared/constants";
+import { resolveDiagnosticsLogRoot } from "../utils/platform";
 
 export class DiagnosticsService {
   readonly logRoot: string;
   readonly logFilePath: string;
 
   constructor(homePath: string) {
-    this.logRoot = path.join(homePath, "Library", "Logs", APP_NAME);
+    this.logRoot = resolveDiagnosticsLogRoot(homePath);
     this.logFilePath = path.join(this.logRoot, "nolia.log");
   }
 

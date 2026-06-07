@@ -52,6 +52,11 @@ export interface NoliaApi {
       activeWorkspace?: WorkspaceInfo;
       recentWorkspaces: RecentWorkspace[];
       settings: AppSettings;
+      appInfo?: {
+        platform: NodeJS.Platform;
+        pluginDirectory: string;
+        logsDirectory: string;
+      };
     }>;
     open: (request?: WorkspaceOpenRequest) => Promise<WorkspaceInfo | undefined>;
     create: (request?: WorkspaceOpenRequest) => Promise<WorkspaceInfo | undefined>;

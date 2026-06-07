@@ -53,7 +53,14 @@ interface IpcServices {
 }
 
 export function registerIpcHandlers(services: IpcServices): void {
-  handle(IpcChannels.workspaceBootstrap, EmptySchema, () => services.workspaces.bootstrap());
+  handle(IpcChannels.workspaceBootstrap, EmptySchema, async () => ({
+    ...(await services.workspaces.bootstrap()),
+    appInfo: {
+      platform: process.platform,
+      pluginDirectory: services.plugins.pluginsRoot,
+      logsDirectory: services.diagnostics.logRoot
+    }
+  }));
   handle(IpcChannels.workspaceOpen, WorkspaceOpenRequestSchema, (request) => services.workspaces.openWorkspace(request));
   handle(IpcChannels.workspaceCreate, WorkspaceOpenRequestSchema, (request) => services.workspaces.createWorkspace(request));
   handle(IpcChannels.workspaceListRecent, EmptySchema, () => services.workspaces.listRecentWorkspaces());

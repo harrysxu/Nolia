@@ -7,6 +7,7 @@ import { APP_NAME } from "../shared/constants";
 import { createTranslator } from "../shared/i18n";
 import type { MenuContribution } from "../shared/extensions";
 import type { ResolvedLocale } from "../shared/types";
+import { acceleratorForCommand, acceleratorForFullScreen, acceleratorForModifier } from "./utils/platform";
 
 export function installApplicationMenu(
   getMainWindow: () => BrowserWindow | undefined,
@@ -84,13 +85,13 @@ export function installApplicationMenu(
         { type: "separator" },
         { label: tr("重新加载"), role: "reload" },
         { label: tr("开发者工具"), role: "toggleDevTools" },
-        { label: tr("切换全屏"), accelerator: "Control+Command+F", click: toggleFullScreen }
+        { label: tr("切换全屏"), accelerator: acceleratorForFullScreen(process.platform), click: toggleFullScreen }
       ]
     },
     {
       label: tr("窗口"),
       submenu: [
-        { label: tr("最小化"), accelerator: "Command+M", click: minimizeWindow },
+        { label: tr("最小化"), accelerator: acceleratorForModifier("M", process.platform), click: minimizeWindow },
         { label: tr("缩放"), click: zoomWindow },
         { type: "separator" },
         { label: tr("前置所有窗口"), role: "front" }
@@ -124,7 +125,7 @@ function menuItemsForLocation(menuContributions: MenuContribution[], location: M
     }
     menuItems.push({
       label: item.label,
-      accelerator: acceleratorForCommand(item.command),
+      accelerator: acceleratorForCommand(item.command, process.platform),
       click: () => {
         if (item.command) {
           send(item.command);
@@ -151,47 +152,6 @@ function trimMenuSeparators(items: MenuItemConstructorOptions[]): MenuItemConstr
     result.pop();
   }
   return result;
-}
-
-function acceleratorForCommand(command: string | undefined): string | undefined {
-  switch (command) {
-    case "view.settings":
-      return "Command+,";
-    case "file.new":
-      return "Command+N";
-    case "workspace.open":
-      return "Command+O";
-    case "document.save":
-      return "Command+S";
-    case "document.export":
-      return "Command+Shift+E";
-    case "commandPalette.open":
-      return "Command+K";
-    case "view.recent":
-      return "Command+1";
-    case "view.files":
-      return "Command+2";
-    case "view.favorites":
-      return "Command+3";
-    case "view.search":
-      return "Command+4";
-    case "view.backlinks":
-      return "Command+5";
-    case "mode.wysiwyg":
-      return "Command+Alt+1";
-    case "mode.source":
-      return "Command+Alt+2";
-    case "mode.split":
-      return "Command+Alt+3";
-    case "view.immersive.toggle":
-      return "Command+Shift+I";
-    case "view.toolbar.toggle":
-      return "Command+Shift+T";
-    case "view.lineNumbers.toggle":
-      return "Command+Shift+L";
-    default:
-      return undefined;
-  }
 }
 
 export function resolveDocumentationPath(locale: ResolvedLocale = "zh-CN"): string {

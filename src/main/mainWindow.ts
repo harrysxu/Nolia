@@ -1,31 +1,12 @@
-import path from "node:path";
 import { app, BrowserWindow, shell } from "electron";
 
-import { APP_NAME } from "../shared/constants";
 import { DiagnosticsService } from "./services/diagnosticsService";
 import { SettingsService } from "./services/settingsService";
+import { createMainWindowOptions } from "./utils/platform";
 
 export function createMainWindow(settings: SettingsService, diagnostics?: DiagnosticsService): BrowserWindow {
   const savedState = settings.getWindowState();
-  const window = new BrowserWindow({
-    title: APP_NAME,
-    width: savedState?.bounds?.width ?? 1320,
-    height: savedState?.bounds?.height ?? 860,
-    x: savedState?.bounds?.x,
-    y: savedState?.bounds?.y,
-    minWidth: 780,
-    minHeight: 520,
-    show: false,
-    titleBarStyle: "hiddenInset",
-    trafficLightPosition: { x: 16, y: 16 },
-    webPreferences: {
-      preload: path.join(__dirname, "../preload/index.js"),
-      nodeIntegration: false,
-      contextIsolation: true,
-      sandbox: true,
-      webSecurity: true
-    }
-  });
+  const window = new BrowserWindow(createMainWindowOptions(savedState));
   diagnostics?.info("Main window created", {
     windowId: window.id,
     bounds: window.getBounds(),

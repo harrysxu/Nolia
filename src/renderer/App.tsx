@@ -145,6 +145,11 @@ type RegisteredPluginRenderer<TContext> = {
   pluginId: string;
   render: PluginRenderProvider<TContext>;
 };
+type AppRuntimeInfo = {
+  platform: NodeJS.Platform;
+  pluginDirectory: string;
+  logsDirectory: string;
+};
 const LEFT_PANEL_WIDTH_STORAGE_KEY = "nolia.leftPanelWidth.v2";
 const RIGHT_PANEL_WIDTH_STORAGE_KEY = "nolia.rightPanelWidth.v1";
 const TOOLBAR_VISIBLE_STORAGE_KEY = "nolia.toolbarVisible.v1";
@@ -212,6 +217,7 @@ export function App() {
   const [rightPanelCollapsed, setRightPanelCollapsed] = useState(true);
   const [immersiveMode, setImmersiveMode] = useState(false);
   const [appSettings, setAppSettings] = useState<AppSettings | undefined>();
+  const [appInfo, setAppInfo] = useState<AppRuntimeInfo | undefined>();
   const [pluginDescriptors, setPluginDescriptors] = useState<PluginDescriptor[]>([]);
   const [pluginRuntimeManifests, setPluginRuntimeManifests] = useState<ExtensionManifest[]>([]);
   const [pluginCommandIds, setPluginCommandIds] = useState<string[]>([]);
@@ -722,6 +728,7 @@ export function App() {
         onAcceptPluginPermissions={acceptPluginPermissions}
         onReload={() => void bootstrap()}
         languageRestartRequired={languageRestartRequired}
+        pluginDirectory={appInfo?.pluginDirectory}
       />
       <header className="titlebar">
         <div className="titlebar-left">
@@ -1038,6 +1045,7 @@ export function App() {
     setRecentWorkspaces(state.recentWorkspaces);
     setPluginDescriptors(plugins);
     setAppSettings(state.settings);
+    setAppInfo(state.appInfo);
     setTheme(state.settings.theme);
     setEditorModeSetting(state.settings.editorMode);
     editorModeSettingRef.current = state.settings.editorMode;
@@ -5681,7 +5689,8 @@ function SettingsDialog({
   onAcceptPluginPermissions,
   onClose,
   onReload,
-  languageRestartRequired
+  languageRestartRequired,
+  pluginDirectory
 }: {
   open: boolean;
   settings?: AppSettings;
@@ -5694,6 +5703,7 @@ function SettingsDialog({
   onClose: () => void;
   onReload: () => void;
   languageRestartRequired: boolean;
+  pluginDirectory?: string;
 }) {
   const { tr } = useRendererI18n();
   const [activeTab, setActiveTab] = useState<SettingsTabId>("preferences");
@@ -5812,6 +5822,7 @@ function SettingsDialog({
                   settings={settings}
                   manifests={dedupeExtensionManifests(extensionManifests)}
                   pluginDescriptors={pluginDescriptors}
+                  pluginDirectory={pluginDirectory}
                   onSetPluginEnabled={onSetPluginEnabled}
                   onRequestAcceptPluginPermissions={setPermissionReviewManifest}
                 />
@@ -5879,12 +5890,14 @@ function PluginSettingsList({
   settings,
   manifests,
   pluginDescriptors,
+  pluginDirectory,
   onSetPluginEnabled,
   onRequestAcceptPluginPermissions
 }: {
   settings: AppSettings;
   manifests: ExtensionManifest[];
   pluginDescriptors: PluginDescriptor[];
+  pluginDirectory?: string;
   onSetPluginEnabled: (pluginId: string, enabled: boolean) => Promise<void>;
   onRequestAcceptPluginPermissions: (manifest: ExtensionManifest) => void;
 }) {
@@ -5902,7 +5915,7 @@ function PluginSettingsList({
       ) : null}
       <header>
         <strong>{tr("外部插件")}</strong>
-        <span>{tr("插件目录：~/Library/Application Support/Nolia/plugins")}</span>
+        <span>{pluginDirectory ? tr("插件目录：{path}", { path: pluginDirectory }) : tr("插件目录：~/Library/Application Support/Nolia/plugins")}</span>
       </header>
       <div className="plugin-settings-list">
         {externalManifests.length === 0 && invalidPlugins.length === 0 ? (
