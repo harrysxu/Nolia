@@ -167,7 +167,7 @@ function renderPreviewBlock(target: HTMLElement, kind: string, html: string, mar
 
 function fallbackPreviewHtml(kind: string, markdown: string): string {
   if (kind === "mermaid") {
-    return `<div class="mermaid">${escapeHtml(mermaidSourceFromMarkdown(markdown))}</div>`;
+    return `<div class="mermaid" data-markdown="${escapeHtmlAttribute(markdown)}">${escapeHtml(mermaidSourceFromMarkdown(markdown))}</div>`;
   }
   if (kind === "definition-list") {
     const [term = "", definition = ""] = markdown.split(/\r?\n:\s?/);
@@ -266,6 +266,10 @@ function escapeHtml(value: string): string {
     .replace(/&/g, "&amp;")
     .replace(/</g, "&lt;")
     .replace(/>/g, "&gt;");
+}
+
+function escapeHtmlAttribute(value: string): string {
+  return escapeHtml(value).replace(/"/g, "&quot;");
 }
 
 async function renderMermaidPreview(target: HTMLElement) {

@@ -16,7 +16,7 @@ import {
   type RefObject
 } from "react";
 import type { ReactCodeMirrorRef } from "@uiw/react-codemirror";
-import { redo as redoCodeMirror, undo as undoCodeMirror } from "@codemirror/commands";
+import { redo as redoCodeMirror, redoDepth as redoDepthCodeMirror, undo as undoCodeMirror, undoDepth as undoDepthCodeMirror } from "@codemirror/commands";
 import {
   Bold,
   ChevronDown,
@@ -3856,8 +3856,22 @@ const EditorPane = forwardRef<EditorPaneHandle, {
     view.focus();
     return handled;
   };
-  const undoSourceEdit = () => dispatchSourceCommand(undoCodeMirror);
-  const redoSourceEdit = () => dispatchSourceCommand(redoCodeMirror);
+  const undoSourceEdit = () => {
+    const view = sourceEditorRef.current?.view;
+    if (!view || undoDepthCodeMirror(view.state) <= 0) {
+      view?.focus();
+      return Boolean(view);
+    }
+    return dispatchSourceCommand(undoCodeMirror);
+  };
+  const redoSourceEdit = () => {
+    const view = sourceEditorRef.current?.view;
+    if (!view || redoDepthCodeMirror(view.state) <= 0) {
+      view?.focus();
+      return Boolean(view);
+    }
+    return dispatchSourceCommand(redoCodeMirror);
+  };
   const runHistoryCommand = (kind: "undo" | "redo"): boolean => {
     if (resource) {
       return kind === "undo" ? (textResourceEditorRef.current?.undoEdit() ?? false) : (textResourceEditorRef.current?.redoEdit() ?? false);

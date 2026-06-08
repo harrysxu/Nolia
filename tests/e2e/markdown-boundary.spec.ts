@@ -317,6 +317,54 @@ test("WYSIWYG Mermaid preview blocks expose editable Markdown source", async ({ 
   await expect(page.locator(".cm-content")).toContainText("C[Updated] --> D[Done]");
 });
 
+test("WYSIWYG copies rendered Mermaid diagrams as their original Markdown", async ({ page }) => {
+  await setupBoundaryWorkspace(page, {
+    "diagram-copy.md": ["# Diagram", "", "```mermaid", "flowchart TD", "  A[Wallet] --> B[Order]", "```"].join("\n"),
+    "diagram-paste.md": ""
+  });
+
+  await openWorkspaceNote(page, "diagram-copy.md");
+  await page.getByRole("button", { name: "编辑", exact: true }).click();
+  const sourceBlock = page.locator(".markdown-preview-block-mermaid").first();
+  await expect(sourceBlock.locator(".mermaid svg")).toBeVisible();
+  const richClipboard = await copyRenderedMermaidBlock(page);
+  expect(richClipboard.text).toContain("```mermaid");
+  expect(richClipboard.text).toContain("A[Wallet] --> B[Order]");
+  expect(richClipboard.html).toContain('data-type="markdown-preview-block"');
+  expect(richClipboard.html).toContain("A[Wallet] --&gt; B[Order]");
+
+  await openWorkspaceNote(page, "diagram-paste.md");
+  await page.getByRole("button", { name: "编辑", exact: true }).click();
+  await pasteRichIntoWysiwyg(page, richClipboard);
+  const pastedBlock = page.locator(".markdown-preview-block-mermaid").first();
+  await expect(pastedBlock.locator(".mermaid svg")).toBeVisible();
+
+  await page.getByRole("button", { name: "MD", exact: true }).click();
+  expect(await sourceContains(page, "```mermaid\nflowchart TD\n  A[Wallet] --> B[Order]\n```")).toBe(true);
+  expect(await sourceContains(page, "nolia-edit-mermaid")).toBe(false);
+  expect(await sourceContains(page, "stroke-dasharray")).toBe(false);
+});
+
+test("WYSIWYG undo toolbar does not clear an unmodified document", async ({ page }) => {
+  await setupBoundaryWorkspace(page, {
+    "undo-clean.md": ["# Keep", "", "This document has not been edited.", "", "- one", "- two"].join("\n")
+  });
+
+  await openWorkspaceNote(page, "undo-clean.md");
+  await page.getByRole("button", { name: "编辑", exact: true }).click();
+  const editor = page.locator(".ProseMirror");
+  await expect(editor.locator("h1")).toHaveText("Keep");
+  const undoButton = page.locator(".editor-toolbar").getByRole("button", { name: "撤销" });
+  await undoButton.click();
+  await undoButton.click();
+  await expect(editor.locator("h1")).toHaveText("Keep");
+  await expect(editor).toContainText("This document has not been edited.");
+  await expect(editor.locator("li")).toHaveCount(2);
+
+  await page.getByRole("button", { name: "MD", exact: true }).click();
+  await expect.poll(() => sourceText(page)).toBe("# Keep\n\nThis document has not been edited.\n\n- one\n- two");
+});
+
 test("WYSIWYG block source editors stay editable after clearing and typing Markdown", async ({ page }) => {
   await setupBoundaryWorkspace(page, {
     "block-editors.md": [
@@ -1327,6 +1375,26 @@ async function copyAllFromWysiwyg(page: Page): Promise<{ html: string; text: str
   const editor = page.locator(".ProseMirror");
   await editor.click();
   await page.keyboard.press(shortcut("A"));
+  return editor.evaluate((element) => {
+    const clipboardData = new DataTransfer();
+    const event = new ClipboardEvent("copy", { bubbles: true, cancelable: true, clipboardData });
+    element.dispatchEvent(event);
+    return {
+      html: clipboardData.getData("text/html"),
+      text: clipboardData.getData("text/plain")
+    };
+  });
+}
+
+async function copyRenderedMermaidBlock(page: Page): Promise<{ html: string; text: string }> {
+  const editor = page.locator(".ProseMirror");
+  await editor.locator(".markdown-preview-block-mermaid .mermaid svg").first().evaluate((node) => {
+    const range = document.createRange();
+    range.selectNodeContents(node);
+    const selection = window.getSelection();
+    selection?.removeAllRanges();
+    selection?.addRange(range);
+  });
   return editor.evaluate((element) => {
     const clipboardData = new DataTransfer();
     const event = new ClipboardEvent("copy", { bubbles: true, cancelable: true, clipboardData });

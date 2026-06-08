@@ -6,6 +6,7 @@ import TiptapCode from "@tiptap/extension-code";
 import { DOMParser as ProseMirrorDOMParser, DOMSerializer, Fragment, type Mark, type Node as ProseMirrorNode, type Schema } from "@tiptap/pm/model";
 import { NodeSelection, Plugin, PluginKey, TextSelection, type EditorState, type Transaction } from "@tiptap/pm/state";
 import { Decoration, DecorationSet, type EditorView } from "@tiptap/pm/view";
+import { redoDepth, undoDepth } from "@tiptap/pm/history";
 import StarterKit from "@tiptap/starter-kit";
 import Placeholder from "@tiptap/extension-placeholder";
 import { Table, TableCell, TableHeader, TableRow } from "@tiptap/extension-table";
@@ -828,12 +829,20 @@ export const WysiwygEditor = forwardRef<WysiwygEditorHandle, WysiwygEditorProps>
       if (!editor) {
         return false;
       }
+      if (undoDepth(editor.state) <= 0) {
+        editor.commands.focus();
+        return true;
+      }
       markUserEditIntent();
       return editor.chain().focus().undo().run();
     },
     redoEdit: () => {
       if (!editor) {
         return false;
+      }
+      if (redoDepth(editor.state) <= 0) {
+        editor.commands.focus();
+        return true;
       }
       markUserEditIntent();
       return editor.chain().focus().redo().run();
@@ -852,7 +861,7 @@ export const WysiwygEditor = forwardRef<WysiwygEditorHandle, WysiwygEditorProps>
     const editableHtml = normalizeRenderedHtmlForWysiwyg(html, { workspaceId, documentPathRel });
     if (currentHtml !== editableHtml && editor.view.dom.innerHTML !== editableHtml) {
       lastEmittedHtml.current = undefined;
-      editor.commands.setContent(editableHtml, { emitUpdate: false });
+      editor.chain().setMeta("addToHistory", false).setContent(editableHtml, { emitUpdate: false, errorOnInvalidContent: false }).run();
     }
   }, [documentPathRel, editor, html, workspaceId]);
 
@@ -1160,8 +1169,22 @@ export const WysiwygEditor = forwardRef<WysiwygEditorHandle, WysiwygEditorProps>
       <div className="editor-toolbar" role="toolbar" aria-label={tr("Markdown 工具")} onMouseDown={markUserEditIntent}>
         <IconButton title={tr("插入目录")} onClick={() => void insertOrUpdateToc()} icon={<TableOfContents size={16} />} />
         <ToolbarDivider />
-        <IconButton title={tr("撤销")} onClick={() => editor.chain().focus().undo().run()} icon={<Undo2 size={16} />} />
-        <IconButton title={tr("重做")} onClick={() => editor.chain().focus().redo().run()} icon={<Redo2 size={16} />} />
+        <IconButton title={tr("撤销")} onClick={() => {
+          if (undoDepth(editor.state) > 0) {
+            markUserEditIntent();
+            editor.chain().focus().undo().run();
+            return;
+          }
+          editor.commands.focus();
+        }} icon={<Undo2 size={16} />} />
+        <IconButton title={tr("重做")} onClick={() => {
+          if (redoDepth(editor.state) > 0) {
+            markUserEditIntent();
+            editor.chain().focus().redo().run();
+            return;
+          }
+          editor.commands.focus();
+        }} icon={<Redo2 size={16} />} />
         <ToolbarDivider />
         <IconButton title={tr("段落")} onClick={() => editor.chain().focus().setParagraph().run()} icon={<Pilcrow size={16} />} />
         <IconButton title={tr("一级标题")} onClick={() => editor.chain().focus().toggleHeading({ level: 1 }).run()} icon={<Heading1 size={16} />} />
@@ -1701,28 +1724,36 @@ function selectedHtmlPayload(view: EditorView, sourceText?: string): ClipboardPa
     return undefined;
   }
   const container = document.createElement("div");
+  const selectedPreviewBlock = selectedMarkdownPreviewBlock(view, selection);
+  if (selectedPreviewBlock) {
+    container.append(selectedPreviewBlock.cloneNode(true));
+  }
   const selectionTouchesEditor =
     (selection.anchorNode ? view.dom.contains(selection.anchorNode) : false) ||
     (selection.focusNode ? view.dom.contains(selection.focusNode) : false);
-  for (let index = 0; index < selection.rangeCount; index += 1) {
-    const range = selection.getRangeAt(index);
-    if (!view.dom.contains(range.commonAncestorContainer)) {
-      if (!selectionTouchesEditor) {
-        return undefined;
+  if (!selectedPreviewBlock) {
+    for (let index = 0; index < selection.rangeCount; index += 1) {
+      const range = selection.getRangeAt(index);
+      if (!view.dom.contains(range.commonAncestorContainer)) {
+        if (!selectionTouchesEditor) {
+          return undefined;
+        }
+        container.append(...Array.from(view.dom.cloneNode(true).childNodes));
+        break;
       }
-      container.append(...Array.from(view.dom.cloneNode(true).childNodes));
-      break;
+      container.append(range.cloneContents());
     }
-    container.append(range.cloneContents());
   }
+  normalizeCopiedMarkdownPreviewBlocks(container);
   if (!container.textContent?.trim() && !container.querySelector("img, table, input, .markdown-preview-block, .math-block")) {
     return undefined;
   }
+  const selectedBlockMarkdown = selectedPreviewBlock?.dataset.markdown;
   const fullDocumentMarkdown = sourceText && (isFullDocumentSelection(view) || isFullDomSelection(view, selection)) ? sourceText : undefined;
   const markdownAttribute = fullDocumentMarkdown ? ` data-markdown="${escapeHtmlAttribute(fullDocumentMarkdown)}"` : "";
   return {
     html: `<div data-nolia-clipboard="true"${markdownAttribute}>${container.innerHTML}</div>`,
-    text: fullDocumentMarkdown ?? (plainTextFromCopiedDom(container) || selectedText(view.state) || selection.toString())
+    text: fullDocumentMarkdown ?? selectedBlockMarkdown ?? (plainTextFromCopiedDom(container) || selectedText(view.state) || selection.toString())
   };
 }
 
@@ -1750,6 +1781,34 @@ function escapeHtmlAttribute(value: string): string {
     .replace(/</g, "&lt;")
     .replace(/>/g, "&gt;")
     .replace(/"/g, "&quot;");
+}
+
+function normalizeCopiedMarkdownPreviewBlocks(container: HTMLElement): void {
+  container.querySelectorAll(".mermaid[data-markdown]").forEach((node) => {
+    const element = node instanceof HTMLElement ? node : undefined;
+    const markdown = element?.dataset.markdown;
+    if (!element || !markdown || element.closest("[data-type='markdown-preview-block']")) {
+      return;
+    }
+    element.replaceWith(createMarkdownPreviewBlock("mermaid", markdown, element.outerHTML));
+  });
+}
+
+function selectedMarkdownPreviewBlock(view: EditorView, selection: Selection): HTMLElement | undefined {
+  const blocks = [selection.anchorNode, selection.focusNode]
+    .map((node) => closestElement(node, "[data-type='markdown-preview-block'][data-markdown]"))
+    .filter((node): node is HTMLElement => Boolean(node));
+  if (!blocks.length || blocks.some((block) => !view.dom.contains(block))) {
+    return undefined;
+  }
+  const [first] = blocks;
+  return blocks.every((block) => block === first) ? first : undefined;
+}
+
+function closestElement(node: Node | null, selector: string): HTMLElement | undefined {
+  const element = node instanceof Element ? node : node?.parentElement;
+  const match = element?.closest(selector);
+  return match instanceof HTMLElement ? match : undefined;
 }
 
 async function writeClipboardPayload(payload: ClipboardPayload): Promise<void> {
@@ -3586,7 +3645,7 @@ function normalizeRenderedHtmlForWysiwyg(
     if (!element) {
       return;
     }
-    const markdown = element.dataset.markdown || `\`\`\`mermaid\n${element.textContent?.trimEnd() ?? ""}\n\`\`\``;
+    const markdown = mermaidMarkdownFromElement(element);
     element.replaceWith(createMarkdownPreviewBlock("mermaid", markdown, element.outerHTML));
   });
 
@@ -3745,6 +3804,11 @@ function createMarkdownPreviewBlock(kind: string, markdown: string, html: string
   block.className = `markdown-preview-block markdown-preview-block-${kind}`;
   block.innerHTML = html;
   return block;
+}
+
+function mermaidMarkdownFromElement(element: HTMLElement): string {
+  const previewBlock = element.closest<HTMLElement>("[data-type='markdown-preview-block'][data-markdown]");
+  return previewBlock?.dataset.markdown || element.dataset.markdown || `\`\`\`mermaid\n${element.textContent?.trimEnd() ?? ""}\n\`\`\``;
 }
 
 function createMarkdownInline(kind: string, markdown: string, label: string, href = ""): HTMLElement {

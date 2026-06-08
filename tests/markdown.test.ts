@@ -290,6 +290,22 @@ Rel(user, app, "Uses")
     expect(markdown).toContain("```erDiagram\nCUSTOMER ||--o{ ORDER : places\n```");
   });
 
+  it("preserves Mermaid Markdown from rendered diagram clipboard HTML", async () => {
+    const markdown = await htmlToMarkdown(
+      [
+        '<div data-type="markdown-preview-block" data-kind="mermaid" data-markdown="```mermaid&#10;flowchart TD&#10;  A --&gt; B&#10;```">',
+        '<div class="mermaid" data-markdown="```mermaid&#10;flowchart TD&#10;  A --&gt; B&#10;```">',
+        '<svg><style>#nolia-edit-mermaid-1{font-size:16px}.edge-animation-fast{stroke-dasharray:9,5}</style><text>A</text></svg>',
+        "</div>",
+        "</div>"
+      ].join("")
+    );
+
+    expect(markdown).toContain("```mermaid\nflowchart TD\n  A --> B\n```");
+    expect(markdown).not.toContain("nolia-edit-mermaid");
+    expect(markdown).not.toContain("stroke-dasharray");
+  });
+
   it("serializes TipTap task lists as GFM checkboxes", async () => {
     const markdown = await htmlToMarkdown(
       [
