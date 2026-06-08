@@ -14,6 +14,7 @@ describe("file system binary operations", () => {
     const userData = await makeTempDir();
     const home = await makeTempDir();
     const workspaceRoot = await makeTempDir();
+    let workspaces: WorkspaceService | undefined;
     try {
       const initialBytes = Buffer.from([0x25, 0x50, 0x44, 0x46, 0x00, 0xff]);
       await writeFile(path.join(workspaceRoot, "sample.pdf"), initialBytes);
@@ -22,7 +23,7 @@ describe("file system binary operations", () => {
       await settings.init();
       const diagnostics = new DiagnosticsService(home);
       await diagnostics.init();
-      const workspaces = new WorkspaceService(settings, diagnostics);
+      workspaces = new WorkspaceService(settings, diagnostics);
       const workspace = await workspaces.createWorkspace({ path: workspaceRoot });
       expect(workspace).toBeDefined();
 
@@ -51,6 +52,7 @@ describe("file system binary operations", () => {
       });
       expect(conflict.status).toBe("conflict");
     } finally {
+      await workspaces?.closeActiveWorkspace();
       await rm(userData, { recursive: true, force: true });
       await rm(home, { recursive: true, force: true });
       await rm(workspaceRoot, { recursive: true, force: true });
