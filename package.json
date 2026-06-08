@@ -18,8 +18,8 @@
     "verify:release": "node build/verifyReleaseEnv.cjs",
     "package": "npm run verify:release && npm run build && electron-builder --mac --universal --publish never",
     "package:unsigned": "npm run build && NOLIA_SKIP_NOTARIZE=1 CSC_IDENTITY_AUTO_DISCOVERY=false electron-builder --mac --universal --publish never",
-    "package:linux": "npm run build && electron-builder --linux --publish never",
-    "package:linux:dir": "npm run build && electron-builder --linux --dir --publish never",
+    "package:linux": "npm run build && node build/withLinuxPackagingEnv.cjs",
+    "package:linux:dir": "npm run build && node build/withLinuxPackagingEnv.cjs --dir",
     "package:win": "npm run build && node build/withWinPackagingEnv.cjs",
     "package:win:dir": "npm run build && node build/withWinPackagingEnv.cjs --dir",
     "typecheck": "tsc --noEmit",
@@ -75,7 +75,7 @@
       "gatekeeperAssess": false
     },
     "linux": {
-      "icon": "build/icon.png",
+      "icon": "build/icon.svg",
       "category": "Office",
       "maintainer": "徐晓龙 <ailehuoquan@163.com>",
       "description": "Nolia local-first Markdown knowledge workstation",
