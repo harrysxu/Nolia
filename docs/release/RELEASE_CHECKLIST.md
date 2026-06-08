@@ -94,6 +94,8 @@ npm run package:linux:dir
 
 ## 6. 产物校验
 
+发布包命名统一为 `Nolia-版本-系统-架构.扩展名`，例如 `Nolia-0.1.0-mac-arm64.dmg`、`Nolia-0.1.0-win-x64.exe`、`Nolia-0.1.0-linux-arm64.AppImage`。
+
 ```sh
 codesign --verify --deep --strict --verbose=2 "release/mac-arm64/Nolia.app"
 codesign --verify --deep --strict --verbose=2 "release/mac/Nolia.app"
@@ -107,13 +109,13 @@ xcrun stapler validate "release/mac-arm64/Nolia.app"
 xcrun stapler validate "release/mac/Nolia.app"
 xcrun stapler validate "release/mac-universal/Nolia.app"
 
-hdiutil verify "release/Nolia-0.1.0-arm64.dmg"
-hdiutil verify "release/Nolia-0.1.0.dmg"
-hdiutil verify "release/Nolia-0.1.0-universal.dmg"
+hdiutil verify "release/Nolia-0.1.0-mac-arm64.dmg"
+hdiutil verify "release/Nolia-0.1.0-mac-x64.dmg"
+hdiutil verify "release/Nolia-0.1.0-mac-universal.dmg"
 
-unzip -tq "release/Nolia-0.1.0-arm64-mac.zip"
-unzip -tq "release/Nolia-0.1.0-mac.zip"
-unzip -tq "release/Nolia-0.1.0-universal-mac.zip"
+unzip -tq "release/Nolia-0.1.0-mac-arm64.zip"
+unzip -tq "release/Nolia-0.1.0-mac-x64.zip"
+unzip -tq "release/Nolia-0.1.0-mac-universal.zip"
 ```
 
 Windows 产物校验：

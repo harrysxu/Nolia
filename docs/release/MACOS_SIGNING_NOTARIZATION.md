@@ -93,23 +93,23 @@ npx electron-builder --mac --x64 --publish never
 npx electron-builder --mac --universal --publish never
 ```
 
-主要发布产物：
+发布产物命名统一使用 `Nolia-版本-系统-架构.扩展名`：
 
 ```text
-release/Nolia-0.1.0-arm64.dmg
-release/Nolia-0.1.0-arm64-mac.zip
-release/Nolia-0.1.0.dmg
-release/Nolia-0.1.0-mac.zip
-release/Nolia-0.1.0-universal.dmg
-release/Nolia-0.1.0-universal-mac.zip
+release/Nolia-0.1.0-mac-arm64.dmg
+release/Nolia-0.1.0-mac-arm64.zip
+release/Nolia-0.1.0-mac-x64.dmg
+release/Nolia-0.1.0-mac-x64.zip
+release/Nolia-0.1.0-mac-universal.dmg
+release/Nolia-0.1.0-mac-universal.zip
 ```
 
-当前已验证的 0.1.0 正式包：
+当前已验证的 0.1.0 正式包示例，实际体积以本次构建为准：
 
 ```text
-arm64:     Nolia-0.1.0-arm64.dmg 143M, Nolia-0.1.0-arm64-mac.zip 152M
-x64:       Nolia-0.1.0.dmg 149M, Nolia-0.1.0-mac.zip 168M
-universal: Nolia-0.1.0-universal.dmg 227M, Nolia-0.1.0-universal-mac.zip 254M
+arm64:     Nolia-0.1.0-mac-arm64.dmg, Nolia-0.1.0-mac-arm64.zip
+x64:       Nolia-0.1.0-mac-x64.dmg, Nolia-0.1.0-mac-x64.zip
+universal: Nolia-0.1.0-mac-universal.dmg, Nolia-0.1.0-mac-universal.zip
 ```
 
 本地验证包使用 `npm run package:unsigned`，不要把 unsigned 包作为正式发布包。
@@ -144,13 +144,13 @@ xcrun stapler validate release/mac-arm64/Nolia.app
 xcrun stapler validate release/mac/Nolia.app
 xcrun stapler validate release/mac-universal/Nolia.app
 
-hdiutil verify release/Nolia-0.1.0-arm64.dmg
-hdiutil verify release/Nolia-0.1.0.dmg
-hdiutil verify release/Nolia-0.1.0-universal.dmg
+hdiutil verify release/Nolia-0.1.0-mac-arm64.dmg
+hdiutil verify release/Nolia-0.1.0-mac-x64.dmg
+hdiutil verify release/Nolia-0.1.0-mac-universal.dmg
 
-unzip -tq release/Nolia-0.1.0-arm64-mac.zip
-unzip -tq release/Nolia-0.1.0-mac.zip
-unzip -tq release/Nolia-0.1.0-universal-mac.zip
+unzip -tq release/Nolia-0.1.0-mac-arm64.zip
+unzip -tq release/Nolia-0.1.0-mac-x64.zip
+unzip -tq release/Nolia-0.1.0-mac-universal.zip
 ```
 
 验证结果必须包含 `source=Notarized Developer ID`。架构检查命令：
