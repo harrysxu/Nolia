@@ -2968,6 +2968,20 @@ body.is-resizing-right-panel {
   display: block;
 }
 
+.markdown-preview-block-toc,
+.markdown-preview-block-toc .markdown-preview-block-render {
+  cursor: default;
+}
+
+.markdown-preview-block-toc .markdown-preview-block-source,
+.markdown-preview-block-toc.is-editing .markdown-preview-block-source {
+  display: none;
+}
+
+.markdown-preview-block-toc a[href^="#"] {
+  cursor: pointer;
+}
+
 .wysiwyg-editor .ProseMirror .callout {
   margin: 16px 0;
   padding: 12px 14px;

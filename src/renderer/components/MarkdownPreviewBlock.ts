@@ -1,4 +1,6 @@
 import { Node, mergeAttributes } from "@tiptap/core";
+import { NodeSelection, TextSelection } from "@tiptap/pm/state";
+import type { EditorView } from "@tiptap/pm/view";
 import mermaid from "mermaid";
 import { wireMarkdownNodeInteraction } from "./markdownNodeInteraction";
 
@@ -105,16 +107,22 @@ export const MarkdownPreviewBlock = Node.create<MarkdownPreviewBlockOptions>({
         }
       };
 
-      wireMarkdownNodeInteraction({
-        wrapper,
-        input,
-        view,
-        getPos: () => {
-          const pos = getPos();
-          return typeof pos === "number" ? pos : undefined;
-        },
-        setEditing
-      });
+      const getNodePos = () => {
+        const pos = getPos();
+        return typeof pos === "number" ? pos : undefined;
+      };
+
+      if (node.attrs.kind === "toc") {
+        wireTocBlockNavigation(wrapper, view, getNodePos);
+      } else {
+        wireMarkdownNodeInteraction({
+          wrapper,
+          input,
+          view,
+          getPos: getNodePos,
+          setEditing
+        });
+      }
       input.addEventListener("keydown", (event) => {
         event.stopPropagation();
         if (event.key === "Escape") {
@@ -134,8 +142,12 @@ export const MarkdownPreviewBlock = Node.create<MarkdownPreviewBlockOptions>({
           if (updatedNode.type.name !== "markdownPreviewBlock") {
             return false;
           }
+          if (currentNode.attrs.kind !== updatedNode.attrs.kind) {
+            return false;
+          }
           currentNode = updatedNode;
-          const isEditing = wrapper.classList.contains("is-editing");
+          const wasToc = wrapper.dataset.kind === "toc";
+          const isEditing = !wasToc && wrapper.classList.contains("is-editing");
           wrapper.className = `markdown-preview-block markdown-preview-block-${updatedNode.attrs.kind}`;
           if (isEditing) {
             wrapper.classList.add("is-editing");
@@ -155,6 +167,102 @@ export const MarkdownPreviewBlock = Node.create<MarkdownPreviewBlockOptions>({
     };
   }
 });
+
+function wireTocBlockNavigation(wrapper: HTMLElement, view: EditorView, getPos: () => number | undefined) {
+  const selectBlock = () => {
+    const pos = getPos();
+    if (typeof pos !== "number") {
+      return;
+    }
+    view.dispatch(view.state.tr.setSelection(NodeSelection.create(view.state.doc, pos)));
+  };
+  const handlePointer = (event: MouseEvent) => {
+    if (event.target instanceof Element) {
+      const anchor = event.target.closest<HTMLAnchorElement>("a[href^='#']");
+      if (anchor && wrapper.contains(anchor)) {
+        event.preventDefault();
+        event.stopPropagation();
+        jumpToHeadingReference(view, anchor.getAttribute("href") ?? "");
+        return;
+      }
+    }
+    event.preventDefault();
+    event.stopPropagation();
+    selectBlock();
+    view.focus();
+  };
+  wrapper.addEventListener("mousedown", handlePointer);
+  wrapper.addEventListener("click", handlePointer);
+  wrapper.addEventListener("dblclick", handlePointer);
+  wrapper.addEventListener("focus", () => selectBlock());
+  wrapper.addEventListener("keydown", (event) => {
+    if (event.key !== "Enter" && event.key !== " ") {
+      return;
+    }
+    event.preventDefault();
+    event.stopPropagation();
+    const firstAnchor = wrapper.querySelector<HTMLAnchorElement>("a[href^='#']");
+    if (firstAnchor) {
+      jumpToHeadingReference(view, firstAnchor.getAttribute("href") ?? "");
+    }
+  });
+}
+
+function jumpToHeadingReference(view: EditorView, href: string): boolean {
+  const normalizedReference = normalizeHeadingReference(href.replace(/^#/, ""));
+  if (!normalizedReference) {
+    return false;
+  }
+  let targetPosition: number | undefined;
+  view.state.doc.descendants((node, position) => {
+    if (node.type.name !== "heading") {
+      return;
+    }
+    const text = node.textContent.trim();
+    const level = typeof node.attrs.level === "number" ? node.attrs.level : 1;
+    const keys = [
+      slugifyHeading(text),
+      slugifyHeadingWithLevel(text, level),
+      text
+    ].map(normalizeHeadingReference);
+    if (keys.includes(normalizedReference)) {
+      targetPosition = position;
+      return false;
+    }
+  });
+  if (targetPosition === undefined) {
+    return false;
+  }
+  view.dispatch(view.state.tr.setSelection(TextSelection.create(view.state.doc, targetPosition + 1)).scrollIntoView());
+  view.focus();
+  return true;
+}
+
+function normalizeHeadingReference(value: string): string {
+  let decoded: string;
+  try {
+    decoded = decodeURIComponent(value);
+  } catch {
+    decoded = value;
+  }
+  return decoded
+    .trim()
+    .toLowerCase()
+    .replace(/^#/, "")
+    .replace(/\s+/g, "-");
+}
+
+function slugifyHeading(text: string): string {
+  return text
+    .toLowerCase()
+    .trim()
+    .replace(/[^\p{L}\p{N}]+/gu, "-")
+    .replace(/^-|-$/g, "");
+}
+
+function slugifyHeadingWithLevel(text: string, level: number): string {
+  return `${slugifyHeading(text)}-${level}`;
+}
 
 function renderPreviewBlock(target: HTMLElement, kind: string, html: string, markdown: string) {
   target.innerHTML = html || fallbackPreviewHtml(kind, markdown);

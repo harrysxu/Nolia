@@ -197,6 +197,51 @@ test("WYSIWYG toolbar inserts a Markdown table of contents at the cursor", async
   expect(tocIndex).toBeLessThan(source.indexOf("Paragraph after."));
 });
 
+test("WYSIWYG table of contents is read-only and jumps to headings", async ({ page }) => {
+  const body = [
+    "# Alpha",
+    "",
+    "Intro paragraph.",
+    "",
+    "## Beta",
+    "",
+    ...Array.from({ length: 18 }, (_, index) => `Spacer paragraph ${index + 1}.`),
+    "",
+    "## Gamma",
+    "",
+    "Target paragraph."
+  ].join("\n\n");
+  await setupBoundaryWorkspace(page, {
+    "toc-readonly.md": [
+      "<!-- nolia-toc:start -->",
+      "## 目录",
+      "",
+      "- [Alpha](#alpha)",
+      "  - [Beta](#beta)",
+      "  - [Gamma](#gamma)",
+      "<!-- nolia-toc:end -->",
+      "",
+      body
+    ].join("\n")
+  });
+
+  await openWorkspaceNote(page, "toc-readonly.md");
+  await page.getByRole("button", { name: "编辑", exact: true }).click();
+  const editor = page.locator(".ProseMirror");
+  const tocBlock = editor.locator(".markdown-preview-block-toc");
+  await expect(tocBlock).toBeVisible();
+  await tocBlock.click();
+  await expect(page.getByRole("textbox", { name: "Markdown 块源码" })).toBeHidden();
+
+  const scrollBefore = await page.locator(".wysiwyg-editor").evaluate((element) => element.scrollTop);
+  await tocBlock.getByRole("link", { name: "Gamma" }).click();
+  await expect(page.getByRole("textbox", { name: "Markdown 块源码" })).toBeHidden();
+  await expect.poll(() => page.locator(".wysiwyg-editor").evaluate((element) => element.scrollTop)).toBeGreaterThan(scrollBefore);
+
+  await page.getByRole("button", { name: "MD", exact: true }).click();
+  expect(await sourceContains(page, "- [Gamma](#gamma)")).toBe(true);
+});
+
 test("source toolbar toggles Markdown line numbers", async ({ page }) => {
   await setupBoundaryWorkspace(page, {
     "line-numbers.md": ["# Alpha", "", "Body."].join("\n")
