@@ -60,7 +60,6 @@
     "directories": {
       "output": "release"
     },
-    "artifactName": "${productName}-${version}-${os}-${arch}.${ext}",
     "toolsets": {
       "winCodeSign": "1.1.0"
     },
