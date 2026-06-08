@@ -331,6 +331,10 @@ function markdownTocList(source: string): string {
     .join("\n");
 }
 
+export function slugifyMarkdownHeadingId(text: string): string {
+  return slugify(text);
+}
+
 function replaceMarkdownTocBlocks(source: string, createReplacement: (blockSource: string) => string): string {
   return source.replace(tocBlockPattern(), (blockSource) => createReplacement(blockSource));
 }

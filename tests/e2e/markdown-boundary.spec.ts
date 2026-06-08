@@ -242,6 +242,42 @@ test("WYSIWYG table of contents is read-only and jumps to headings", async ({ pa
   expect(await sourceContains(page, "- [Gamma](#gamma)")).toBe(true);
 });
 
+test("WYSIWYG table of contents jumps to headings with punctuation slugs", async ({ page }) => {
+  const body = [
+    "# A2UI v0.8 协议 详细完整指南",
+    "",
+    "Intro paragraph.",
+    "",
+    ...Array.from({ length: 18 }, (_, index) => `Spacer paragraph ${index + 1}.`),
+    "",
+    "## surfaceUpdate - 定义UI结构",
+    "",
+    "Target paragraph."
+  ].join("\n\n");
+  await setupBoundaryWorkspace(page, {
+    "toc-punctuation.md": [
+      "<!-- nolia-toc:start -->",
+      "## 目录",
+      "",
+      "- [A2UI v0.8 协议 详细完整指南](#a2ui-v08-协议-详细完整指南)",
+      "  - [surfaceUpdate - 定义UI结构](#surfaceupdate---定义ui结构)",
+      "<!-- nolia-toc:end -->",
+      "",
+      body
+    ].join("\n")
+  });
+
+  await openWorkspaceNote(page, "toc-punctuation.md");
+  await page.getByRole("button", { name: "编辑", exact: true }).click();
+  const tocBlock = page.locator(".ProseMirror .markdown-preview-block-toc");
+  await expect(tocBlock).toBeVisible();
+
+  const scrollBefore = await page.locator(".wysiwyg-editor").evaluate((element) => element.scrollTop);
+  await tocBlock.getByRole("link", { name: "surfaceUpdate - 定义UI结构" }).click();
+  await expect.poll(() => page.locator(".wysiwyg-editor").evaluate((element) => element.scrollTop)).toBeGreaterThan(scrollBefore);
+  await expect(page.getByRole("textbox", { name: "Markdown 块源码" })).toBeHidden();
+});
+
 test("source toolbar toggles Markdown line numbers", async ({ page }) => {
   await setupBoundaryWorkspace(page, {
     "line-numbers.md": ["# Alpha", "", "Body."].join("\n")

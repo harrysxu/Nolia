@@ -75,7 +75,7 @@ import {
   X
 } from "lucide-react";
 
-import { createMarkdownTocBlock, hasMarkdownToc, htmlToMarkdown, isMermaidFenceLanguage, mergeWysiwygBodyIntoSource, renderMarkdownToHtml, updateFencedCodeBlockLanguage, updateMarkdownToc } from "../shared/markdown";
+import { createMarkdownTocBlock, hasMarkdownToc, htmlToMarkdown, isMermaidFenceLanguage, mergeWysiwygBodyIntoSource, renderMarkdownToHtml, slugifyMarkdownHeadingId, updateFencedCodeBlockLanguage, updateMarkdownToc } from "../shared/markdown";
 import { DEFAULT_SETTINGS } from "../shared/constants";
 import { getBuiltInExtensionManifests } from "../shared/builtinExtensions";
 import { createTranslator, formatFileSize as formatLocalizedFileSize, resolveLocale, type Translator } from "../shared/i18n";
@@ -2821,7 +2821,7 @@ function headingIndexForReference(document: OpenDocumentTab, reference: string):
     return undefined;
   }
   const index = document.parsed.headings.findIndex((heading) => {
-    const keys = [heading.id, heading.text, slugifyMarkdownHeading(heading.text)].map(normalizeMarkdownHeadingReference);
+    const keys = [heading.id, heading.text, slugifyMarkdownHeadingId(heading.text)].map(normalizeMarkdownHeadingReference);
     return keys.includes(normalizedReference);
   });
   return index >= 0 ? index : undefined;
@@ -2897,14 +2897,6 @@ function decodeMarkdownUrlPart(value: string): string {
   } catch {
     return value;
   }
-}
-
-function slugifyMarkdownHeading(text: string): string {
-  return text
-    .toLowerCase()
-    .trim()
-    .replace(/[^\p{L}\p{N}]+/gu, "-")
-    .replace(/^-+|-+$/g, "");
 }
 
 function externalAssetPathFromSource(source: string, documentPath: string): { absolutePath: string; markdownSource: string } | undefined {

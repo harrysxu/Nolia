@@ -2,6 +2,7 @@ import { Node, mergeAttributes } from "@tiptap/core";
 import { NodeSelection, TextSelection } from "@tiptap/pm/state";
 import type { EditorView } from "@tiptap/pm/view";
 import mermaid from "mermaid";
+import { slugifyMarkdownHeadingId } from "../../shared/markdown";
 import { wireMarkdownNodeInteraction } from "./markdownNodeInteraction";
 
 type MarkdownPreviewBlockOptions = {
@@ -219,10 +220,8 @@ function jumpToHeadingReference(view: EditorView, href: string): boolean {
       return;
     }
     const text = node.textContent.trim();
-    const level = typeof node.attrs.level === "number" ? node.attrs.level : 1;
     const keys = [
-      slugifyHeading(text),
-      slugifyHeadingWithLevel(text, level),
+      slugifyMarkdownHeadingId(text),
       text
     ].map(normalizeHeadingReference);
     if (keys.includes(normalizedReference)) {
@@ -250,18 +249,6 @@ function normalizeHeadingReference(value: string): string {
     .toLowerCase()
     .replace(/^#/, "")
     .replace(/\s+/g, "-");
-}
-
-function slugifyHeading(text: string): string {
-  return text
-    .toLowerCase()
-    .trim()
-    .replace(/[^\p{L}\p{N}]+/gu, "-")
-    .replace(/^-|-$/g, "");
-}
-
-function slugifyHeadingWithLevel(text: string, level: number): string {
-  return `${slugifyHeading(text)}-${level}`;
 }
 
 function renderPreviewBlock(target: HTMLElement, kind: string, html: string, markdown: string) {
