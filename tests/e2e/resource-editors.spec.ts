@@ -134,13 +134,13 @@ test("resource previews cover image, PDF, audio, video, archive, and unknown fil
   await page.getByRole("button", { name: "archive.zip", exact: true }).click();
   await expect(page.locator(".resource-kind-pill")).toHaveText("压缩包资源");
   await expect(page.locator(".resource-placeholder")).toContainText("压缩包不会在笔记内解压预览");
-  await expect(page.locator(".resource-placeholder")).toContainText("资源管理器");
+  await expect(page.locator(".resource-placeholder")).toContainText(platformFileManagerLabel());
 
   await page.getByRole("button", { name: "blob.bin", exact: true }).click();
   await expect(page.locator(".resource-kind-pill")).toHaveText("资源文件");
   await expect(page.locator(".resource-placeholder")).toContainText("暂不支持内嵌预览");
   await page.getByRole("button", { name: "用系统应用打开" }).click();
-  await page.getByRole("button", { name: "在资源管理器中显示" }).click();
+  await page.getByRole("button", { name: platformRevealButtonLabel() }).click();
   await expect
     .poll(() => page.evaluate(() => (window as typeof window & { __noliaMock: { openedExternal: string[] } }).__noliaMock.openedExternal))
     .toContain("assets/blob.bin");
@@ -148,6 +148,26 @@ test("resource previews cover image, PDF, audio, video, archive, and unknown fil
     .poll(() => page.evaluate(() => (window as typeof window & { __noliaMock: { revealed: string[] } }).__noliaMock.revealed))
     .toContain("assets/blob.bin");
 });
+
+function platformFileManagerLabel(): string {
+  if (process.platform === "darwin") {
+    return "访达";
+  }
+  if (process.platform === "win32") {
+    return "资源管理器";
+  }
+  return "文件管理器";
+}
+
+function platformRevealButtonLabel(): string {
+  if (process.platform === "darwin") {
+    return "在访达中显示";
+  }
+  if (process.platform === "win32") {
+    return "在资源管理器中显示";
+  }
+  return "在文件管理器中显示";
+}
 
 async function openAssetsFolder(page: Page) {
   await expect(page.getByRole("navigation", { name: "工作区导航" })).toBeVisible();

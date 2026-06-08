@@ -42,6 +42,18 @@
       {
         "from": "docs",
         "to": "docs"
+      },
+      {
+        "from": "LICENSE",
+        "to": "LICENSE"
+      },
+      {
+        "from": "SECURITY.md",
+        "to": "SECURITY.md"
+      },
+      {
+        "from": "CONTRIBUTING.md",
+        "to": "CONTRIBUTING.md"
       }
     ],
     "directories": {
