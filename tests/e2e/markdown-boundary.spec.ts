@@ -1,4 +1,5 @@
 import { expect, test, type Page } from "@playwright/test";
+import { DEFAULT_AI_SETTINGS } from "../../src/shared/ai";
 import type { AppSettings, FileTreeNode, ParsedDocument, WorkspaceInfo } from "../../src/shared/types";
 
 const shortcutModifier = process.platform === "darwin" ? "Meta" : "Control";
@@ -13,6 +14,7 @@ const settings: AppSettings = {
   focusMode: false,
   autoSaveDelayMs: 80,
   attachmentStrategy: "workspace_assets",
+  ai: DEFAULT_AI_SETTINGS,
   pluginSafeMode: false,
   plugins: {}
 };

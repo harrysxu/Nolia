@@ -1,7 +1,8 @@
-import { readFile, writeFile, mkdir, access } from "node:fs/promises";
+import { access, mkdir, readFile, rename, writeFile } from "node:fs/promises";
 import path from "node:path";
 
 import { DEFAULT_SETTINGS } from "../../shared/constants";
+import { DEFAULT_AI_SETTINGS, AiSettingsSchema } from "../../shared/ai";
 import type { AppSettings, RecentWorkspace } from "../../shared/types";
 
 interface WindowState {
@@ -44,6 +45,7 @@ export class SettingsService {
         settings: {
           ...defaultSettings,
           ...(parsed.settings ?? {}),
+          ai: normalizeAiSettings(parsed.settings?.ai),
           plugins: normalizePluginSettings(parsed.settings?.plugins)
         },
         recentWorkspaces: parsed.recentWorkspaces ?? [],
@@ -61,7 +63,7 @@ export class SettingsService {
   async setSetting(key: string, value: unknown): Promise<AppSettings> {
     this.state.settings = {
       ...this.state.settings,
-      [key]: key === "plugins" ? normalizePluginSettings(value) : value
+      [key]: key === "plugins" ? normalizePluginSettings(value) : key === "ai" ? normalizeAiSettings(value) : value
     } as AppSettings;
     await this.persist();
     return this.getSettings();
@@ -154,8 +156,39 @@ export class SettingsService {
   }
 
   private async persist(): Promise<void> {
-    await writeFile(this.statePath, `${JSON.stringify(this.state, null, 2)}\n`, "utf8");
+    const tempPath = `${this.statePath}.${process.pid}.${Date.now()}.tmp`;
+    await writeFile(tempPath, `${JSON.stringify(this.state, null, 2)}\n`, "utf8");
+    await rename(tempPath, this.statePath);
   }
+}
+
+function normalizeAiSettings(value: unknown): AppSettings["ai"] {
+  const raw = value && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : {};
+  const privacy = raw.privacy && typeof raw.privacy === "object" && !Array.isArray(raw.privacy) ? raw.privacy as Record<string, unknown> : {};
+  const index = raw.index && typeof raw.index === "object" && !Array.isArray(raw.index) ? raw.index as Record<string, unknown> : {};
+  const providers = raw.providers && typeof raw.providers === "object" && !Array.isArray(raw.providers) ? raw.providers as Record<string, unknown> : {};
+  const commands = raw.commands && typeof raw.commands === "object" && !Array.isArray(raw.commands) ? raw.commands as Record<string, unknown> : {};
+  const parsed = AiSettingsSchema.safeParse({
+    ...DEFAULT_AI_SETTINGS,
+    ...raw,
+    privacy: {
+      ...DEFAULT_AI_SETTINGS.privacy,
+      ...privacy
+    },
+    index: {
+      ...DEFAULT_AI_SETTINGS.index,
+      ...index
+    },
+    providers: {
+      ...DEFAULT_AI_SETTINGS.providers,
+      ...providers
+    },
+    commands: {
+      ...DEFAULT_AI_SETTINGS.commands,
+      ...commands
+    }
+  });
+  return parsed.success ? parsed.data : DEFAULT_AI_SETTINGS;
 }
 
 function normalizePluginSettings(value: unknown): AppSettings["plugins"] {

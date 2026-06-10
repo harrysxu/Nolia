@@ -1,6 +1,7 @@
 import type { ReactNode } from "react";
 
 import type { ExtensionContributions, ExtensionManifest, ExtensionPermission, PluginDescriptor } from "../../shared/extensions";
+import type { AiExtractorKind } from "../../shared/ai";
 import type { FileBinaryReadResponse } from "../../shared/types";
 
 export interface Disposable {
@@ -9,6 +10,14 @@ export interface Disposable {
 
 export type PluginRenderResult = ReactNode | HTMLElement | string | null | undefined;
 export type PluginRenderProvider<TContext> = (context: TContext) => PluginRenderResult | Promise<PluginRenderResult>;
+export type PluginAttachmentExtractorResult = { text: string; warnings?: string[] } | string;
+export type PluginAttachmentExtractorHandler = (context: {
+  workspaceId: string;
+  pathRel: string;
+  kind: AiExtractorKind;
+  readText: () => Promise<string>;
+  readBinary: () => Promise<FileBinaryReadResponse>;
+}) => PluginAttachmentExtractorResult | Promise<PluginAttachmentExtractorResult>;
 
 export interface PluginSidebarPanelContext {
   workspace?: {
@@ -58,6 +67,9 @@ export interface PluginHostApi {
     registerFileViewer: (id: string, render: PluginRenderProvider<PluginFileViewerContext>) => Disposable;
     registerFileEditor: (id: string, render: PluginRenderProvider<PluginFileEditorContext>) => Disposable;
   };
+  ai: {
+    registerAttachmentExtractor: (id: string, handler: PluginAttachmentExtractorHandler) => Disposable;
+  };
   workspace: {
     getActiveWorkspace: () => { workspaceId: string; name: string; rootPath: string } | undefined;
     readFile: (pathRel: string) => Promise<string>;
@@ -91,6 +103,7 @@ export interface RendererPluginHost {
   registerSidebarPanel: (pluginId: string, id: string, render: PluginRenderProvider<PluginSidebarPanelContext>) => Disposable;
   registerFileViewer: (pluginId: string, id: string, render: PluginRenderProvider<PluginFileViewerContext>) => Disposable;
   registerFileEditor: (pluginId: string, id: string, render: PluginRenderProvider<PluginFileEditorContext>) => Disposable;
+  registerAttachmentExtractor: (pluginId: string, id: string, handler: PluginAttachmentExtractorHandler) => Disposable;
   getActiveWorkspace: () => { workspaceId: string; name: string; rootPath: string } | undefined;
   readWorkspaceFile: (pluginId: string, pathRel: string) => Promise<string>;
   writeWorkspaceFile: (pluginId: string, pathRel: string, content: string) => Promise<void>;
@@ -134,6 +147,13 @@ export async function activateRendererPlugin(descriptor: PluginDescriptor, host:
         },
         registerFileEditor: (id, render) => {
           const disposable = host.registerFileEditor(descriptor.pluginId, id, render);
+          subscriptions.push(disposable);
+          return disposable;
+        }
+      },
+      ai: {
+        registerAttachmentExtractor: (id, handler) => {
+          const disposable = host.registerAttachmentExtractor(descriptor.pluginId, id, handler);
           subscriptions.push(disposable);
           return disposable;
         }

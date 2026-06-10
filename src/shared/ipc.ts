@@ -1,6 +1,48 @@
 import { z } from "zod";
 
 export { IpcChannels, type IpcChannel } from "./channels";
+export {
+  AiChatCancelRequestSchema,
+  AiChatStartRequestSchema,
+  AiAttachmentExtractRequestSchema,
+  AiChangePlanApplyRequestSchema,
+  AiChangePlanPrepareRequestSchema,
+  AiCommandRunRequestSchema,
+  AiCommandsListRequestSchema,
+  AiContextPreviewRequestSchema,
+  AiCredentialDeleteRequestSchema,
+  AiCredentialListRequestSchema,
+  AiCredentialSetRequestSchema,
+  AiIndexCancelRequestSchema,
+  AiIndexClearRequestSchema,
+  AiIndexRebuildRequestSchema,
+  AiIndexStatusRequestSchema,
+  AiInsightsRequestSchema,
+  AiModelsListRequestSchema,
+  AiProviderTestRequestSchema,
+  AiSettingsSetRequestSchema,
+  AiWebSearchRequestSchema,
+  type AiAttachmentExtractRequest,
+  type AiChangePlanApplyRequest,
+  type AiChangePlanPrepareRequest,
+  type AiChatCancelRequest,
+  type AiChatStartRequest,
+  type AiCommandRunRequest,
+  type AiCommandsListRequest,
+  type AiContextPreviewRequest,
+  type AiCredentialDeleteRequest,
+  type AiCredentialListRequest,
+  type AiCredentialSetRequest,
+  type AiIndexCancelRequest,
+  type AiIndexClearRequest,
+  type AiIndexRebuildRequest,
+  type AiIndexStatusRequest,
+  type AiInsightsRequest,
+  type AiModelsListRequest,
+  type AiProviderTestRequest,
+  type AiSettingsSetRequest,
+  type AiWebSearchRequest
+} from "./ai";
 
 export const EmptySchema = z.object({}).strict();
 

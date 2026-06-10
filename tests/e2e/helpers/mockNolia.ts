@@ -1,4 +1,6 @@
 import type { Page } from "@playwright/test";
+import { BUILTIN_AI_COMMANDS, DEFAULT_AI_SETTINGS } from "../../../src/shared/ai";
+import type { AiChatStreamEvent, AiIndexStatus } from "../../../src/shared/ai";
 import type { PluginDescriptor } from "../../../src/shared/extensions";
 import type { AppSettings, BacklinksResponse, FileTreeNode, ParsedDocument, RecentWorkspace, SearchResultItem, WorkspaceIndexedEvent, WorkspaceInfo } from "../../../src/shared/types";
 
@@ -13,6 +15,7 @@ export const defaultTestSettings: AppSettings = {
   focusMode: false,
   autoSaveDelayMs: 60,
   attachmentStrategy: "workspace_assets",
+  ai: DEFAULT_AI_SETTINGS,
   pluginSafeMode: false,
   plugins: {}
 };
@@ -38,7 +41,7 @@ export interface MockWorkspaceOptions {
 }
 
 export async function installMockNolia(page: Page, options: MockWorkspaceOptions = {}) {
-  await page.addInitScript((rawOptions: MockWorkspaceOptions & { defaultSettings: AppSettings; platform: NodeJS.Platform }) => {
+  await page.addInitScript((rawOptions: MockWorkspaceOptions & { defaultSettings: AppSettings; platform: NodeJS.Platform; builtInAiCommands: typeof BUILTIN_AI_COMMANDS }) => {
     type MockFileNode = { pathRel: string; name: string; kind: FileTreeNode["kind"]; size: number; mtimeMs: number; children?: MockFileNode[] };
     type MockWindow = typeof window & {
       __emitWorkspaceIndexed?: (event?: Partial<WorkspaceIndexedEvent>) => void;
@@ -75,6 +78,26 @@ export async function installMockNolia(page: Page, options: MockWorkspaceOptions
     let mutableSettings: AppSettings = {
       ...rawOptions.defaultSettings,
       ...(rawOptions.settings ?? {}),
+      ai: {
+        ...rawOptions.defaultSettings.ai,
+        ...(rawOptions.settings?.ai ?? {}),
+        providers: {
+          ...rawOptions.defaultSettings.ai.providers,
+          ...(rawOptions.settings?.ai?.providers ?? {})
+        },
+        commands: {
+          ...rawOptions.defaultSettings.ai.commands,
+          ...(rawOptions.settings?.ai?.commands ?? {})
+        },
+        privacy: {
+          ...rawOptions.defaultSettings.ai.privacy,
+          ...(rawOptions.settings?.ai?.privacy ?? {})
+        },
+        index: {
+          ...rawOptions.defaultSettings.ai.index,
+          ...(rawOptions.settings?.ai?.index ?? {})
+        }
+      },
       plugins: {
         ...rawOptions.defaultSettings.plugins,
         ...(rawOptions.settings?.plugins ?? {})
@@ -87,6 +110,10 @@ export async function installMockNolia(page: Page, options: MockWorkspaceOptions
     const explicitSearchItems = rawOptions.searchItems;
     const backlinks = rawOptions.backlinks ?? { linked: [], unlinked: [] };
     const workspaceIndexedListeners = new Set<(event: WorkspaceIndexedEvent) => void>();
+    const aiChatListeners = new Set<(event: AiChatStreamEvent) => void>();
+    let aiIndexStatus: AiIndexStatus = mutableSettings.ai.index.enabled
+      ? { status: "idle" as const, progress: 0, message: "AI index has not been built." }
+      : { status: "disabled" as const, progress: 0, message: "AI index is disabled." };
 
     const testWindow = window as MockWindow;
     testWindow.__noliaMock = {
@@ -121,6 +148,7 @@ export async function installMockNolia(page: Page, options: MockWorkspaceOptions
     const fileNameFor = (pathRel: string) => pathRel.split("/").filter(Boolean).pop() ?? pathRel;
     const parentPathFor = (pathRel: string) => pathRel.split("/").filter(Boolean).slice(0, -1).join("/");
     const extensionFor = (pathRel: string) => pathRel.match(/\.[^.\\/]+$/)?.[0].toLowerCase() ?? "";
+    const isTextResourcePath = (pathRel: string) => [".txt", ".csv", ".json", ".yaml", ".yml", ".toml", ".xml", ".html", ".htm", ".log"].includes(extensionFor(pathRel));
     const kindFor = (pathRel: string): FileTreeNode["kind"] => {
       if (extensionFor(pathRel).match(/^\.md(own|arkdown)?$/)) {
         return "markdown";
@@ -326,6 +354,227 @@ export async function installMockNolia(page: Page, options: MockWorkspaceOptions
           return mutableSettings;
         }
       },
+      ai: {
+        listCredentials: async () => [],
+        setCredential: async ({ providerId, label }) => ({ keyRef: `ai:${providerId}:mock`, providerId, label, createdAt: now, updatedAt: Date.now() }),
+        deleteCredential: async () => ({ ok: true }),
+        testProvider: async () => ({ ok: true, message: "Mock provider is ready." }),
+        listModels: async () => ({ models: [{ id: "mock-fast", providerId: "mock", label: "Mock Fast" }] }),
+        previewContext: async ({ prompt, editor, includeSelection, includeCurrentDocument }) => {
+          const items = [];
+          if (includeSelection !== false && editor?.selectionText?.trim()) {
+            items.push({
+              id: "selection",
+              kind: "selection" as const,
+              label: "选区",
+              pathRel: editor.pathRel,
+              title: editor.title,
+              excerpt: editor.selectionText.slice(0, 400),
+              charCount: editor.selectionText.length
+            });
+          }
+          if (includeCurrentDocument !== false && editor?.sourceText?.trim()) {
+            items.push({
+              id: "current-document",
+              kind: "current-document" as const,
+              label: "当前文档",
+              pathRel: editor.pathRel,
+              title: editor.title,
+              excerpt: editor.sourceText.slice(0, 400),
+              charCount: editor.sourceText.length
+            });
+          }
+          return {
+            previewId: `preview:${Date.now()}`,
+            providerId: "mock",
+            model: "mock-fast",
+            estimatedInputChars: (prompt?.length ?? 0) + items.reduce((sum, item) => sum + item.charCount, 0),
+            items,
+            warnings: [],
+            expiresAt: Date.now() + 60_000
+          };
+        },
+        startChat: async ({ prompt, editor }) => {
+          const requestId = `ai:${Date.now()}`;
+          const text = `Mock AI: ${prompt || "当前文档"}`;
+          const citations = editor?.pathRel
+            ? [{ contextItemId: "current-document", pathRel: editor.pathRel, title: editor.title, line: 1 }]
+            : [];
+          window.setTimeout(() => {
+            aiChatListeners.forEach((listener) => listener({ requestId, type: "started", providerId: "mock", model: "mock-fast" }));
+            aiChatListeners.forEach((listener) => listener({ requestId, type: "delta", text }));
+            aiChatListeners.forEach((listener) => listener({ requestId, type: "result", result: { requestId, text, citations } }));
+            aiChatListeners.forEach((listener) => listener({ requestId, type: "done" }));
+          }, 0);
+          return { requestId };
+        },
+        cancelChat: async ({ requestId }) => {
+          aiChatListeners.forEach((listener) => listener({ requestId, type: "cancelled" }));
+          return { ok: true };
+        },
+        listCommands: async () => [...rawOptions.builtInAiCommands, ...Object.values(mutableSettings.ai.commands)].filter((command) => command.enabled).sort((left, right) => left.order - right.order || left.name.localeCompare(right.name)),
+        runCommand: async (request) => window.nolia.ai!.startChat(request),
+        indexStatus: async () => mutableSettings.ai.index.enabled ? aiIndexStatus : { status: "disabled" as const, progress: 0, message: "AI index is disabled." },
+        rebuildIndex: async () => {
+          if (!mutableSettings.ai.index.enabled) {
+            aiIndexStatus = { status: "disabled" as const, progress: 0, message: "AI index is disabled." };
+            return aiIndexStatus;
+          }
+          const indexedTextCount = mutableSettings.ai.index.includeTextResources
+            ? [...files.keys()].filter((pathRel) => kindFor(pathRel) === "markdown" || isTextResourcePath(pathRel)).length
+            : 0;
+          aiIndexStatus = { status: "ready" as const, progress: 1, message: "AI index is ready.", chunkCount: indexedTextCount, updatedAt: Date.now() };
+          return aiIndexStatus;
+        },
+        clearIndex: async () => {
+          aiIndexStatus = { status: "idle" as const, progress: 0, message: "AI index has been cleared.", chunkCount: 0, embeddingChunkCount: 0, updatedAt: Date.now() };
+          return aiIndexStatus;
+        },
+        cancelIndex: async () => {
+          aiIndexStatus = { ...aiIndexStatus, status: "paused" as const, paused: true, message: "AI indexing pause requested." };
+          return aiIndexStatus;
+        },
+        webSearch: async () => ({
+          providerId: "disabled",
+          results: []
+        }),
+        extractAttachment: async ({ pathRel }) => ({
+          pathRel,
+          kind: isTextResourcePath(pathRel) ? "text" as const : "unsupported" as const,
+          title: pathRel.split("/").pop() ?? pathRel,
+          text: files.get(pathRel) ?? "",
+          warnings: files.has(pathRel) ? [] : [`No extractable mock attachment for ${pathRel}`]
+        }),
+        prepareChangePlan: async ({ sourceText }) => {
+          const candidates: string[] = [];
+          const fenced = [...sourceText.matchAll(/```(?:json)?\s*([\s\S]*?)```/gi)].map((match) => match[1].trim());
+          candidates.push(...fenced);
+          const firstObject = sourceText.indexOf("{");
+          const lastObject = sourceText.lastIndexOf("}");
+          if (firstObject >= 0 && lastObject > firstObject) {
+            candidates.push(sourceText.slice(firstObject, lastObject + 1));
+          }
+          const parsed = candidates.reduce<unknown | undefined>((result, candidate) => {
+            if (result) {
+              return result;
+            }
+            try {
+              return JSON.parse(candidate) as unknown;
+            } catch {
+              return undefined;
+            }
+          }, undefined);
+          const rawChanges = parsed && typeof parsed === "object" && !Array.isArray(parsed) && "changes" in parsed
+            ? (parsed as { changes?: unknown }).changes
+            : parsed;
+          const operations = Array.isArray(rawChanges)
+            ? rawChanges.flatMap((raw, index) => {
+                if (!raw || typeof raw !== "object" || Array.isArray(raw)) {
+                  return [];
+                }
+                const change = raw as Record<string, unknown>;
+                const action = change.action === "create" || change.action === "modify" || change.action === "rename" || change.action === "delete"
+                  ? change.action as "create" | "modify" | "rename" | "delete"
+                  : undefined;
+                const pathRel = typeof change.pathRel === "string" ? change.pathRel.replace(/^\/+|\/+$/g, "") : undefined;
+                const targetPathRel = typeof change.targetPathRel === "string" ? change.targetPathRel.replace(/^\/+|\/+$/g, "") : undefined;
+                const content = typeof change.content === "string" ? change.content : undefined;
+                if (!action || !pathRel) {
+                  return [];
+                }
+                const before = files.get(pathRel);
+                return [{
+                  id: `mock-change-${index + 1}`,
+                  action,
+                  pathRel,
+                  targetPathRel,
+                  title: typeof change.title === "string" ? change.title : undefined,
+                  content,
+                  before,
+                  after: content,
+                  baseHash: before === undefined ? "new" : `${pathRel}:${before.length}`,
+                  diff: [
+                    `--- a/${pathRel}`,
+                    `+++ b/${targetPathRel ?? pathRel}`,
+                    action === "rename" ? `rename ${pathRel} -> ${targetPathRel ?? ""}` : content ?? ""
+                  ].join("\n"),
+                  status: "pending" as const
+                }];
+              })
+            : [];
+          return {
+            planId: `mock-plan:${Date.now()}`,
+            sourceText,
+            operations,
+            warnings: [],
+            error: operations.length ? undefined : "未识别到有效的 AI 变更计划。"
+          };
+        },
+        applyChangePlan: async ({ plan, acceptedOperationIds }) => {
+          const accepted = acceptedOperationIds?.length ? new Set(acceptedOperationIds) : undefined;
+          const operations = plan.operations.map((operation) => {
+            if (accepted && !accepted.has(operation.id)) {
+              return { ...operation, status: "rejected" as const };
+            }
+            if (operation.action === "create") {
+              files.set(operation.pathRel, operation.content ?? operation.after ?? "");
+              testWindow.__noliaMock.createdPaths.push(operation.pathRel);
+            } else if (operation.action === "modify") {
+              files.set(operation.pathRel, operation.content ?? operation.after ?? "");
+              testWindow.__noliaMock.savedText[operation.pathRel] = operation.content ?? operation.after ?? "";
+            } else if (operation.action === "rename" && operation.targetPathRel) {
+              const current = files.get(operation.pathRel);
+              if (current !== undefined) {
+                files.set(operation.targetPathRel, current);
+                files.delete(operation.pathRel);
+              }
+              testWindow.__noliaMock.renamedPaths.push({ sourcePathRel: operation.pathRel, targetPathRel: operation.targetPathRel });
+            } else if (operation.action === "delete") {
+              files.delete(operation.pathRel);
+              binaries.delete(operation.pathRel);
+              testWindow.__noliaMock.trashedPaths.push(operation.pathRel);
+            }
+            return { ...operation, status: "applied" as const, message: "已应用" };
+          });
+          syncFiles();
+          return {
+            planId: plan.planId,
+            operations,
+            appliedCount: operations.filter((operation) => operation.status === "applied").length,
+            conflictCount: 0,
+            errorCount: 0
+          };
+        },
+        insights: async ({ pathRel, sourceText, limit }) => {
+          const text = sourceText ?? (pathRel ? files.get(pathRel) ?? "" : "");
+          const firstOtherFile = [...files.keys()].find((candidate) => candidate !== pathRel);
+          return {
+            items: [
+              {
+                id: "mock-insight-tag",
+                kind: "tag" as const,
+                label: "建议标签：#ai",
+                target: "ai",
+                score: 0.82,
+                excerpt: "工作区中已有相关 AI 内容。"
+              },
+              ...(firstOtherFile ? [{
+                id: "mock-insight-similar",
+                kind: "similar" as const,
+                label: `相关笔记：${fileNameFor(firstOtherFile)}`,
+                pathRel: firstOtherFile,
+                score: 0.74,
+                excerpt: (files.get(firstOtherFile) ?? text).slice(0, 160)
+              }] : [])
+            ].slice(0, limit ?? 8),
+            warnings: text.trim() ? [] : ["当前文档内容为空，整理建议有限。"]
+          };
+        },
+        onChatEvent: (listener) => {
+          aiChatListeners.add(listener);
+          return () => aiChatListeners.delete(listener);
+        }
+      },
       plugins: {
         list: async () => pluginDescriptors,
         setEnabled: async ({ pluginId, enabled }) => {
@@ -382,5 +631,5 @@ export async function installMockNolia(page: Page, options: MockWorkspaceOptions
         }
       }
     };
-  }, { ...options, defaultSettings: defaultTestSettings, platform: options.platform ?? process.platform });
+  }, { ...options, defaultSettings: defaultTestSettings, platform: options.platform ?? process.platform, builtInAiCommands: BUILTIN_AI_COMMANDS });
 }

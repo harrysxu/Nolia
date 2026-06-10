@@ -2,6 +2,7 @@ import { expect, test } from "@playwright/test";
 import { readFileSync } from "node:fs";
 import path from "node:path";
 
+import { DEFAULT_AI_SETTINGS } from "../../src/shared/ai";
 import type { AppSettings, ParsedDocument, WorkspaceInfo } from "../../src/shared/types";
 import type { ExtensionManifest, PluginDescriptor } from "../../src/shared/extensions";
 import { installMockNolia } from "./helpers/mockNolia";
@@ -29,6 +30,7 @@ const settings: AppSettings = {
   focusMode: false,
   autoSaveDelayMs: 80,
   attachmentStrategy: "workspace_assets",
+  ai: DEFAULT_AI_SETTINGS,
   pluginSafeMode: false,
   plugins: {
     "local.demo": {

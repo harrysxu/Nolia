@@ -19,6 +19,7 @@ import type { ReactCodeMirrorRef } from "@uiw/react-codemirror";
 import { redo as redoCodeMirror, redoDepth as redoDepthCodeMirror, undo as undoCodeMirror, undoDepth as undoDepthCodeMirror } from "@codemirror/commands";
 import {
   Bold,
+  Bot,
   ChevronDown,
   ChevronRight,
   Clock3,
@@ -61,8 +62,10 @@ import {
   Quote,
   Redo2,
   RefreshCw,
+  Send,
   Search,
   Settings2,
+  Sparkles,
   SquareCheckBig,
   Sigma,
   Star,
@@ -77,6 +80,7 @@ import {
 
 import { createMarkdownTocBlock, hasMarkdownToc, htmlToMarkdown, isMermaidFenceLanguage, mergeWysiwygBodyIntoSource, renderMarkdownToHtml, slugifyMarkdownHeadingId, updateFencedCodeBlockLanguage, updateMarkdownToc } from "../shared/markdown";
 import { DEFAULT_SETTINGS } from "../shared/constants";
+import { BUILTIN_AI_COMMANDS, DEFAULT_AI_SETTINGS, type AiApplyMode, type AiChangePlanOperation, type AiChangePlanPrepareResponse, type AiChatStreamEvent, type AiCitation, type AiCommandDefinition, type AiContextPreviewResponse, type AiEditorSnapshot, type AiGeneratedResult, type AiIndexStatus, type AiInsightItem, type AiModel, type AiProviderConfig } from "../shared/ai";
 import { getBuiltInExtensionManifests } from "../shared/builtinExtensions";
 import { createTranslator, formatFileSize as formatLocalizedFileSize, resolveLocale, type Translator } from "../shared/i18n";
 import { hasExtensionPermission, type ExtensionContributions, type ExtensionManifest, type ExtensionPermission, type FileEditorContribution, type PluginDescriptor, type SettingContribution, type SidebarPanelContribution } from "../shared/extensions";
@@ -105,12 +109,13 @@ import type {
   OpenDocumentTab,
   RenameTarget,
   ResourceCategory,
+  RightPanelView,
   SidebarView,
   StoredDocumentItem,
   SuspendedShellState,
   TreeSelection
 } from "./app/types";
-import { isDocumentListItem, isFavoriteDocument, loadWorkspaceLocalLists, saveWorkspaceLocalList, upsertDocumentListItem } from "./app/documentLists";
+import { isDocumentListItem, isFavoriteDocument, loadWorkspaceLocalLists, saveWorkspaceLocalList, upsertDocumentListItem, workspaceStorageKey } from "./app/documentLists";
 import {
   canDropTreeTarget,
   collectMarkdownNotes,
@@ -131,6 +136,7 @@ import {
 import {
   activateRendererPlugin,
   type Disposable,
+  type PluginAttachmentExtractorHandler,
   type PluginFileEditorContext,
   type PluginFileViewerContext,
   type PluginRenderProvider,
@@ -146,11 +152,49 @@ type RegisteredPluginRenderer<TContext> = {
   pluginId: string;
   render: PluginRenderProvider<TContext>;
 };
+type RegisteredPluginAttachmentExtractor = {
+  pluginId: string;
+  handler: PluginAttachmentExtractorHandler;
+};
 type AppRuntimeInfo = {
   platform: NodeJS.Platform;
   pluginDirectory: string;
   logsDirectory: string;
 };
+type AiPanelMessage = {
+  id: string;
+  role: "user" | "assistant" | "system";
+  text: string;
+  status?: "pending" | "done" | "error";
+  citations?: AiGeneratedResult["citations"];
+  commandName?: string;
+};
+
+type AiChangePlanState = AiChangePlanPrepareResponse;
+
+type AiPendingContextApproval = {
+  prompt: string;
+  scope: AiEditorSnapshot["scope"];
+  commandId?: string;
+  commandName?: string;
+  displayPrompt: string;
+  editor?: AiEditorSnapshot;
+  preview: AiContextPreviewResponse;
+  excludedContextItemIds: string[];
+  contextOptions: AiContextRequestOptions;
+};
+
+type AiContextRequestOptions = {
+  includeSelection?: boolean;
+  includeCurrentDocument?: boolean;
+  includeBacklinks?: boolean;
+  includeAttachments?: boolean;
+  includeWebSearch?: boolean;
+};
+
+const AI_CONVERSATION_STORAGE_NAME = "aiConversation.v1";
+const AI_CONTEXT_APPROVAL_STORAGE_NAME = "aiContextApproval.v1";
+const MAX_AI_LOCAL_CONVERSATION_MESSAGES = 50;
 const LEFT_PANEL_WIDTH_STORAGE_KEY = "nolia.leftPanelWidth.v2";
 const RIGHT_PANEL_WIDTH_STORAGE_KEY = "nolia.rightPanelWidth.v1";
 const TOOLBAR_VISIBLE_STORAGE_KEY = "nolia.toolbarVisible.v1";
@@ -225,8 +269,24 @@ export function App() {
   const [pluginSidebarPanels, setPluginSidebarPanels] = useState<Map<string, PluginRenderProvider<PluginSidebarPanelContext>>>(new Map());
   const [pluginFileViewers, setPluginFileViewers] = useState<Map<string, RegisteredPluginRenderer<PluginFileViewerContext>>>(new Map());
   const [pluginFileEditors, setPluginFileEditors] = useState<Map<string, RegisteredPluginRenderer<PluginFileEditorContext>>>(new Map());
+  const pluginAttachmentExtractorsRef = useRef<Map<string, RegisteredPluginAttachmentExtractor>>(new Map());
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [selectedCharCount, setSelectedCharCount] = useState(0);
+  const [aiCommands, setAiCommands] = useState<AiCommandDefinition[]>([]);
+  const [aiMessages, setAiMessages] = useState<AiPanelMessage[]>([]);
+  const [aiPreview, setAiPreview] = useState<AiContextPreviewResponse | undefined>();
+  const [aiRunningRequestId, setAiRunningRequestId] = useState<string | undefined>();
+  const [aiIndexStatus, setAiIndexStatus] = useState<AiIndexStatus | undefined>();
+  const [aiIndexRebuildRunning, setAiIndexRebuildRunning] = useState(false);
+  const [aiChangePlan, setAiChangePlan] = useState<AiChangePlanState | undefined>();
+  const [aiInsights, setAiInsights] = useState<AiInsightItem[]>([]);
+  const [aiInsightsWarnings, setAiInsightsWarnings] = useState<string[]>([]);
+  const [aiInsightsLoading, setAiInsightsLoading] = useState(false);
+  const [aiContextApproval, setAiContextApproval] = useState<AiPendingContextApproval | undefined>();
+  const aiMessageByRequestRef = useRef<Map<string, string>>(new Map());
+  const aiMessagesRef = useRef<AiPanelMessage[]>([]);
+  const aiHistoryWorkspaceRef = useRef<string | undefined>(undefined);
+  const aiHistorySkipNextSaveRef = useRef(false);
   const [modifiedOpenCursorActive, setModifiedOpenCursorActive] = useState(false);
   const openDocsRef = useRef(openDocs);
   const activeResourceRef = useRef(activeResource);
@@ -280,6 +340,10 @@ export function App() {
   useEffect(() => {
     openDocsRef.current = openDocs;
   }, [openDocs]);
+
+  useEffect(() => {
+    aiMessagesRef.current = aiMessages;
+  }, [aiMessages]);
 
   useEffect(() => {
     activeResourceRef.current = activeResource;
@@ -368,6 +432,7 @@ export function App() {
         registerSidebarPanel: (pluginId, id, render) => registerPluginSidebarPanel(pluginId, id, render),
         registerFileViewer: (pluginId, id, render) => registerPluginFileViewer(pluginId, id, render),
         registerFileEditor: (pluginId, id, render) => registerPluginFileEditor(pluginId, id, render),
+        registerAttachmentExtractor: (pluginId, id, handler) => registerPluginAttachmentExtractor(pluginId, id, handler),
         getActiveWorkspace: () => (workspace ? { workspaceId: workspace.workspaceId, name: workspace.name, rootPath: workspace.rootPath } : undefined),
         readWorkspaceFile: async (pluginId, pathRel) => {
           assertPluginPermission(pluginId, "workspace:file:read");
@@ -473,6 +538,65 @@ export function App() {
     }
     void loadWorkspaceData(workspace);
   }, [workspace?.workspaceId]);
+
+  useEffect(() => {
+    void refreshAiCommands();
+  }, [workspace?.workspaceId, appSettings?.ai.commands, appSettings?.ai.enabled]);
+
+  useEffect(() => {
+    void refreshAiIndexStatus(workspace);
+  }, [workspace?.workspaceId, appSettings?.ai.index.enabled]);
+
+  useEffect(() => {
+    if (!appSettings) {
+      return;
+    }
+    const workspaceId = workspace?.workspaceId;
+    const sameWorkspace = aiHistoryWorkspaceRef.current === workspaceId;
+    aiMessageByRequestRef.current.clear();
+    setAiRunningRequestId(undefined);
+    if (!workspaceId) {
+      aiHistoryWorkspaceRef.current = undefined;
+      aiHistorySkipNextSaveRef.current = true;
+      setAiMessages([]);
+      return;
+    }
+    aiHistoryWorkspaceRef.current = workspaceId;
+    if (appSettings.ai.privacy.saveLocalConversationHistory) {
+      if (sameWorkspace && aiMessagesRef.current.length > 0) {
+        aiHistorySkipNextSaveRef.current = false;
+        saveAiConversationHistory(workspaceId, aiMessagesRef.current);
+        return;
+      }
+      aiHistorySkipNextSaveRef.current = true;
+      setAiMessages(readAiConversationHistory(workspaceId));
+      return;
+    }
+    aiHistorySkipNextSaveRef.current = true;
+    removeAiConversationHistory(workspaceId);
+    setAiMessages([]);
+  }, [workspace?.workspaceId, appSettings?.ai.privacy.saveLocalConversationHistory]);
+
+  useEffect(() => {
+    if (!appSettings?.ai.privacy.saveLocalConversationHistory || !workspace?.workspaceId) {
+      return;
+    }
+    if (aiHistoryWorkspaceRef.current !== workspace.workspaceId) {
+      return;
+    }
+    if (aiHistorySkipNextSaveRef.current) {
+      aiHistorySkipNextSaveRef.current = false;
+      return;
+    }
+    saveAiConversationHistory(workspace.workspaceId, aiMessages);
+  }, [workspace?.workspaceId, appSettings?.ai.privacy.saveLocalConversationHistory, aiMessages]);
+
+  useEffect(() => {
+    const unsub = window.nolia.ai?.onChatEvent(handleAiChatEvent);
+    return () => {
+      unsub?.();
+    };
+  }, []);
 
   useEffect(() => {
     const indexedUnsub = window.nolia?.events?.onWorkspaceIndexed?.((event) => {
@@ -587,6 +711,7 @@ export function App() {
       "view.search": () => setSidebarView("search"),
       "view.backlinks": () => setSidebarView("backlinks"),
       "view.recent": () => setSidebarView("recent"),
+      "view.ai": () => openAiPanel(),
       "view.settings": () => setSettingsOpen(true),
       "view.immersive.toggle": () => toggleImmersiveMode(),
       "view.toolbar.toggle": () => setToolbarVisible(!toolbarVisible),
@@ -595,7 +720,7 @@ export function App() {
       "mode.source": () => setActiveMode("source"),
       "mode.split": () => setActiveMode("split")
     }),
-    [workspace?.workspaceId, visibleDocument?.pathRel, immersiveMode, toolbarVisible, lineNumbersVisible, setCommandPaletteOpen, setLineNumbersVisible, setSidebarView, setToolbarVisible]
+    [workspace?.workspaceId, visibleDocument?.pathRel, immersiveMode, toolbarVisible, lineNumbersVisible, setCommandPaletteOpen, setLineNumbersVisible, setRightPanelView, setSidebarView, setToolbarVisible]
   );
 
   useEffect(() => {
@@ -603,8 +728,8 @@ export function App() {
   }, [commandHandlers]);
 
   const paletteActions = useMemo<PaletteAction[]>(
-    () =>
-      extensionRegistry.commands
+    () => [
+      ...extensionRegistry.commands
         .filter((command) => Boolean(commandHandlers[command.id] ?? pluginCommandIds.includes(command.id)))
         .map((command) => ({
           id: command.id,
@@ -612,7 +737,17 @@ export function App() {
           keywords: command.keywords ?? [],
           run: () => void runCommand(command.id)
         })),
-    [extensionRegistry.commands, commandHandlers, pluginCommandIds, immersiveMode, toolbarVisible, lineNumbersVisible, tr]
+      ...aiCommands
+        .filter((command) => command.ui.commandPalette)
+        .map((command) => ({
+          id: command.id,
+          label: tr("AI：{name}", { name: command.name }),
+          description: command.description,
+          keywords: ["ai", command.name, command.description ?? ""],
+          run: () => void runAiCommandById(command.id)
+        }))
+    ],
+    [extensionRegistry.commands, commandHandlers, pluginCommandIds, immersiveMode, toolbarVisible, lineNumbersVisible, aiCommands, tr]
   );
 
   if (showWelcome) {
@@ -705,6 +840,33 @@ export function App() {
         onCancel={() => setDeleteTarget(undefined)}
         onConfirm={() => void deleteItem()}
       />
+      <AiChangePlanDialog
+        plan={aiChangePlan}
+        onClose={() => setAiChangePlan(undefined)}
+        onApplyChange={(changeId) => void applyAiChange(changeId)}
+        onApplyAll={() => void applyAllAiChanges()}
+        onSetChangeStatus={setAiChangeStatus}
+      />
+      <AiContextApprovalDialog
+        pending={aiContextApproval}
+        rememberEnabled={Boolean(effectiveSettings.ai.privacy.rememberContextApproval)}
+        onToggleContextItem={(itemId: string) => {
+          setAiContextApproval((current) => {
+            if (!current) {
+              return current;
+            }
+            const excluded = new Set(current.excludedContextItemIds);
+            if (excluded.has(itemId)) {
+              excluded.delete(itemId);
+            } else {
+              excluded.add(itemId);
+            }
+            return { ...current, excludedContextItemIds: [...excluded] };
+          });
+        }}
+        onCancel={() => setAiContextApproval(undefined)}
+        onConfirm={(remember: boolean) => void confirmAiContextApproval(remember)}
+      />
           <MoveDialog
             dialog={moveDialog}
             folders={collectMoveDestinationOptions(fileTree, moveDialog?.target, tr)}
@@ -733,6 +895,9 @@ export function App() {
       <SettingsDialog
         open={settingsOpen}
         settings={appSettings}
+        workspace={workspace}
+        aiIndexStatus={aiIndexStatus}
+        aiIndexRebuildRunning={aiIndexRebuildRunning}
         extensionManifests={allExtensionManifests}
         pluginDescriptors={pluginDescriptors}
         settingContributions={settingContributions}
@@ -740,6 +905,9 @@ export function App() {
         onUpdate={updateAppSetting}
         onSetPluginEnabled={setPluginEnabled}
         onAcceptPluginPermissions={acceptPluginPermissions}
+        onRebuildAiIndex={() => void rebuildAiIndex()}
+        onCancelAiIndex={() => void cancelAiIndex()}
+        onClearAiIndex={() => void clearAiIndex()}
         onReload={() => void bootstrap()}
         languageRestartRequired={languageRestartRequired}
         pluginDirectory={appInfo?.pluginDirectory}
@@ -772,9 +940,11 @@ export function App() {
               setRightPanelView("outline");
               setRightPanelCollapsed(false);
             }}
+            onOpenAi={openAiPanel}
             onToggleSettings={() => {
               setSettingsOpen(true);
             }}
+            activeRightPanel={rightPanelCollapsed ? undefined : rightPanelView}
             settingsOpen={settingsOpen}
           />
         ) : null}
@@ -868,8 +1038,11 @@ export function App() {
             workspaceId={visibleDocument?.sourceKind === "external" ? undefined : workspace?.workspaceId}
             pluginFileViewers={pluginFileViewers}
             pluginFileEditors={pluginFileEditors}
+            aiEnabled={Boolean(effectiveSettings.ai.enabled)}
+            aiCommands={aiCommands}
             toolbarVisible={Boolean(visibleDocument && toolbarVisible && !immersiveMode)}
             lineNumbersVisible={lineNumbersVisible}
+            onRunAiCommand={(commandId) => void runAiCommandById(commandId)}
             onToggleLineNumbers={() => setLineNumbersVisible(!lineNumbersVisible)}
             onSourceChange={(value) => void updateSourceText(value)}
             onHtmlChange={(value) => void updateHtmlDraft(value)}
@@ -917,6 +1090,33 @@ export function App() {
             ) : null}
             {rightPanelView === "details" ? <DocumentDetails doc={visibleDocument} backlinks={backlinks} /> : null}
             {rightPanelView === "errors" ? <ErrorPanel statusMessage={statusMessage} /> : null}
+            {rightPanelView === "ai" ? (
+              <AiAssistantPanel
+                enabled={Boolean(effectiveSettings.ai.enabled)}
+                workspace={workspace}
+                document={visibleDocument}
+                commands={aiCommands}
+                messages={aiMessages}
+                preview={aiPreview}
+                indexStatus={aiIndexStatus}
+                indexRebuildRunning={aiIndexRebuildRunning}
+                insights={aiInsights}
+                insightsWarnings={aiInsightsWarnings}
+                insightsLoading={aiInsightsLoading}
+                runningRequestId={aiRunningRequestId}
+                onAsk={(prompt, scope) => void startAiRequest({ prompt, scope })}
+                onRunCommand={(commandId) => void runAiCommandById(commandId)}
+                onCancel={() => void cancelAiRequest()}
+                onApply={(text, mode) => void applyAiText(text, mode)}
+                onRebuildIndex={() => void rebuildAiIndex()}
+                onRefreshInsights={() => void refreshAiInsights()}
+                onOpenInsight={(insight) => void openAiInsight(insight)}
+                onApplyInsight={(insight) => applyAiInsight(insight)}
+                onOpenSettings={() => setSettingsOpen(true)}
+                onOpenCitation={(citation) => void openAiCitation(citation)}
+                onClearMessages={() => clearAiConversation()}
+              />
+            ) : null}
           </div>
         </aside>
         ) : null}
@@ -1425,6 +1625,16 @@ export function App() {
     setActiveHtml("");
     setTreeSelection(undefined);
     setBacklinks(emptyBacklinks);
+    setAiIndexStatus(undefined);
+    setAiIndexRebuildRunning(false);
+    setAiChangePlan(undefined);
+    setAiInsights([]);
+    setAiInsightsWarnings([]);
+    setAiInsightsLoading(false);
+    aiMessageByRequestRef.current.clear();
+    setAiRunningRequestId(undefined);
+    setAiPreview(undefined);
+    setAiMessages([]);
     setNoteFilterQuery("");
     setWorkspaceSearchQuery("");
     setCreateMenu(undefined);
@@ -1466,6 +1676,566 @@ export function App() {
       return;
     }
     await handler();
+  }
+
+  function openAiPanel() {
+    setRightPanelView("ai");
+    setRightPanelCollapsed(false);
+  }
+
+  async function refreshAiCommands() {
+    if (!window.nolia.ai) {
+      setAiCommands([]);
+      return;
+    }
+    try {
+      setAiCommands(await window.nolia.ai.listCommands({ workspaceId: workspace?.workspaceId }));
+    } catch (error) {
+      setStatusMessage(errorMessageFor(error, tr("AI 命令加载失败")));
+    }
+  }
+
+  async function refreshAiIndexStatus(workspaceInfo = workspace) {
+    if (!window.nolia.ai || !workspaceInfo) {
+      setAiIndexStatus(undefined);
+      return;
+    }
+    try {
+      setAiIndexStatus(await window.nolia.ai.indexStatus({ workspaceId: workspaceInfo.workspaceId }));
+    } catch (error) {
+      setAiIndexStatus({ status: "error", progress: 0, message: errorMessageFor(error, tr("AI 索引状态读取失败")) });
+    }
+  }
+
+  async function rebuildAiIndex() {
+    if (!window.nolia.ai || !workspace) {
+      return;
+    }
+    setAiIndexRebuildRunning(true);
+    setAiIndexStatus({ status: "indexing", progress: 0, message: tr("正在重建 AI 索引...") });
+    try {
+      const status = await window.nolia.ai.rebuildIndex({ workspaceId: workspace.workspaceId });
+      setAiIndexStatus(status);
+      setStatusMessage(status.status === "ready" ? tr("AI 索引已重建") : status.message ?? tr("AI 索引状态已更新"));
+    } catch (error) {
+      const message = errorMessageFor(error, tr("AI 索引重建失败"));
+      setAiIndexStatus({ status: "error", progress: 0, message });
+      setStatusMessage(message);
+    } finally {
+      setAiIndexRebuildRunning(false);
+    }
+  }
+
+  async function cancelAiIndex() {
+    if (!window.nolia.ai || !workspace) {
+      return;
+    }
+    try {
+      const status = await window.nolia.ai.cancelIndex({ workspaceId: workspace.workspaceId });
+      setAiIndexStatus(status);
+      setAiIndexRebuildRunning(false);
+      setStatusMessage(status.message ?? tr("AI 索引已暂停"));
+    } catch (error) {
+      setStatusMessage(errorMessageFor(error, tr("AI 索引暂停失败")));
+    }
+  }
+
+  async function clearAiIndex() {
+    if (!window.nolia.ai || !workspace) {
+      return;
+    }
+    try {
+      const status = await window.nolia.ai.clearIndex({ workspaceId: workspace.workspaceId });
+      setAiIndexStatus(status);
+      setAiIndexRebuildRunning(false);
+      setStatusMessage(tr("AI 索引已清空"));
+    } catch (error) {
+      setStatusMessage(errorMessageFor(error, tr("AI 索引清空失败")));
+    }
+  }
+
+  async function runAiCommandById(commandId: string) {
+    const command = aiCommands.find((item) => item.id === commandId);
+    if (!command) {
+      return;
+    }
+    await startAiRequest({
+      prompt: "",
+      commandId,
+      scope: inferAiScope(command)
+    });
+  }
+
+  async function startAiRequest({
+    prompt,
+    scope,
+    commandId
+  }: {
+    prompt: string;
+    scope: AiEditorSnapshot["scope"];
+    commandId?: string;
+  }) {
+    openAiPanel();
+    if (!effectiveSettings.ai.enabled) {
+      setAiMessages((messages) => [
+        ...messages,
+        {
+          id: makeAiMessageId(),
+          role: "system",
+          text: tr("AI 尚未启用。请在设置中开启 AI，并配置 provider。"),
+          status: "error"
+        }
+      ]);
+      return;
+    }
+    if (!window.nolia.ai) {
+      setAiMessages((messages) => [
+        ...messages,
+        {
+          id: makeAiMessageId(),
+          role: "system",
+          text: tr("AI 请求失败"),
+          status: "error"
+        }
+      ]);
+      return;
+    }
+    const command = commandId ? aiCommands.find((item) => item.id === commandId) : undefined;
+    const editor = buildAiEditorSnapshot(scope);
+    const displayPrompt = prompt.trim() || command?.name || tr("基于当前上下文处理");
+    const contextOptions = aiContextOptionsForCommand(command, scope);
+    const previewPrompt = [command?.promptTemplate, prompt].filter(Boolean).join("\n\n");
+    try {
+      const preview = await window.nolia.ai.previewContext({
+        workspaceId: workspace?.workspaceId,
+        prompt: previewPrompt,
+        scope,
+        providerId: effectiveSettings.ai.defaultProviderId,
+        model: effectiveSettings.ai.defaultModel,
+        editor,
+        ...contextOptions
+      });
+      setAiPreview(preview);
+      const pending: AiPendingContextApproval = {
+        prompt,
+        scope,
+        commandId,
+        commandName: command?.name,
+        displayPrompt,
+        editor,
+        preview,
+        excludedContextItemIds: [],
+        contextOptions
+      };
+      if (shouldBypassAiContextApproval(pending, effectiveSettings.ai.privacy.rememberContextApproval, workspace?.workspaceId)) {
+        await sendApprovedAiRequest(pending);
+        return;
+      }
+      setAiContextApproval(pending);
+    } catch (error) {
+      setAiMessages((messages) => [
+        ...messages,
+        {
+          id: makeAiMessageId(),
+          role: "system",
+          text: errorMessageFor(error, tr("AI 请求失败")),
+          status: "error"
+        }
+      ]);
+      setAiRunningRequestId(undefined);
+    }
+  }
+
+  async function confirmAiContextApproval(remember: boolean) {
+    const pending = aiContextApproval;
+    if (!pending) {
+      return;
+    }
+    setAiContextApproval(undefined);
+    if (remember && workspace?.workspaceId) {
+      saveAiContextApproval(workspace.workspaceId, pending);
+    }
+    await sendApprovedAiRequest(pending);
+  }
+
+  async function sendApprovedAiRequest(pending: AiPendingContextApproval) {
+    if (!window.nolia.ai) {
+      return;
+    }
+    const userMessageId = makeAiMessageId();
+    const assistantMessageId = makeAiMessageId();
+    setAiMessages((messages) => [
+      ...messages,
+      { id: userMessageId, role: "user", text: pending.displayPrompt, commandName: pending.commandName },
+      { id: assistantMessageId, role: "assistant", text: "", status: "pending", commandName: pending.commandName }
+    ]);
+    try {
+      const response = pending.commandId
+        ? await window.nolia.ai.runCommand({
+            commandId: pending.commandId,
+            workspaceId: workspace?.workspaceId,
+            prompt: pending.prompt,
+            scope: pending.scope,
+            providerId: effectiveSettings.ai.defaultProviderId,
+            model: effectiveSettings.ai.defaultModel,
+            previewId: pending.preview.previewId,
+            editor: pending.editor,
+            ...pending.contextOptions,
+            excludedContextItemIds: pending.excludedContextItemIds
+          })
+        : await window.nolia.ai.startChat({
+            workspaceId: workspace?.workspaceId,
+            prompt: pending.prompt,
+            scope: pending.scope,
+            providerId: effectiveSettings.ai.defaultProviderId,
+            model: effectiveSettings.ai.defaultModel,
+            previewId: pending.preview.previewId,
+            editor: pending.editor,
+            ...pending.contextOptions,
+            excludedContextItemIds: pending.excludedContextItemIds
+          });
+      aiMessageByRequestRef.current.set(response.requestId, assistantMessageId);
+      setAiRunningRequestId(response.requestId);
+    } catch (error) {
+      setAiMessages((messages) =>
+        messages.map((message) =>
+          message.id === assistantMessageId
+            ? { ...message, text: errorMessageFor(error, tr("AI 请求失败")), status: "error" }
+            : message
+        )
+      );
+      setAiRunningRequestId(undefined);
+    }
+  }
+
+  function handleAiChatEvent(event: AiChatStreamEvent) {
+    const messageId = aiMessageByRequestRef.current.get(event.requestId);
+    if (event.type === "started") {
+      setAiRunningRequestId(event.requestId);
+      return;
+    }
+    if (event.type === "delta" && messageId) {
+      setAiMessages((messages) =>
+        messages.map((message) =>
+          message.id === messageId ? { ...message, text: `${message.text}${event.text}`, status: "pending" } : message
+        )
+      );
+      return;
+    }
+    if (event.type === "result" && messageId) {
+      setAiMessages((messages) =>
+        messages.map((message) =>
+          message.id === messageId ? { ...message, text: event.result.text, citations: event.result.citations, status: "done" } : message
+        )
+      );
+      return;
+    }
+    if (event.type === "error" && messageId) {
+      setAiMessages((messages) =>
+        messages.map((message) =>
+          message.id === messageId ? { ...message, text: event.error.message, status: "error" } : message
+        )
+      );
+      setAiRunningRequestId(undefined);
+      return;
+    }
+    if (event.type === "cancelled" && messageId) {
+      setAiMessages((messages) =>
+        messages.map((message) =>
+          message.id === messageId ? { ...message, text: message.text || tr("AI 请求已取消。"), status: "error" } : message
+        )
+      );
+      setAiRunningRequestId(undefined);
+      return;
+    }
+    if (event.type === "done") {
+      setAiRunningRequestId((current) => (current === event.requestId ? undefined : current));
+      aiMessageByRequestRef.current.delete(event.requestId);
+    }
+  }
+
+  function buildAiEditorSnapshot(scope: AiEditorSnapshot["scope"]): AiEditorSnapshot | undefined {
+    const snapshot = editorPaneRef.current?.captureAiSnapshot(scope);
+    if (snapshot) {
+      return {
+        ...snapshot,
+        workspaceId: snapshot.workspaceId ?? workspace?.workspaceId
+      };
+    }
+    const active = currentDocumentFromRef();
+    if (!active) {
+      return undefined;
+    }
+    return {
+      workspaceId: active.sourceKind === "external" ? undefined : workspace?.workspaceId,
+      pathRel: active.pathRel,
+      title: active.title,
+      sourceText: active.sourceText,
+      scope,
+      dirty: active.dirty
+    };
+  }
+
+  async function cancelAiRequest() {
+    if (!aiRunningRequestId) {
+      return;
+    }
+    await window.nolia.ai?.cancelChat({ requestId: aiRunningRequestId });
+  }
+
+  function clearAiConversation() {
+    if (aiRunningRequestId) {
+      return;
+    }
+    if (workspace?.workspaceId) {
+      removeAiConversationHistory(workspace.workspaceId);
+    }
+    aiMessageByRequestRef.current.clear();
+    aiHistorySkipNextSaveRef.current = true;
+    setAiMessages([]);
+    setAiPreview(undefined);
+    setStatusMessage(tr("AI 对话已清空"));
+  }
+
+  async function applyAiText(text: string, mode: AiApplyMode) {
+    const trimmed = text.trim();
+    if (!trimmed) {
+      return;
+    }
+    if (mode === "copy") {
+      await navigator.clipboard.writeText(text);
+      setStatusMessage(tr("AI 结果已复制"));
+      return;
+    }
+    if (mode === "new-document") {
+      await createAiGeneratedDocument(text);
+      return;
+    }
+    if (mode === "diff") {
+      if (!workspace || !window.nolia.ai?.prepareChangePlan) {
+        setStatusMessage(tr("当前无工作区"));
+        return;
+      }
+      const plan = await window.nolia.ai.prepareChangePlan({ workspaceId: workspace.workspaceId, sourceText: text });
+      setAiChangePlan(plan);
+      setStatusMessage(plan.error ? plan.error : tr("AI 变更计划已生成"));
+      return;
+    }
+    const appliedInEditor = editorPaneRef.current?.applyAiText(text, mode) ?? false;
+    if (appliedInEditor) {
+      setStatusMessage(tr("AI 结果已应用到当前文档"));
+      return;
+    }
+    const active = currentDocumentFromRef();
+    if (!active) {
+      return;
+    }
+    if (mode === "append" || mode === "insert" || mode === "replace") {
+      const nextSource = `${active.sourceText.trimEnd()}\n\n${text.trim()}\n`;
+      updateSourceText(nextSource);
+      setStatusMessage(tr("AI 结果已追加到当前文档"));
+    }
+  }
+
+  async function createAiGeneratedDocument(text: string) {
+    if (!workspace) {
+      setStatusMessage(tr("当前无工作区"));
+      return;
+    }
+    const title = titleFromMarkdown(text) ?? tr("AI 生成笔记");
+    const active = currentDocumentFromRef();
+    const parentPath = active?.sourceKind === "workspace" ? pathParent(active.pathRel) : "";
+    const safeTitle = sanitizeItemName(title).replace(/\//g, "-") || tr("AI 生成笔记");
+    const preferredPath = joinPath(parentPath, `${safeTitle.endsWith(".md") ? safeTitle : `${safeTitle}.md`}`);
+    const pathRel = uniqueMovedPath(preferredPath, collectPathSet(fileTree), "file");
+    await window.nolia.file.create({
+      workspaceId: workspace.workspaceId,
+      pathRel,
+      kind: "file",
+      content: ensureTrailingNewline(text.trim())
+    });
+    await loadWorkspaceData(workspace);
+    await openDocument(pathRel, workspace);
+    setStatusMessage(tr("已创建 AI 笔记 {path}", { path: pathRel }));
+  }
+
+  async function refreshAiInsights() {
+    const active = currentDocumentFromRef();
+    if (!workspace || !active || !window.nolia.ai?.insights) {
+      setAiInsights([]);
+      setAiInsightsWarnings([tr("打开文档后可使用 AI。")]);
+      return;
+    }
+    setAiInsightsLoading(true);
+    try {
+      const result = await window.nolia.ai.insights({
+        workspaceId: workspace.workspaceId,
+        pathRel: active.sourceKind === "workspace" ? active.pathRel : undefined,
+        sourceText: active.sourceText,
+        limit: 8
+      });
+      setAiInsights(result.items);
+      setAiInsightsWarnings(result.warnings);
+      setStatusMessage(tr("整理建议已刷新"));
+    } catch (error) {
+      setAiInsightsWarnings([errorMessageFor(error, tr("整理建议刷新失败"))]);
+      setStatusMessage(errorMessageFor(error, tr("整理建议刷新失败")));
+    } finally {
+      setAiInsightsLoading(false);
+    }
+  }
+
+  async function openAiInsight(insight: AiInsightItem) {
+    if (!insight.pathRel) {
+      setStatusMessage(tr("该建议没有可打开的来源"));
+      return;
+    }
+    await openWorkspacePath(insight.pathRel);
+  }
+
+  function applyAiInsight(insight: AiInsightItem) {
+    const active = currentDocumentFromRef();
+    const snippet = markdownForAiInsight(insight);
+    if (!active || !snippet) {
+      setStatusMessage(tr("该建议需要打开来源处理"));
+      return;
+    }
+    const nextSource = appendUniqueMarkdownHint(active.sourceText, snippet);
+    if (nextSource === active.sourceText) {
+      setStatusMessage(tr("当前文档已包含该整理建议"));
+      return;
+    }
+    updateSourceText(nextSource);
+    setStatusMessage(tr("整理建议已应用到当前文档"));
+  }
+
+  async function applyAiChange(changeId: string) {
+    if (!workspace || !aiChangePlan) {
+      return;
+    }
+    const change = aiChangePlan.operations.find((item) => item.id === changeId);
+    if (!change || !isAiChangeApplicable(change)) {
+      return;
+    }
+    setAiChangePlan((plan) => updateAiChangeStatus(plan, changeId, "applying", tr("正在应用...")));
+    try {
+      assertAiOperationClean(change);
+      const result = await window.nolia.ai?.applyChangePlan({
+        workspaceId: workspace.workspaceId,
+        plan: aiChangePlan,
+        acceptedOperationIds: [changeId]
+      });
+      if (!result) {
+        throw new Error(tr("应用失败"));
+      }
+      setAiChangePlan({ ...aiChangePlan, operations: result.operations });
+      await syncAppliedAiOperations(result.operations);
+      await loadWorkspaceData(workspace);
+      setStatusMessage(tr("已应用 AI 变更：{path}", { path: aiChangeResultPath(change) }));
+    } catch (error) {
+      setAiChangePlan((plan) => updateAiChangeStatus(plan, changeId, "error", errorMessageFor(error, tr("应用失败"))));
+      setStatusMessage(errorMessageFor(error, tr("应用失败")));
+    }
+  }
+
+  async function applyAllAiChanges() {
+    if (!workspace || !aiChangePlan) {
+      return;
+    }
+    const applicable = aiChangePlan.operations.filter(isAiChangeApplicable);
+    if (applicable.length === 0) {
+      return;
+    }
+    try {
+      for (const change of applicable) {
+        assertAiOperationClean(change);
+      }
+      const acceptedOperationIds = applicable.map((change) => change.id);
+      setAiChangePlan({
+        ...aiChangePlan,
+        operations: aiChangePlan.operations.map((operation) => acceptedOperationIds.includes(operation.id) ? { ...operation, status: "applying", message: tr("正在应用...") } : operation)
+      });
+      const result = await window.nolia.ai?.applyChangePlan({
+        workspaceId: workspace.workspaceId,
+        plan: aiChangePlan,
+        acceptedOperationIds
+      });
+      if (!result) {
+        throw new Error(tr("应用失败"));
+      }
+      setAiChangePlan({ ...aiChangePlan, operations: result.operations });
+      await syncAppliedAiOperations(result.operations);
+      await loadWorkspaceData(workspace);
+      setStatusMessage(tr("已应用 AI 变更：{path}", { path: tr("全部") }));
+    } catch (error) {
+      setStatusMessage(errorMessageFor(error, tr("应用失败")));
+    }
+  }
+
+  function setAiChangeStatus(changeId: string, status: AiChangePlanOperation["status"]) {
+    setAiChangePlan((plan) => updateAiChangeStatus(plan, changeId, status));
+  }
+
+  function assertAiOperationClean(change: AiChangePlanOperation) {
+    if (change.action === "create") {
+      return;
+    }
+    assertAiTargetClean(change.pathRel);
+  }
+
+  async function syncAppliedAiOperations(operations: AiChangePlanOperation[]) {
+    if (!workspace) {
+      return;
+    }
+    for (const operation of operations) {
+      if (operation.status !== "applied") {
+        continue;
+      }
+      if (operation.action === "modify") {
+        const file = await window.nolia.file.read({ workspaceId: workspace.workspaceId, pathRel: operation.pathRel });
+        await refreshOpenDocumentAfterAiChange(operation.pathRel, file.content, file.sha256);
+      } else if (operation.action === "rename" && operation.targetPathRel) {
+        applyPathRelChange(pathTargetForAiChange(operation.pathRel), operation.targetPathRel, operation.title ?? fileNameFor(operation.targetPathRel).replace(/\.md$/i, ""));
+      } else if (operation.action === "delete") {
+        clearDeletedPathFromState(pathTargetForAiChange(operation.pathRel));
+      }
+    }
+  }
+
+  async function openAiCitation(citation: AiCitation) {
+    if (!citation.pathRel) {
+      setStatusMessage(tr("引用没有可打开的文件路径"));
+      return;
+    }
+    await openWorkspacePath(citation.pathRel);
+    if (citation.line !== undefined) {
+      setStatusMessage(tr("引用位于第 {line} 行", { line: citation.line }));
+    }
+  }
+
+  async function refreshOpenDocumentAfterAiChange(pathRel: string, content: string, sha256: string) {
+    const openDoc = openDocsRef.current.find((doc) => doc.pathRel === pathRel);
+    if (!openDoc) {
+      return;
+    }
+    const parsed = await window.nolia.document.parse({ workspaceId: workspace?.workspaceId ?? EXTERNAL_PARSE_WORKSPACE_ID, pathRel, content, mode: "full" });
+    updateOpenDocs((docs) =>
+      docs.map((doc) =>
+        doc.pathRel === pathRel
+          ? {
+              ...doc,
+              sourceText: content,
+              baseHash: sha256,
+              lastSavedHash: sha256,
+              dirty: false,
+              pendingHtml: undefined,
+              parsed,
+              lastSavedAt: Date.now()
+            }
+          : doc
+      )
+    );
+    htmlDraftsRef.current.delete(pathRel);
   }
 
   async function handleExternalFileOpen(filePath: string) {
@@ -2472,6 +3242,17 @@ export function App() {
     };
   }
 
+  function registerPluginAttachmentExtractor(pluginId: string, id: string, handler: PluginAttachmentExtractorHandler): Disposable {
+    assertPluginPermission(pluginId, "workspace:file:read");
+    assertPluginContributionScope(pluginId, { aiExtractors: [{ id, title: id }] });
+    pluginAttachmentExtractorsRef.current.set(id, { pluginId, handler });
+    return {
+      dispose: () => {
+        pluginAttachmentExtractorsRef.current.delete(id);
+      }
+    };
+  }
+
   function pluginIdForContribution(contributionId: string): string | undefined {
     return pluginDescriptors.find((descriptor) => descriptor.manifest && (contributionId === descriptor.pluginId || contributionId.startsWith(`${descriptor.pluginId}.`)))?.pluginId;
   }
@@ -2515,6 +3296,8 @@ export function App() {
       ...(contributions.exporters?.map((item) => item.id) ?? []),
       ...(contributions.searchProviders?.map((item) => item.id) ?? []),
       ...(contributions.aiProviders?.map((item) => item.id) ?? []),
+      ...(contributions.aiExtractors?.map((item) => item.id) ?? []),
+      ...(contributions.aiCommands?.map((item) => item.id) ?? []),
       ...(contributions.automations?.map((item) => item.id) ?? [])
     ];
     for (const id of ids) {
@@ -2550,10 +3333,56 @@ export function App() {
       }, delay)
     );
   }
+
+  function assertAiTargetClean(pathRel: string) {
+    const openDoc = openDocsRef.current.find((doc) => doc.pathRel === pathRel);
+    if (openDoc?.dirty) {
+      throw new Error(tr("文件有未保存更改：{path}", { path: pathRel }));
+    }
+    const resource = activeResourceRef.current;
+    if (resource?.pathRel === pathRel && resource.dirty) {
+      throw new Error(tr("文件有未保存更改：{path}", { path: pathRel }));
+    }
+  }
+
+  function pathTargetForAiChange(pathRel: string): RenameTarget {
+    const node = findFileTreeNode(fileTree, pathRel);
+    if (node?.kind === "directory") {
+      return { pathRel, kind: "directory", name: node.name };
+    }
+    return {
+      pathRel,
+      kind: node?.kind === "markdown" || isMarkdownPath(pathRel) ? "file" : "resource",
+      name: node?.name ?? fileNameFor(pathRel)
+    };
+  }
+
+  function clearDeletedPathFromState(target: DeleteTarget | RenameTarget) {
+    const isRemovedPath = (pathRel: string) =>
+      target.kind === "directory"
+        ? pathRel === target.pathRel || pathRel.startsWith(`${target.pathRel}/`)
+        : pathRel === target.pathRel;
+
+    updateOpenDocs((docs) => docs.filter((doc) => !isRemovedPath(doc.pathRel)));
+    if (activePathRel && isRemovedPath(activePathRel)) {
+      setActivePathRel(undefined);
+    }
+    setActiveResource((resource) => (resource && isRemovedPath(resource.pathRel) ? undefined : resource));
+    setTreeSelection((selection) => (selection && isRemovedPath(selection.pathRel) ? undefined : selection));
+    updateWorkspaceDocumentLists((item) => (isRemovedPath(item.pathRel) ? undefined : item));
+    setFileClipboard((clipboard) => (clipboard && isRemovedPath(clipboard.pathRel) ? undefined : clipboard));
+    for (const pathRel of htmlDraftsRef.current.keys()) {
+      if (isRemovedPath(pathRel)) {
+        htmlDraftsRef.current.delete(pathRel);
+      }
+    }
+  }
 }
 
-function rightPanelTitle(view: "outline" | "details" | "errors", tr = createTranslator("zh-CN")): string {
+function rightPanelTitle(view: RightPanelView, tr = createTranslator("zh-CN")): string {
   switch (view) {
+    case "ai":
+      return tr("AI 助手");
     case "details":
       return tr("详情");
     case "errors":
@@ -2562,6 +3391,351 @@ function rightPanelTitle(view: "outline" | "details" | "errors", tr = createTran
     default:
       return tr("目录");
   }
+}
+
+function inferAiScope(command: AiCommandDefinition): AiEditorSnapshot["scope"] {
+  if (command.defaultContext.includeWorkspaceResults) {
+    return "workspace";
+  }
+  if (command.defaultContext.includeSelection) {
+    return "selection";
+  }
+  if (command.defaultContext.includeCurrentDocument) {
+    return command.scopes.includes("document") ? "document" : (command.scopes[0] ?? "document");
+  }
+  if (command.scopes.includes("workspace")) {
+    return "workspace";
+  }
+  if (command.scopes.includes("selection")) {
+    return "selection";
+  }
+  return command.scopes[0] ?? "document";
+}
+
+function aiContextOptionsForCommand(command: AiCommandDefinition | undefined, scope: AiEditorSnapshot["scope"]): AiContextRequestOptions {
+  if (!command) {
+    return {
+      includeSelection: scope === "selection",
+      includeCurrentDocument: scope === "selection" || scope === "document" || scope === "workspace",
+      includeBacklinks: scope === "document" || scope === "workspace",
+      includeAttachments: true,
+      includeWebSearch: false
+    };
+  }
+  return {
+    includeSelection: Boolean(command.defaultContext.includeSelection),
+    includeCurrentDocument: Boolean(command.defaultContext.includeCurrentDocument),
+    includeBacklinks: Boolean(command.defaultContext.includeBacklinks),
+    includeAttachments: Boolean(command.defaultContext.includeAttachments),
+    includeWebSearch: false
+  };
+}
+
+function makeAiMessageId(): string {
+  return `ai-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+}
+
+function aiConversationStorageKey(workspaceId: string): string {
+  return workspaceStorageKey(workspaceId, AI_CONVERSATION_STORAGE_NAME);
+}
+
+function aiContextApprovalStorageKey(workspaceId: string): string {
+  return workspaceStorageKey(workspaceId, AI_CONTEXT_APPROVAL_STORAGE_NAME);
+}
+
+function shouldBypassAiContextApproval(pending: AiPendingContextApproval, rememberEnabled: boolean, workspaceId: string | undefined): boolean {
+  if (pending.preview.items.length === 0) {
+    return true;
+  }
+  if (!rememberEnabled || !workspaceId) {
+    return false;
+  }
+  try {
+    const remembered = JSON.parse(window.localStorage.getItem(aiContextApprovalStorageKey(workspaceId)) ?? "[]") as unknown;
+    if (!Array.isArray(remembered)) {
+      return false;
+    }
+    const rememberedKinds = new Set(remembered.filter((item): item is string => typeof item === "string"));
+    return pending.preview.items.every((item) => rememberedKinds.has(item.kind));
+  } catch {
+    return false;
+  }
+}
+
+function saveAiContextApproval(workspaceId: string, pending: AiPendingContextApproval) {
+  const approvedKinds = [...new Set(
+    pending.preview.items
+      .filter((item) => !pending.excludedContextItemIds.includes(item.id))
+      .map((item) => item.kind)
+  )];
+  window.localStorage.setItem(aiContextApprovalStorageKey(workspaceId), JSON.stringify(approvedKinds));
+}
+
+function readAiConversationHistory(workspaceId: string): AiPanelMessage[] {
+  try {
+    const raw = window.localStorage.getItem(aiConversationStorageKey(workspaceId));
+    if (!raw) {
+      return [];
+    }
+    const parsed = JSON.parse(raw) as unknown;
+    if (!Array.isArray(parsed)) {
+      return [];
+    }
+    return parsed.map(normalizeStoredAiMessage).filter((message): message is AiPanelMessage => Boolean(message)).slice(-MAX_AI_LOCAL_CONVERSATION_MESSAGES);
+  } catch {
+    return [];
+  }
+}
+
+function saveAiConversationHistory(workspaceId: string, messages: AiPanelMessage[]) {
+  const serializableMessages = removeIncompleteAiMessages(messages)
+    .filter((message) => message.status !== "pending")
+    .map(normalizeStoredAiMessage)
+    .filter((message): message is AiPanelMessage => Boolean(message))
+    .slice(-MAX_AI_LOCAL_CONVERSATION_MESSAGES);
+  if (serializableMessages.length === 0) {
+    removeAiConversationHistory(workspaceId);
+    return;
+  }
+  window.localStorage.setItem(aiConversationStorageKey(workspaceId), JSON.stringify(serializableMessages));
+}
+
+function removeIncompleteAiMessages(messages: AiPanelMessage[]): AiPanelMessage[] {
+  const skippedIndexes = new Set<number>();
+  messages.forEach((message, index) => {
+    if (message.status !== "pending") {
+      return;
+    }
+    skippedIndexes.add(index);
+    const previous = messages[index - 1];
+    if (previous?.role === "user" && previous.status === undefined) {
+      skippedIndexes.add(index - 1);
+    }
+  });
+  return messages.filter((_, index) => !skippedIndexes.has(index));
+}
+
+function removeAiConversationHistory(workspaceId: string) {
+  window.localStorage.removeItem(aiConversationStorageKey(workspaceId));
+}
+
+function normalizeStoredAiMessage(value: unknown): AiPanelMessage | undefined {
+  if (!value || typeof value !== "object") {
+    return undefined;
+  }
+  const message = value as Partial<AiPanelMessage>;
+  if (message.role !== "user" && message.role !== "assistant" && message.role !== "system") {
+    return undefined;
+  }
+  if (typeof message.text !== "string") {
+    return undefined;
+  }
+  if (message.status !== undefined && message.status !== "done" && message.status !== "error") {
+    return undefined;
+  }
+  return {
+    id: typeof message.id === "string" && message.id ? message.id : makeAiMessageId(),
+    role: message.role,
+    text: message.text,
+    status: message.status,
+    citations: Array.isArray(message.citations) ? message.citations.map(normalizeAiCitation).filter((citation): citation is AiCitation => Boolean(citation)).slice(0, 12) : undefined,
+    commandName: typeof message.commandName === "string" ? message.commandName : undefined
+  };
+}
+
+function normalizeAiCitation(value: unknown): AiCitation | undefined {
+  if (!value || typeof value !== "object") {
+    return undefined;
+  }
+  const citation = value as Partial<AiCitation>;
+  if (typeof citation.contextItemId !== "string" || !citation.contextItemId) {
+    return undefined;
+  }
+  return {
+    contextItemId: citation.contextItemId,
+    pathRel: typeof citation.pathRel === "string" ? citation.pathRel : undefined,
+    title: typeof citation.title === "string" ? citation.title : undefined,
+    line: typeof citation.line === "number" && Number.isFinite(citation.line) ? citation.line : undefined,
+    excerpt: typeof citation.excerpt === "string" ? citation.excerpt : undefined
+  };
+}
+
+function isAiChangeApplicable(change: AiChangePlanOperation): boolean {
+  return change.status === "pending" || change.status === "accepted";
+}
+
+function aiChangeResultPath(change: AiChangePlanOperation): string {
+  return change.action === "rename" && change.targetPathRel ? `${change.pathRel} -> ${change.targetPathRel}` : change.pathRel;
+}
+
+function aiChangeActionLabel(action: AiChangePlanOperation["action"], tr = createTranslator("zh-CN")): string {
+  switch (action) {
+    case "create":
+      return tr("创建文件");
+    case "modify":
+      return tr("修改文件");
+    case "rename":
+      return tr("重命名文件");
+    case "delete":
+      return tr("删除文件");
+    default:
+      return action;
+  }
+}
+
+function aiChangePreview(change: AiChangePlanOperation, tr = createTranslator("zh-CN")): string {
+  if (change.diff?.trim()) {
+    return change.diff;
+  }
+  if (change.action === "rename") {
+    return tr("从 {source} 重命名为 {target}", { source: change.pathRel, target: change.targetPathRel ?? "" });
+  }
+  if (change.action === "delete") {
+    return tr("移到废纸篓：{path}", { path: change.pathRel });
+  }
+  return change.content ?? "";
+}
+
+function isAiInsightApplicable(insight: AiInsightItem): boolean {
+  return insight.kind === "tag" || insight.kind === "backlink" || insight.kind === "topic";
+}
+
+function markdownForAiInsight(insight: AiInsightItem): string | undefined {
+  if (insight.kind === "tag" && insight.target) {
+    return `#${insight.target.replace(/^#/, "")}`;
+  }
+  if ((insight.kind === "backlink" || insight.kind === "topic") && insight.target) {
+    return `[[${insight.target.replace(/^\[\[|\]\]$/g, "")}]]`;
+  }
+  return undefined;
+}
+
+function appendUniqueMarkdownHint(sourceText: string, snippet: string): string {
+  if (sourceText.includes(snippet)) {
+    return sourceText;
+  }
+  return `${sourceText.trimEnd()}\n\n${snippet}\n`;
+}
+
+function updateAiChangeStatus(
+  plan: AiChangePlanState | undefined,
+  changeId: string,
+  status: AiChangePlanOperation["status"],
+  message?: string
+): AiChangePlanState | undefined {
+  if (!plan) {
+    return plan;
+  }
+  return {
+    ...plan,
+    operations: plan.operations.map((change) => change.id === changeId ? { ...change, status, message } : change)
+  };
+}
+
+function titleFromMarkdown(markdown: string): string | undefined {
+  const heading = /^#\s+(.+)$/m.exec(markdown);
+  return heading?.[1]?.trim().replace(/[#*_`[\]]+/g, "") || undefined;
+}
+
+function ensureTrailingNewline(value: string): string {
+  return value.endsWith("\n") ? value : `${value}\n`;
+}
+
+function optionalNumber(value: string, min: number, max: number): number | undefined {
+  if (!value.trim()) {
+    return undefined;
+  }
+  const parsed = Number(value);
+  if (!Number.isFinite(parsed)) {
+    return undefined;
+  }
+  return Math.min(max, Math.max(min, parsed));
+}
+
+function optionalInteger(value: string, min: number, max: number): number | undefined {
+  const parsed = optionalNumber(value, min, max);
+  return parsed === undefined ? undefined : Math.trunc(parsed);
+}
+
+function uniqueProviderId(providers: Record<string, AiProviderConfig>, base: string): string {
+  let index = 1;
+  let candidate = base;
+  while (providers[candidate]) {
+    index += 1;
+    candidate = `${base}-${index}`;
+  }
+  return candidate;
+}
+
+function uniqueCommandId(commands: Record<string, AiCommandDefinition>, name: string): string {
+  const slug = name.toLowerCase().replace(/[^a-z0-9\u4e00-\u9fa5]+/g, "-").replace(/^-|-$/g, "") || "command";
+  let index = 1;
+  let candidate = `user.${slug}`;
+  while (commands[candidate]) {
+    index += 1;
+    candidate = `user.${slug}-${index}`;
+  }
+  return candidate;
+}
+
+function parseAiListSetting(value: string): string[] {
+  return [...new Set(
+    value
+      .split(/[\n,]/g)
+      .map((item) => item.trim())
+      .filter(Boolean)
+  )];
+}
+
+function formatAiListSetting(value: string[]): string {
+  return value.join("\n");
+}
+
+function toggleAiCommandScope(scopes: AiCommandDefinition["scopes"], scope: AiEditorSnapshot["scope"]): AiCommandDefinition["scopes"] {
+  if (scopes.includes(scope)) {
+    const nextScopes = scopes.filter((item) => item !== scope);
+    return nextScopes.length ? nextScopes : [scope];
+  }
+  return [...scopes, scope];
+}
+
+function aiCommandSourceLabel(command: AiCommandDefinition, tr = createTranslator("zh-CN")): string {
+  switch (command.source) {
+    case "builtin":
+      return tr("系统预置");
+    case "workspace":
+      return tr("工作区命令");
+    case "plugin":
+      return command.pluginId ? `${tr("插件命令")} · ${command.pluginId}` : tr("插件命令");
+    case "user":
+    default:
+      return tr("用户自定义");
+  }
+}
+
+function aiApplyModeLabel(mode: AiApplyMode, tr = createTranslator("zh-CN")): string {
+  switch (mode) {
+    case "copy":
+      return tr("复制");
+    case "insert":
+      return tr("插入");
+    case "replace":
+      return tr("替换选区");
+    case "append":
+      return tr("追加");
+    case "new-document":
+      return tr("新建笔记");
+    case "diff":
+      return tr("变更计划");
+    case "answer":
+    default:
+      return tr("仅回答");
+  }
+}
+
+function formatAiCommandMeta(command: AiCommandDefinition, tr = createTranslator("zh-CN")): string {
+  const scopes = command.scopes.map((scope) => aiScopeLabel(scope, tr)).join(" / ");
+  return `${scopes} · ${tr("默认应用：{mode}", { mode: aiApplyModeLabel(command.defaultApplyMode, tr) })}`;
 }
 
 function refreshMarkdownTocIfPresent(source: string): string {
@@ -3220,7 +4394,7 @@ function NewNoteDialog({
   const title = kind === "directory" ? tr("新建文件夹") : tr("新建笔记");
   return (
     <div className="modal-layer" role="dialog" aria-modal="true" aria-label={title}>
-      <button type="button" className="modal-backdrop" aria-label={kind === "directory" ? tr("取消新建文件夹") : tr("取消新建笔记")} onClick={onCancel} />
+      <button type="button" className="modal-backdrop" aria-hidden="true" tabIndex={-1} aria-label={kind === "directory" ? tr("取消新建文件夹") : tr("取消新建笔记")} onClick={onCancel} />
       <form
         className="modal-surface"
         onSubmit={(event) => {
@@ -3270,7 +4444,7 @@ function RenameDialog({
   const fieldLabel = target.kind === "directory" ? tr("文件夹名称") : target.kind === "resource" ? tr("资源名称") : tr("笔记名称");
   return (
     <div className="modal-layer" role="dialog" aria-modal="true" aria-label={title}>
-      <button type="button" className="modal-backdrop" aria-label={tr("取消重命名")} onClick={onCancel} />
+      <button type="button" className="modal-backdrop" aria-hidden="true" tabIndex={-1} aria-label={tr("取消重命名")} onClick={onCancel} />
       <form
         className="modal-surface"
         onSubmit={(event) => {
@@ -3320,7 +4494,7 @@ function ConfirmDialog({
   }
   return (
     <div className="modal-layer" role="dialog" aria-modal="true" aria-label={title}>
-      <button type="button" className="modal-backdrop" aria-label={tr("取消")} onClick={onCancel} />
+      <button type="button" className="modal-backdrop" aria-hidden="true" tabIndex={-1} aria-label={tr("取消")} onClick={onCancel} />
       <div className="modal-surface">
         <div className="modal-copy">
           <strong>{title}</strong>
@@ -3359,7 +4533,7 @@ function MoveDialog({
   const title = dialog.target.kind === "directory" ? tr("移动文件夹") : dialog.target.kind === "resource" ? tr("移动资源") : tr("移动文件");
   return (
     <div className="modal-layer" role="dialog" aria-modal="true" aria-label={title}>
-      <button type="button" className="modal-backdrop" aria-label={tr("取消移动")} onClick={onCancel} />
+      <button type="button" className="modal-backdrop" aria-hidden="true" tabIndex={-1} aria-label={tr("取消移动")} onClick={onCancel} />
       <form
         className="modal-surface"
         onSubmit={(event) => {
@@ -3591,14 +4765,18 @@ function AppNav({
   panels,
   onChange,
   onOpenOutline,
+  onOpenAi,
   onToggleSettings,
+  activeRightPanel,
   settingsOpen
 }: {
   sidebarView: SidebarView;
   panels: SidebarPanelContribution[];
   onChange: (view: SidebarView) => void;
   onOpenOutline: () => void;
+  onOpenAi: () => void;
   onToggleSettings: () => void;
+  activeRightPanel?: RightPanelView;
   settingsOpen: boolean;
 }) {
   const { tr } = useRendererI18n();
@@ -3622,9 +4800,13 @@ function AppNav({
             <span>{item.title}</span>
           </button>
         ))}
-        <button type="button" className="nav-item" title={tr("目录")} aria-label={tr("目录")} onClick={onOpenOutline}>
+        <button type="button" className={`nav-item${activeRightPanel === "outline" ? " is-active" : ""}`} title={tr("目录")} aria-label={tr("目录")} onClick={onOpenOutline}>
           <List size={18} />
           <span>{tr("目录")}</span>
+        </button>
+        <button type="button" className={`nav-item${activeRightPanel === "ai" ? " is-active" : ""}`} title={tr("AI 助手")} aria-label={tr("AI 助手")} onClick={onOpenAi}>
+          <Bot size={18} />
+          <span>{tr("AI")}</span>
         </button>
       </div>
       <div className="app-nav-bottom">
@@ -3742,6 +4924,8 @@ type EditorPaneHandle = {
   redoEdit: () => boolean;
   captureScrollForModeSwitch: () => void;
   jumpToHeading: (line: number, headingIndex: number) => boolean;
+  captureAiSnapshot: (scope: AiEditorSnapshot["scope"]) => AiEditorSnapshot | undefined;
+  applyAiText: (text: string, mode: AiApplyMode) => boolean;
 };
 
 const EditorPane = forwardRef<EditorPaneHandle, {
@@ -3752,8 +4936,11 @@ const EditorPane = forwardRef<EditorPaneHandle, {
   workspaceId?: string;
   pluginFileViewers: Map<string, RegisteredPluginRenderer<PluginFileViewerContext>>;
   pluginFileEditors: Map<string, RegisteredPluginRenderer<PluginFileEditorContext>>;
+  aiEnabled: boolean;
+  aiCommands: AiCommandDefinition[];
   toolbarVisible: boolean;
   lineNumbersVisible: boolean;
+  onRunAiCommand: (commandId: string) => void;
   onToggleLineNumbers: () => void;
   onSourceChange: (value: string) => void;
   onHtmlChange: (value: string) => void;
@@ -3777,8 +4964,11 @@ const EditorPane = forwardRef<EditorPaneHandle, {
     workspaceId,
     pluginFileViewers,
     pluginFileEditors,
+    aiEnabled,
+    aiCommands,
     toolbarVisible,
     lineNumbersVisible,
+    onRunAiCommand,
     onToggleLineNumbers,
     onSourceChange,
     onHtmlChange,
@@ -3808,6 +4998,26 @@ const EditorPane = forwardRef<EditorPaneHandle, {
   const [sourceTableDialog, setSourceTableDialog] = useState<TableDialogState | undefined>();
   const sourceToolsActive = document?.mode === "source" || document?.mode === "split";
   const sourceEditorKey = document ? `${document.sourceKind ?? "workspace"}:${document.filePath ?? document.pathRel}` : "empty";
+  const aiToolbarCommands = aiCommands.filter((command) => command.enabled && command.ui.editorToolbar);
+  const aiContextMenuCommands = aiCommands.filter((command) => command.enabled && command.ui.contextMenu);
+  const [aiContextMenu, setAiContextMenu] = useState<{ x: number; y: number } | undefined>();
+  const aiToolbar = aiToolbarCommands.length ? (
+    <AiToolbarMenu commands={aiToolbarCommands} enabled={aiEnabled} onRunCommand={onRunAiCommand} />
+  ) : null;
+  const openAiEditorContextMenu = (x: number, y: number) => {
+    if (aiContextMenuCommands.length === 0) {
+      return;
+    }
+    setAiContextMenu({ x, y });
+  };
+  const handleSourceEditorContextMenu = (event: ReactMouseEvent<HTMLDivElement>) => {
+    if (aiContextMenuCommands.length === 0) {
+      return;
+    }
+    event.preventDefault();
+    sourceEditorRef.current?.view?.focus();
+    openAiEditorContextMenu(event.clientX, event.clientY);
+  };
   const insertSourceSnippet = (snippet: MarkdownSnippet) => insertSnippetIntoSourceEditor(sourceEditorRef, snippet);
   const insertOrUpdateSourceToc = () => {
     if (!document) {
@@ -3879,6 +5089,52 @@ const EditorPane = forwardRef<EditorPaneHandle, {
     }
     return false;
   };
+  const captureAiSnapshot = (scope: AiEditorSnapshot["scope"]): AiEditorSnapshot | undefined => {
+    if (!document) {
+      return undefined;
+    }
+    const selectionText = sourceEditorRef.current?.view
+      ? selectedSourceText(sourceEditorRef.current.view)
+      : document.mode === "wysiwyg"
+        ? wysiwygEditorRef.current?.captureAiSelection()
+        : undefined;
+    return {
+      workspaceId,
+      pathRel: document.pathRel,
+      title: document.title,
+      sourceText: document.sourceText,
+      selectionText,
+      scope: selectionText?.trim() && scope === "selection" ? "selection" : scope,
+      dirty: document.dirty
+    };
+  };
+  const applyAiTextToEditor = (text: string, mode: AiApplyMode): boolean => {
+    if (mode !== "insert" && mode !== "replace" && mode !== "append") {
+      return false;
+    }
+    if (!document) {
+      return false;
+    }
+    if (document.mode === "wysiwyg") {
+      return wysiwygEditorRef.current?.applyAiText(text, mode) ?? false;
+    }
+    const view = sourceEditorRef.current?.view;
+    if (!view || (document.mode !== "source" && document.mode !== "split")) {
+      return false;
+    }
+    const range = view.state.selection.main;
+    const insertAt = mode === "append" ? view.state.doc.length : range.from;
+    const replaceTo = mode === "replace" && !range.empty ? range.to : insertAt;
+    const prefix = mode === "append" && view.state.doc.length > 0 ? "\n\n" : "";
+    const inserted = `${prefix}${text}`;
+    view.dispatch({
+      changes: { from: insertAt, to: replaceTo, insert: inserted },
+      selection: { anchor: insertAt + inserted.length },
+      scrollIntoView: true
+    });
+    view.focus();
+    return true;
+  };
   useImperativeHandle(ref, () => ({
     undoEdit: () => runHistoryCommand("undo"),
     redoEdit: () => runHistoryCommand("redo"),
@@ -3902,8 +5158,10 @@ const EditorPane = forwardRef<EditorPaneHandle, {
         return focusSourceEditorLine(sourceEditorRef, line);
       }
       return false;
-    }
-  }), [document?.mode, document?.pathRel, resource?.pathRel]);
+    },
+    captureAiSnapshot,
+    applyAiText: applyAiTextToEditor
+  }), [document?.mode, document?.pathRel, document?.sourceText, resource?.pathRel, workspaceId]);
 
   useLayoutEffect(() => {
     if (!document) {
@@ -4002,6 +5260,7 @@ const EditorPane = forwardRef<EditorPaneHandle, {
   useEffect(() => {
     setSourceTableDialog(undefined);
     setSourceLinkDraft(undefined);
+    setAiContextMenu(undefined);
   }, [document?.mode, document?.pathRel]);
 
   useEffect(() => {
@@ -4200,9 +5459,12 @@ const EditorPane = forwardRef<EditorPaneHandle, {
               onToggleLineNumbers={onToggleLineNumbers}
               onUndo={undoSourceEdit}
               onRedo={redoSourceEdit}
+              aiToolbar={aiToolbar}
             />
           ) : null}
-          <SourceEditor key={sourceEditorKey} ref={sourceEditorRef} value={document.sourceText} onChange={onSourceChange} onSelectionLengthChange={onSelectionLengthChange} showLineNumbers={lineNumbersVisible} />
+          <div className="source-editor-context-surface" onContextMenu={handleSourceEditorContextMenu}>
+            <SourceEditor key={sourceEditorKey} ref={sourceEditorRef} value={document.sourceText} onChange={onSourceChange} onSelectionLengthChange={onSelectionLengthChange} showLineNumbers={lineNumbersVisible} />
+          </div>
         </div>
       ) : null}
       {document.mode === "wysiwyg" ? (
@@ -4220,6 +5482,8 @@ const EditorPane = forwardRef<EditorPaneHandle, {
             void insertOrUpdateWysiwygToc(currentHtml);
           }}
           showToolbar={toolbarVisible}
+          toolbarExtra={aiToolbar}
+          onAiContextMenu={aiContextMenuCommands.length ? openAiEditorContextMenu : undefined}
         />
       ) : null}
       {document.mode === "split" ? (
@@ -4237,9 +5501,12 @@ const EditorPane = forwardRef<EditorPaneHandle, {
                   onToggleLineNumbers={onToggleLineNumbers}
                   onUndo={undoSourceEdit}
                   onRedo={redoSourceEdit}
+                  aiToolbar={aiToolbar}
                 />
               ) : null}
-              <SourceEditor key={sourceEditorKey} ref={sourceEditorRef} value={document.sourceText} onChange={onSourceChange} onSelectionLengthChange={onSelectionLengthChange} showLineNumbers={lineNumbersVisible} />
+              <div className="source-editor-context-surface" onContextMenu={handleSourceEditorContextMenu}>
+                <SourceEditor key={sourceEditorKey} ref={sourceEditorRef} value={document.sourceText} onChange={onSourceChange} onSelectionLengthChange={onSelectionLengthChange} showLineNumbers={lineNumbersVisible} />
+              </div>
             </div>
           </div>
           <button
@@ -4275,6 +5542,13 @@ const EditorPane = forwardRef<EditorPaneHandle, {
           />
         </>
       ) : null}
+      <AiEditorContextMenu
+        menu={aiContextMenu}
+        commands={aiContextMenuCommands}
+        enabled={aiEnabled}
+        onRunCommand={onRunAiCommand}
+        onClose={() => setAiContextMenu(undefined)}
+      />
     </div>
   );
 });
@@ -4863,7 +6137,8 @@ function MarkdownActionBar({
   lineNumbersVisible,
   onToggleLineNumbers,
   onUndo,
-  onRedo
+  onRedo,
+  aiToolbar
 }: {
   onInsert: (snippet: MarkdownSnippet) => void;
   onInsertImage: () => void;
@@ -4874,10 +6149,17 @@ function MarkdownActionBar({
   onToggleLineNumbers: () => void;
   onUndo: () => void;
   onRedo: () => void;
+  aiToolbar?: ReactNode;
 }) {
   const { tr } = useRendererI18n();
   return (
     <div className="markdown-actionbar" role="toolbar" aria-label={tr("Markdown 工具")}>
+      {aiToolbar ? (
+        <>
+          {aiToolbar}
+          <ToolbarDivider />
+        </>
+      ) : null}
       <ToolbarIconButton title={tr("插入目录")} icon={<TableOfContents size={16} />} onClick={onInsertToc} />
       <ToolbarIconButton title={tr("行号")} icon={<Rows3 size={16} />} onClick={onToggleLineNumbers} pressed={lineNumbersVisible} />
       <ToolbarDivider />
@@ -4907,6 +6189,129 @@ function MarkdownActionBar({
       <ToolbarIconButton title={tr("引用")} icon={<Quote size={16} />} onClick={() => onInsert({ before: "> ", placeholder: tr("引用"), block: true })} />
       <ToolbarIconButton title={tr("分割线")} icon={<Minus size={16} />} onClick={() => onInsert({ before: "\n---\n", block: true })} />
     </div>
+  );
+}
+
+function AiToolbarMenu({
+  commands,
+  enabled,
+  onRunCommand
+}: {
+  commands: AiCommandDefinition[];
+  enabled: boolean;
+  onRunCommand: (commandId: string) => void;
+}) {
+  const { tr } = useRendererI18n();
+  const [open, setOpen] = useState(false);
+  const menuRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    if (!open) {
+      return;
+    }
+    const onPointerDown = (event: PointerEvent) => {
+      if (event.target instanceof Node && menuRef.current?.contains(event.target)) {
+        return;
+      }
+      setOpen(false);
+    };
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key === "Escape") {
+        setOpen(false);
+      }
+    };
+    window.addEventListener("pointerdown", onPointerDown);
+    window.addEventListener("keydown", onKeyDown);
+    return () => {
+      window.removeEventListener("pointerdown", onPointerDown);
+      window.removeEventListener("keydown", onKeyDown);
+    };
+  }, [open]);
+
+  const runCommand = (commandId: string) => {
+    setOpen(false);
+    onRunCommand(commandId);
+  };
+
+  return (
+    <div ref={menuRef} className="ai-toolbar-menu">
+      <button
+        type="button"
+        className={`toolbar-icon-button${open ? " is-active" : ""}`}
+        title={tr("AI 命令")}
+        aria-label={tr("AI 命令")}
+        aria-expanded={open}
+        aria-haspopup="menu"
+        onClick={() => setOpen((value) => !value)}
+      >
+        <Sparkles size={16} />
+      </button>
+      {open ? (
+        <div className="ai-toolbar-popover" role="menu">
+          {commands.map((command) => (
+            <button key={command.id} type="button" role="menuitem" disabled={!enabled} onClick={() => runCommand(command.id)}>
+              <Sparkles size={14} />
+              <span>{command.name}</span>
+            </button>
+          ))}
+          {!enabled ? <div className="ai-toolbar-hint">{tr("AI 未启用")}</div> : null}
+        </div>
+      ) : null}
+    </div>
+  );
+}
+
+function AiEditorContextMenu({
+  menu,
+  commands,
+  enabled,
+  onRunCommand,
+  onClose
+}: {
+  menu?: { x: number; y: number };
+  commands: AiCommandDefinition[];
+  enabled: boolean;
+  onRunCommand: (commandId: string) => void;
+  onClose: () => void;
+}) {
+  const { tr } = useRendererI18n();
+  const [menuRef, menuStyle] = useFloatingMenuPosition(menu, { width: 220, height: Math.min(360, 40 + commands.length * 36) });
+
+  useEffect(() => {
+    if (!menu) {
+      return;
+    }
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key === "Escape") {
+        onClose();
+      }
+    };
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, [menu, onClose]);
+
+  if (!menu || commands.length === 0) {
+    return null;
+  }
+
+  const runCommand = (commandId: string) => {
+    onClose();
+    onRunCommand(commandId);
+  };
+
+  return (
+    <>
+      <button type="button" className="context-backdrop" aria-label={tr("关闭右键菜单")} onClick={onClose} />
+      <div ref={menuRef} className="context-menu ai-editor-context-menu" role="menu" style={menuStyle}>
+        {commands.map((command) => (
+          <button key={command.id} type="button" role="menuitem" disabled={!enabled} onClick={() => runCommand(command.id)}>
+            <Sparkles size={14} />
+            <span>{command.name}</span>
+          </button>
+        ))}
+        {!enabled ? <div className="ai-toolbar-hint">{tr("AI 未启用")}</div> : null}
+      </div>
+    </>
   );
 }
 
@@ -5110,6 +6515,17 @@ function insertSnippetIntoSourceEditor(ref: RefObject<ReactCodeMirrorRef | null>
     scrollIntoView: true
   });
   view.focus();
+}
+
+function selectedSourceText(view: NonNullable<ReactCodeMirrorRef["view"]>): string | undefined {
+  const parts: string[] = [];
+  view.state.selection.ranges.forEach((range) => {
+    if (!range.empty) {
+      parts.push(view.state.sliceDoc(range.from, range.to));
+    }
+  });
+  const selection = parts.join("\n");
+  return selection.trim() ? selection : undefined;
 }
 
 interface MermaidSourceLocation {
@@ -5737,7 +7153,7 @@ function DocumentSimpleList({
   );
 }
 
-type SettingsTabId = "preferences" | "plugins";
+type SettingsTabId = "preferences" | "plugins" | "ai";
 
 function settingsTabs(tr: Translator): Array<{
   id: SettingsTabId;
@@ -5763,6 +7179,14 @@ function settingsTabs(tr: Translator): Array<{
       description: tr("插件与扩展"),
       help: tr("管理外部插件和内置扩展，外部插件需要手动启用并接受权限。"),
       icon: Plug
+    },
+    {
+      id: "ai",
+      label: tr("AI"),
+      title: tr("AI 助手"),
+      description: tr("模型、隐私与命令"),
+      help: tr("配置 AI provider、本地模型、上下文权限和自定义命令。"),
+      icon: Bot
     }
   ];
 }
@@ -5770,12 +7194,18 @@ function settingsTabs(tr: Translator): Array<{
 function SettingsDialog({
   open,
   settings,
+  workspace,
+  aiIndexStatus,
+  aiIndexRebuildRunning,
   extensionManifests,
   pluginDescriptors,
   settingContributions,
   onUpdate,
   onSetPluginEnabled,
   onAcceptPluginPermissions,
+  onRebuildAiIndex,
+  onCancelAiIndex,
+  onClearAiIndex,
   onClose,
   onReload,
   languageRestartRequired,
@@ -5783,12 +7213,18 @@ function SettingsDialog({
 }: {
   open: boolean;
   settings?: AppSettings;
+  workspace?: WorkspaceInfo;
+  aiIndexStatus?: AiIndexStatus;
+  aiIndexRebuildRunning: boolean;
   extensionManifests: ExtensionManifest[];
   pluginDescriptors: PluginDescriptor[];
   settingContributions: SettingContribution[];
   onUpdate: (key: string, value: unknown) => Promise<void>;
   onSetPluginEnabled: (pluginId: string, enabled: boolean) => Promise<void>;
   onAcceptPluginPermissions: (pluginId: string) => Promise<void>;
+  onRebuildAiIndex: () => void;
+  onCancelAiIndex: () => void;
+  onClearAiIndex: () => void;
   onClose: () => void;
   onReload: () => void;
   languageRestartRequired: boolean;
@@ -5820,7 +7256,7 @@ function SettingsDialog({
   if (!settings) {
     return (
       <div className="modal-layer" role="dialog" aria-modal="true" aria-label={tr("设置")}>
-        <button type="button" className="modal-backdrop" aria-label={tr("关闭设置")} onClick={onClose} />
+        <button type="button" className="modal-backdrop" aria-hidden="true" tabIndex={-1} aria-label={tr("关闭设置")} onClick={onClose} />
         <section className="modal-surface settings-dialog">
           <header className="settings-dialog-header">
             <div>
@@ -5855,7 +7291,7 @@ function SettingsDialog({
   return (
     <>
     <div className="modal-layer" role="dialog" aria-modal="true" aria-label={tr("设置")}>
-      <button type="button" className="modal-backdrop" aria-label={tr("关闭设置")} onClick={onClose} />
+      <button type="button" className="modal-backdrop" aria-hidden="true" tabIndex={-1} aria-label={tr("关闭设置")} onClick={onClose} />
       <section className="modal-surface settings-dialog">
         <header className="settings-dialog-header">
           <div>
@@ -5898,7 +7334,8 @@ function SettingsDialog({
                   ))}
                 </div>
               </div>
-            ) : (
+            ) : null}
+            {activeTab === "plugins" ? (
               <div className="settings-tab-content settings-tab-content-plugins">
                 {pluginSettingContributions.length ? (
                   <div className="settings-form plugin-control-form">
@@ -5916,7 +7353,19 @@ function SettingsDialog({
                   onRequestAcceptPluginPermissions={setPermissionReviewManifest}
                 />
               </div>
-            )}
+            ) : null}
+            {activeTab === "ai" ? (
+              <AiSettingsPanel
+                settings={settings}
+                workspace={workspace}
+                indexStatus={aiIndexStatus}
+                indexRebuildRunning={aiIndexRebuildRunning}
+                onUpdateAi={(ai) => onUpdate("ai", ai)}
+                onRebuildIndex={onRebuildAiIndex}
+                onCancelIndex={onCancelAiIndex}
+                onClearIndex={onClearAiIndex}
+              />
+            ) : null}
           </section>
         </div>
       </section>
@@ -5942,6 +7391,563 @@ function SettingsDialog({
       }}
     />
     </>
+  );
+}
+
+function AiSettingsPanel({
+  settings,
+  workspace,
+  indexStatus,
+  indexRebuildRunning,
+  onUpdateAi,
+  onRebuildIndex,
+  onCancelIndex,
+  onClearIndex
+}: {
+  settings: AppSettings;
+  workspace?: WorkspaceInfo;
+  indexStatus?: AiIndexStatus;
+  indexRebuildRunning: boolean;
+  onUpdateAi: (ai: AppSettings["ai"]) => Promise<void> | void;
+  onRebuildIndex: () => void;
+  onCancelIndex: () => void;
+  onClearIndex: () => void;
+}) {
+  const { tr } = useRendererI18n();
+  const [apiKeys, setApiKeys] = useState<Record<string, string>>({});
+  const [testMessages, setTestMessages] = useState<Record<string, string>>({});
+  const [providerModels, setProviderModels] = useState<Record<string, AiModel[]>>({});
+  const [modelMessages, setModelMessages] = useState<Record<string, string>>({});
+  const [commandName, setCommandName] = useState("");
+  const [commandDescription, setCommandDescription] = useState("");
+  const [commandPrompt, setCommandPrompt] = useState("");
+  const ai = settings.ai;
+  const providers = Object.values(ai.providers).sort((left, right) => left.label.localeCompare(right.label));
+  const builtinCommands = [...BUILTIN_AI_COMMANDS].sort((left, right) => left.order - right.order || left.name.localeCompare(right.name));
+  const customCommands = Object.values(ai.commands).sort((left, right) => left.order - right.order || left.name.localeCompare(right.name));
+
+  const updateAi = (nextAi: AppSettings["ai"]) => {
+    void onUpdateAi(nextAi);
+  };
+  const updateProvider = (providerId: string, patch: Partial<AiProviderConfig>) => {
+    const provider = ai.providers[providerId];
+    if (!provider) {
+      return;
+    }
+    updateAi({
+      ...ai,
+      providers: {
+        ...ai.providers,
+        [providerId]: { ...provider, ...patch }
+      }
+    });
+  };
+  const addOpenAiCompatibleProvider = () => {
+    const id = uniqueProviderId(ai.providers, "custom-openai");
+    updateAi({
+      ...ai,
+      providers: {
+        ...ai.providers,
+        [id]: {
+          id,
+          type: "openai-compatible",
+          label: tr("自定义 OpenAI-compatible"),
+          baseUrl: "https://api.openai.com/v1",
+          defaultModel: "gpt-4.1-mini",
+          enabled: true
+        }
+      },
+      defaultProviderId: ai.defaultProviderId ?? id
+    });
+  };
+  const saveApiKey = async (provider: AiProviderConfig) => {
+    if (!window.nolia.ai) {
+      return;
+    }
+    const value = apiKeys[provider.id]?.trim();
+    if (!value) {
+      return;
+    }
+    const credential = await window.nolia.ai.setCredential({ providerId: provider.id, label: provider.label, value });
+    setApiKeys((current) => ({ ...current, [provider.id]: "" }));
+    updateProvider(provider.id, { apiKeyRef: credential.keyRef });
+  };
+  const testProvider = async (provider: AiProviderConfig) => {
+    if (!window.nolia.ai) {
+      return;
+    }
+    setTestMessages((current) => ({ ...current, [provider.id]: tr("正在测试...") }));
+    const result = await window.nolia.ai.testProvider({ providerId: provider.id });
+    setTestMessages((current) => ({ ...current, [provider.id]: result.ok ? tr("连接正常") : result.message ?? tr("连接失败") }));
+  };
+  const loadProviderModels = async (provider: AiProviderConfig) => {
+    if (!window.nolia.ai) {
+      return;
+    }
+    setModelMessages((current) => ({ ...current, [provider.id]: tr("加载模型中...") }));
+    try {
+      const result = await window.nolia.ai.listModels({ providerId: provider.id });
+      setProviderModels((current) => ({ ...current, [provider.id]: result.models }));
+      setModelMessages((current) => ({
+        ...current,
+        [provider.id]: result.models.length ? tr("已加载 {count} 个模型", { count: result.models.length }) : tr("未找到模型")
+      }));
+    } catch (error) {
+      setModelMessages((current) => ({ ...current, [provider.id]: errorMessageFor(error, tr("加载模型失败")) }));
+    }
+  };
+  const addCommand = () => {
+    const name = commandName.trim();
+    const prompt = commandPrompt.trim();
+    if (!name || !prompt) {
+      return;
+    }
+    const id = uniqueCommandId(ai.commands, name);
+    updateAi({
+      ...ai,
+      commands: {
+        ...ai.commands,
+        [id]: {
+          id,
+          source: "user",
+          name,
+          description: commandDescription.trim() || undefined,
+          promptTemplate: prompt,
+          enabled: true,
+          order: 10_000 + Object.keys(ai.commands).length,
+          scopes: ["selection", "document", "workspace"],
+          defaultContext: { includeSelection: true, includeCurrentDocument: true },
+          defaultApplyMode: "answer",
+          ui: { commandPalette: true, editorToolbar: false, contextMenu: false, aiPanel: true }
+        }
+      }
+    });
+    setCommandName("");
+    setCommandDescription("");
+    setCommandPrompt("");
+  };
+  const duplicateBuiltinCommand = (command: AiCommandDefinition) => {
+    const name = `${command.name} ${tr("副本")}`;
+    const id = uniqueCommandId(ai.commands, name);
+    updateAi({
+      ...ai,
+      commands: {
+        ...ai.commands,
+        [id]: {
+          ...command,
+          id,
+          source: "user",
+          pluginId: undefined,
+          name,
+          order: 10_000 + Object.keys(ai.commands).length
+        }
+      }
+    });
+  };
+  const updateCustomCommand = (commandId: string, patch: Partial<AiCommandDefinition>) => {
+    const command = ai.commands[commandId];
+    if (!command) {
+      return;
+    }
+    updateAi({
+      ...ai,
+      commands: {
+        ...ai.commands,
+        [commandId]: {
+          ...command,
+          ...patch,
+          source: "user"
+        }
+      }
+    });
+  };
+  const moveCustomCommand = (commandId: string, direction: -1 | 1) => {
+    const index = customCommands.findIndex((command) => command.id === commandId);
+    const swap = customCommands[index + direction];
+    const command = customCommands[index];
+    if (!command || !swap) {
+      return;
+    }
+    updateAi({
+      ...ai,
+      commands: {
+        ...ai.commands,
+        [command.id]: { ...command, order: swap.order },
+        [swap.id]: { ...swap, order: command.order }
+      }
+    });
+  };
+  return (
+    <div className="settings-tab-content ai-settings-panel">
+      <div className="settings-form">
+        <SettingToggle label={tr("启用 AI")} value={ai.enabled} onChange={(enabled) => updateAi({ ...ai, enabled })} />
+        <SettingSelect
+          label={tr("默认 Provider")}
+          value={ai.defaultProviderId ?? ""}
+          options={providers.map((provider) => provider.id)}
+          labels={Object.fromEntries(providers.map((provider) => [provider.id, provider.label]))}
+          onChange={(defaultProviderId) => updateAi({ ...ai, defaultProviderId })}
+        />
+        <label className="setting-row">
+          <span>{tr("默认模型")}</span>
+          <input value={ai.defaultModel ?? ""} onChange={(event) => updateAi({ ...ai, defaultModel: event.target.value })} placeholder="model" />
+        </label>
+      </div>
+      <section className="ai-settings-section">
+        <header>
+          <strong>{tr("Provider")}</strong>
+          <button type="button" className="secondary-button" onClick={addOpenAiCompatibleProvider}>
+            + {tr("添加")}
+          </button>
+        </header>
+        <div className="ai-provider-list">
+          {providers.map((provider) => (
+            <div key={provider.id} className="ai-provider-item">
+              <div className="ai-provider-head">
+                <label>
+                  <span>{tr("名称")}</span>
+                  <input value={provider.label} onChange={(event) => updateProvider(provider.id, { label: event.target.value })} />
+                </label>
+                <label className="plugin-toggle">
+                  <input type="checkbox" checked={provider.enabled} onChange={(event) => updateProvider(provider.id, { enabled: event.target.checked })} />
+                  <span>{provider.enabled ? tr("已启用") : tr("已停用")}</span>
+                </label>
+              </div>
+              <div className="ai-provider-grid">
+                <label>
+                  <span>{tr("类型")}</span>
+                  <select value={provider.type} onChange={(event) => updateProvider(provider.id, { type: event.target.value as AiProviderConfig["type"] })}>
+                    <option value="mock">Mock</option>
+                    <option value="openai-compatible">OpenAI-compatible</option>
+                    <option value="openai">OpenAI</option>
+                    <option value="ollama">Ollama</option>
+                    <option value="anthropic">Anthropic</option>
+                    <option value="gemini">Gemini</option>
+                  </select>
+                </label>
+                <label>
+                  <span>{tr("Base URL")}</span>
+                  <input value={provider.baseUrl ?? ""} onChange={(event) => updateProvider(provider.id, { baseUrl: event.target.value || undefined })} placeholder="https://api.openai.com/v1" />
+                </label>
+                <label>
+                  <span>{tr("模型")}</span>
+                  <input value={provider.defaultModel ?? ""} onChange={(event) => updateProvider(provider.id, { defaultModel: event.target.value || undefined })} placeholder="model" />
+                </label>
+                <label>
+                  <span>{tr("Temperature")}</span>
+                  <input
+                    type="number"
+                    min="0"
+                    max="2"
+                    step="0.1"
+                    value={provider.temperature ?? ""}
+                    onChange={(event) => updateProvider(provider.id, { temperature: optionalNumber(event.target.value, 0, 2) })}
+                    placeholder="0.7"
+                  />
+                </label>
+                <label>
+                  <span>{tr("Max Tokens")}</span>
+                  <input
+                    type="number"
+                    min="1"
+                    max="200000"
+                    step="1"
+                    value={provider.maxTokens ?? ""}
+                    onChange={(event) => updateProvider(provider.id, { maxTokens: optionalInteger(event.target.value, 1, 200_000) })}
+                    placeholder="4096"
+                  />
+                </label>
+                <label>
+                  <span>{tr("API Key")}</span>
+                  <input
+                    type="password"
+                    value={apiKeys[provider.id] ?? ""}
+                    onChange={(event) => setApiKeys((current) => ({ ...current, [provider.id]: event.target.value }))}
+                    placeholder={provider.apiKeyRef ? tr("已保存") : tr("未保存")}
+                  />
+                </label>
+              </div>
+              <div className="ai-provider-actions">
+                <button type="button" className="secondary-button" onClick={() => void saveApiKey(provider)} disabled={!apiKeys[provider.id]?.trim()}>
+                  {tr("保存密钥")}
+                </button>
+                <button type="button" className="secondary-button" onClick={() => void testProvider(provider)}>
+                  {tr("测试")}
+                </button>
+                <button type="button" className="secondary-button" onClick={() => void loadProviderModels(provider)} disabled={!provider.enabled}>
+                  {tr("加载模型")}
+                </button>
+                {testMessages[provider.id] ? <span>{testMessages[provider.id]}</span> : null}
+                {modelMessages[provider.id] ? <span>{modelMessages[provider.id]}</span> : null}
+              </div>
+              {providerModels[provider.id]?.length ? (
+                <label className="ai-provider-model-select">
+                  <span>{tr("模型列表")}</span>
+                  <select value={provider.defaultModel ?? ""} onChange={(event) => updateProvider(provider.id, { defaultModel: event.target.value || undefined })}>
+                    <option value="">{tr("选择模型")}</option>
+                    {providerModels[provider.id].map((model) => (
+                      <option key={model.id} value={model.id}>{model.label ?? model.id}</option>
+                    ))}
+                  </select>
+                </label>
+              ) : null}
+            </div>
+          ))}
+        </div>
+      </section>
+      <section className="ai-settings-section">
+        <header><strong>{tr("上下文与隐私")}</strong></header>
+        <div className="settings-form">
+          <SettingToggle label={tr("允许当前文档上下文")} value={ai.privacy.allowCurrentDocumentContext} onChange={(value) => updateAi({ ...ai, privacy: { ...ai.privacy, allowCurrentDocumentContext: value } })} />
+          <SettingToggle label={tr("允许工作区上下文")} value={ai.privacy.allowWorkspaceContext} onChange={(value) => updateAi({ ...ai, privacy: { ...ai.privacy, allowWorkspaceContext: value } })} />
+          <SettingToggle label={tr("允许附件上下文")} value={ai.privacy.allowAttachmentContext} onChange={(value) => updateAi({ ...ai, privacy: { ...ai.privacy, allowAttachmentContext: value } })} />
+          <SettingToggle label={tr("记住同类上下文确认")} value={ai.privacy.rememberContextApproval} onChange={(value) => updateAi({ ...ai, privacy: { ...ai.privacy, rememberContextApproval: value } })} />
+          <label className="setting-row">
+            <span>{tr("上下文预算字符")}</span>
+            <input
+              type="number"
+              min="1000"
+              max="200000"
+              step="1000"
+              value={ai.privacy.maxContextChars}
+              onChange={(event) => updateAi({ ...ai, privacy: { ...ai.privacy, maxContextChars: optionalInteger(event.target.value, 1_000, 200_000) ?? DEFAULT_AI_SETTINGS.privacy.maxContextChars } })}
+            />
+          </label>
+          <SettingToggle label={tr("保存本地对话历史")} value={ai.privacy.saveLocalConversationHistory} onChange={(value) => updateAi({ ...ai, privacy: { ...ai.privacy, saveLocalConversationHistory: value } })} />
+        </div>
+      </section>
+      <section className="ai-settings-section">
+        <header>
+          <strong>{tr("工作区 AI 索引")}</strong>
+          <div className="ai-index-actions">
+            <button
+              type="button"
+              className="secondary-button"
+              onClick={onRebuildIndex}
+              disabled={!workspace || !ai.index.enabled || indexRebuildRunning}
+            >
+              <RefreshCw size={14} /> {indexRebuildRunning ? tr("重建中") : tr("重建索引")}
+            </button>
+            <button
+              type="button"
+              className="secondary-button"
+              onClick={onCancelIndex}
+              disabled={!workspace || indexStatus?.status !== "indexing"}
+            >
+              {tr("暂停")}
+            </button>
+            <button
+              type="button"
+              className="secondary-button"
+              onClick={onClearIndex}
+              disabled={!workspace || indexStatus?.status === "indexing"}
+            >
+              {tr("清空")}
+            </button>
+          </div>
+        </header>
+        <div className="settings-form">
+          <SettingToggle label={tr("启用工作区 AI 索引")} value={ai.index.enabled} onChange={(value) => updateAi({ ...ai, index: { ...ai.index, enabled: value } })} />
+          <SettingToggle label={tr("索引 Markdown 与文本资源")} value={ai.index.includeTextResources} onChange={(value) => updateAi({ ...ai, index: { ...ai.index, includeTextResources: value } })} />
+          <SettingToggle label={tr("索引附件内容")} value={ai.index.includeAttachments} onChange={(value) => updateAi({ ...ai, index: { ...ai.index, includeAttachments: value } })} />
+          <label className="setting-row">
+            <span>{tr("Embedding Provider")}</span>
+            <select value={ai.index.embeddingProviderId ?? ""} onChange={(event) => updateAi({ ...ai, index: { ...ai.index, embeddingProviderId: event.target.value || undefined } })}>
+              <option value="">{tr("暂不使用 embedding")}</option>
+              {providers.map((provider) => (
+                <option key={provider.id} value={provider.id}>{provider.label}</option>
+              ))}
+            </select>
+          </label>
+          <label className="setting-row">
+            <span>{tr("Embedding 模型")}</span>
+            <input value={ai.index.embeddingModel ?? ""} onChange={(event) => updateAi({ ...ai, index: { ...ai.index, embeddingModel: event.target.value || undefined } })} placeholder="text-embedding-3-small" />
+          </label>
+          <label className="setting-row setting-row-block">
+            <span>{tr("排除路径")}</span>
+            <textarea
+              value={formatAiListSetting(ai.index.excludeGlobs)}
+              onChange={(event) => updateAi({ ...ai, index: { ...ai.index, excludeGlobs: parseAiListSetting(event.target.value) } })}
+              placeholder=".git/**&#10;node_modules/**"
+              rows={4}
+            />
+          </label>
+          <label className="setting-row setting-row-block">
+            <span>{tr("排除扩展名")}</span>
+            <textarea
+              value={formatAiListSetting(ai.index.excludeExtensions)}
+              onChange={(event) => updateAi({ ...ai, index: { ...ai.index, excludeExtensions: parseAiListSetting(event.target.value) } })}
+              placeholder=".log, .tmp"
+              rows={2}
+            />
+          </label>
+          <label className="setting-row setting-row-block">
+            <span>{tr("排除标签")}</span>
+            <textarea
+              value={formatAiListSetting(ai.index.excludeTags)}
+              onChange={(event) => updateAi({ ...ai, index: { ...ai.index, excludeTags: parseAiListSetting(event.target.value) } })}
+              placeholder="private, draft"
+              rows={2}
+            />
+          </label>
+        </div>
+        <div className="ai-index-status-card">
+          <div>
+            <strong>{aiIndexStatusLabel(indexStatus, tr)}</strong>
+            <span>{indexStatus?.message ?? (workspace ? tr("尚未重建 AI 索引") : tr("当前无工作区"))}</span>
+          </div>
+          <span>{tr("片段 {count}", { count: indexStatus?.chunkCount ?? 0 })} · {tr("Embedding {count}", { count: indexStatus?.embeddingChunkCount ?? 0 })}</span>
+        </div>
+        {indexStatus?.embeddingProfileHash ? (
+          <div className="ai-index-meta">{tr("Embedding 配置 {hash}", { hash: indexStatus.embeddingProfileHash.slice(0, 12) })}</div>
+        ) : null}
+        {indexStatus?.errors?.length ? (
+          <div className="ai-index-error-list">
+            {indexStatus.errors.slice(0, 5).map((error, index) => (
+              <span key={`${error.pathRel ?? "workspace"}:${error.at}:${index}`}>{error.pathRel ? `${error.pathRel}: ` : ""}{error.message}</span>
+            ))}
+          </div>
+        ) : null}
+      </section>
+      <section className="ai-settings-section">
+        <header><strong>{tr("预置命令")}</strong></header>
+        <div className="ai-builtin-command-list">
+          {builtinCommands.map((command) => (
+            <div key={command.id} className="ai-builtin-command-item">
+              <div>
+                <strong>{command.name}</strong>
+                <span>{command.description ?? command.promptTemplate}</span>
+                <small>{formatAiCommandMeta(command, tr)}</small>
+              </div>
+              <button type="button" className="secondary-button" onClick={() => duplicateBuiltinCommand(command)}>
+                <Copy size={14} /> {tr("复制为自定义")}
+              </button>
+            </div>
+          ))}
+        </div>
+      </section>
+      <section className="ai-settings-section">
+        <header><strong>{tr("自定义命令")}</strong></header>
+        <div className="ai-command-editor">
+          <input value={commandName} onChange={(event) => setCommandName(event.target.value)} placeholder={tr("命令名称")} />
+          <input value={commandDescription} onChange={(event) => setCommandDescription(event.target.value)} placeholder={tr("命令描述")} />
+          <textarea value={commandPrompt} onChange={(event) => setCommandPrompt(event.target.value)} placeholder={tr("Prompt 模板")} rows={3} />
+          <button type="button" className="secondary-button" onClick={addCommand}>{tr("添加命令")}</button>
+        </div>
+        <div className="ai-custom-command-list">
+          {customCommands.length === 0 ? <div className="plugin-empty-state">{tr("暂无自定义命令。预置命令始终可用。")}</div> : null}
+          {customCommands.map((command, index) => (
+            <div key={command.id} className="ai-custom-command-item">
+              <div className="ai-custom-command-fields">
+                <div className="ai-command-badges">
+                  <span>{aiCommandSourceLabel(command, tr)}</span>
+                  <span>{formatAiCommandMeta(command, tr)}</span>
+                </div>
+                <label>
+                  <span>{tr("命令名称")}</span>
+                  <input value={command.name} onChange={(event) => updateCustomCommand(command.id, { name: event.target.value })} />
+                </label>
+                <label>
+                  <span>{tr("命令描述")}</span>
+                  <input value={command.description ?? ""} onChange={(event) => updateCustomCommand(command.id, { description: event.target.value || undefined })} />
+                </label>
+                <label>
+                  <span>{tr("Prompt 模板")}</span>
+                  <textarea value={command.promptTemplate} onChange={(event) => updateCustomCommand(command.id, { promptTemplate: event.target.value })} rows={3} />
+                </label>
+                <label>
+                  <span>{tr("结果应用方式")}</span>
+                  <select value={command.defaultApplyMode} onChange={(event) => updateCustomCommand(command.id, { defaultApplyMode: event.target.value as AiApplyMode })}>
+                    <option value="answer">{tr("仅回答")}</option>
+                    <option value="replace">{tr("替换选区")}</option>
+                    <option value="insert">{tr("插入")}</option>
+                    <option value="append">{tr("追加")}</option>
+                    <option value="new-document">{tr("新建笔记")}</option>
+                    <option value="diff">{tr("变更计划")}</option>
+                  </select>
+                </label>
+                <fieldset className="ai-command-checkbox-group">
+                  <legend>{tr("适用范围")}</legend>
+                  {(["selection", "document", "folder", "workspace"] as const).map((scope) => (
+                    <label key={scope} className="plugin-toggle">
+                      <input
+                        type="checkbox"
+                        checked={command.scopes.includes(scope)}
+                        onChange={() => updateCustomCommand(command.id, { scopes: toggleAiCommandScope(command.scopes, scope) })}
+                      />
+                      <span>{aiScopeLabel(scope, tr)}</span>
+                    </label>
+                  ))}
+                </fieldset>
+                <fieldset className="ai-command-checkbox-group">
+                  <legend>{tr("默认上下文")}</legend>
+                  <label className="plugin-toggle">
+                    <input type="checkbox" checked={Boolean(command.defaultContext.includeSelection)} onChange={(event) => updateCustomCommand(command.id, { defaultContext: { ...command.defaultContext, includeSelection: event.target.checked } })} />
+                    <span>{tr("选区")}</span>
+                  </label>
+                  <label className="plugin-toggle">
+                    <input type="checkbox" checked={Boolean(command.defaultContext.includeCurrentDocument)} onChange={(event) => updateCustomCommand(command.id, { defaultContext: { ...command.defaultContext, includeCurrentDocument: event.target.checked } })} />
+                    <span>{tr("当前文档")}</span>
+                  </label>
+                  <label className="plugin-toggle">
+                    <input type="checkbox" checked={Boolean(command.defaultContext.includeWorkspaceResults)} onChange={(event) => updateCustomCommand(command.id, { defaultContext: { ...command.defaultContext, includeWorkspaceResults: event.target.checked } })} />
+                    <span>{tr("工作区结果")}</span>
+                  </label>
+                  <label className="plugin-toggle">
+                    <input type="checkbox" checked={Boolean(command.defaultContext.includeBacklinks)} onChange={(event) => updateCustomCommand(command.id, { defaultContext: { ...command.defaultContext, includeBacklinks: event.target.checked } })} />
+                    <span>{tr("反向链接")}</span>
+                  </label>
+                  <label className="plugin-toggle">
+                    <input type="checkbox" checked={Boolean(command.defaultContext.includeAttachments)} onChange={(event) => updateCustomCommand(command.id, { defaultContext: { ...command.defaultContext, includeAttachments: event.target.checked } })} />
+                    <span>{tr("附件")}</span>
+                  </label>
+                </fieldset>
+                <fieldset className="ai-command-checkbox-group">
+                  <legend>{tr("显示入口")}</legend>
+                  <label className="plugin-toggle">
+                    <input type="checkbox" checked={command.ui.commandPalette} onChange={(event) => updateCustomCommand(command.id, { ui: { ...command.ui, commandPalette: event.target.checked } })} />
+                    <span>{tr("命令面板")}</span>
+                  </label>
+                  <label className="plugin-toggle">
+                    <input type="checkbox" checked={command.ui.editorToolbar} onChange={(event) => updateCustomCommand(command.id, { ui: { ...command.ui, editorToolbar: event.target.checked } })} />
+                    <span>{tr("编辑器工具栏")}</span>
+                  </label>
+                  <label className="plugin-toggle">
+                    <input type="checkbox" checked={command.ui.contextMenu} onChange={(event) => updateCustomCommand(command.id, { ui: { ...command.ui, contextMenu: event.target.checked } })} />
+                    <span>{tr("右键菜单")}</span>
+                  </label>
+                  <label className="plugin-toggle">
+                    <input type="checkbox" checked={command.ui.aiPanel} onChange={(event) => updateCustomCommand(command.id, { ui: { ...command.ui, aiPanel: event.target.checked } })} />
+                    <span>{tr("AI 面板")}</span>
+                  </label>
+                </fieldset>
+              </div>
+              <div className="ai-custom-command-actions">
+                <label className="plugin-toggle">
+                  <input type="checkbox" checked={command.enabled} onChange={(event) => updateCustomCommand(command.id, { enabled: event.target.checked })} />
+                  <span>{command.enabled ? tr("已启用") : tr("已停用")}</span>
+                </label>
+                <button type="button" className="secondary-button" onClick={() => moveCustomCommand(command.id, -1)} disabled={index === 0}>{tr("上移")}</button>
+                <button type="button" className="secondary-button" onClick={() => moveCustomCommand(command.id, 1)} disabled={index === customCommands.length - 1}>{tr("下移")}</button>
+                <button
+                  type="button"
+                  className="icon-button compact"
+                  title={tr("删除")}
+                  aria-label={tr("删除")}
+                  onClick={() => {
+                    const nextCommands = { ...ai.commands };
+                    delete nextCommands[command.id];
+                    updateAi({ ...ai, commands: nextCommands });
+                  }}
+                >
+                  <Trash2 size={14} />
+                </button>
+              </div>
+            </div>
+          ))}
+        </div>
+      </section>
+    </div>
   );
 }
 
@@ -6164,6 +8170,477 @@ function documentListKindLabel(pathRel: string, kind: "file" | "resource", tr = 
     case "other":
     default:
       return tr("资源");
+  }
+}
+
+function AiAssistantPanel({
+  enabled,
+  workspace,
+  document,
+  commands,
+  messages,
+  preview,
+  indexStatus,
+  indexRebuildRunning,
+  insights,
+  insightsWarnings,
+  insightsLoading,
+  runningRequestId,
+  onAsk,
+  onRunCommand,
+  onCancel,
+  onApply,
+  onRebuildIndex,
+  onRefreshInsights,
+  onOpenInsight,
+  onApplyInsight,
+  onOpenSettings,
+  onOpenCitation,
+  onClearMessages
+}: {
+  enabled: boolean;
+  workspace?: WorkspaceInfo;
+  document?: OpenDocumentTab;
+  commands: AiCommandDefinition[];
+  messages: AiPanelMessage[];
+  preview?: AiContextPreviewResponse;
+  indexStatus?: AiIndexStatus;
+  indexRebuildRunning: boolean;
+  insights: AiInsightItem[];
+  insightsWarnings: string[];
+  insightsLoading: boolean;
+  runningRequestId?: string;
+  onAsk: (prompt: string, scope: AiEditorSnapshot["scope"]) => void;
+  onRunCommand: (commandId: string) => void;
+  onCancel: () => void;
+  onApply: (text: string, mode: AiApplyMode) => void;
+  onRebuildIndex: () => void;
+  onRefreshInsights: () => void;
+  onOpenInsight: (insight: AiInsightItem) => void;
+  onApplyInsight: (insight: AiInsightItem) => void;
+  onOpenSettings: () => void;
+  onOpenCitation: (citation: AiCitation) => void;
+  onClearMessages: () => void;
+}) {
+  const { tr } = useRendererI18n();
+  const [prompt, setPrompt] = useState("");
+  const [scope, setScope] = useState<AiEditorSnapshot["scope"]>("document");
+  const latestAnswer = [...messages].reverse().find((message) => message.role === "assistant" && message.text.trim());
+  const visibleCommands = commands.filter((command) => command.ui.aiPanel);
+  const canAsk = enabled && Boolean(prompt.trim() || document);
+  return (
+    <div className="ai-assistant-panel">
+      {!enabled ? (
+        <div className="ai-notice is-warning">
+          <strong>{tr("AI 未启用")}</strong>
+          <span>{tr("开启 AI 后可以使用当前文档、选区和工作区搜索结果。")}</span>
+          <button type="button" className="secondary-button" onClick={onOpenSettings}>
+            <Settings2 size={14} /> {tr("打开 AI 设置")}
+          </button>
+        </div>
+      ) : null}
+      <div className="ai-scope-tabs" role="tablist" aria-label={tr("AI 范围")}>
+        {(["selection", "document", "folder", "workspace"] as const).map((item) => (
+          <button key={item} type="button" role="tab" aria-selected={scope === item} className={scope === item ? "is-active" : ""} onClick={() => setScope(item)}>
+            {aiScopeLabel(item, tr)}
+          </button>
+        ))}
+      </div>
+      <section className="ai-index-mini" aria-label={tr("工作区 AI 索引")}>
+        <div>
+          <strong>{aiIndexStatusLabel(indexStatus, tr)}</strong>
+          <span>{indexStatus?.chunkCount ? tr("片段 {count}", { count: indexStatus.chunkCount }) : indexStatus?.message ?? tr("尚未重建 AI 索引")}</span>
+        </div>
+        <button
+          type="button"
+          className="icon-button compact"
+          title={tr("重建索引")}
+          aria-label={tr("重建索引")}
+          onClick={onRebuildIndex}
+          disabled={!workspace || !enabled || indexRebuildRunning}
+        >
+          <RefreshCw size={14} />
+        </button>
+      </section>
+      <section className="ai-command-strip" aria-label={tr("AI 命令")}>
+        {visibleCommands.map((command) => (
+          <button key={command.id} type="button" className="ai-command-chip" disabled={!enabled} onClick={() => onRunCommand(command.id)}>
+            <Sparkles size={13} />
+            <span>{command.name}</span>
+          </button>
+        ))}
+        {visibleCommands.length === 0 ? <div className="empty-state">{tr("暂无 AI 命令。")}</div> : null}
+      </section>
+      <section className="ai-context-preview" aria-label={tr("AI 上下文")}>
+        <div className="ai-section-title">
+          <strong>{tr("上下文")}</strong>
+          <span>{preview ? tr("约 {count} 字符", { count: preview.estimatedInputChars }) : workspace ? tr("发送前生成预览") : tr("当前无工作区")}</span>
+        </div>
+        {preview?.warnings.map((warning) => <div key={warning} className="ai-warning">{warning}</div>)}
+        {preview?.items.map((item) => (
+          <div key={item.id} className="ai-context-item">
+            <strong>{item.label}</strong>
+            <span>{item.pathRel ?? item.title ?? aiContextKindLabel(item.kind, tr)}</span>
+          </div>
+        ))}
+        {!preview ? <div className="empty-state">{document ? tr("提问或运行命令后显示将发送的上下文。") : tr("打开文档后可使用 AI。")}</div> : null}
+      </section>
+      <section className="ai-insight-panel" aria-label={tr("整理建议")}>
+        <div className="ai-section-title">
+          <strong>{tr("整理建议")}</strong>
+          <button
+            type="button"
+            className="icon-button compact"
+            title={tr("刷新建议")}
+            aria-label={tr("刷新建议")}
+            onClick={onRefreshInsights}
+            disabled={!workspace || !document || !enabled || insightsLoading}
+          >
+            <RefreshCw size={14} />
+          </button>
+        </div>
+        {insightsWarnings.map((warning) => <div key={warning} className="ai-warning">{warning}</div>)}
+        {insights.map((insight) => (
+          <article key={insight.id} className="ai-insight-item">
+            <div>
+              <strong>{insight.label}</strong>
+              <span>{insight.pathRel ?? insight.target ?? aiInsightKindLabel(insight.kind, tr)}</span>
+            </div>
+            <p>{insight.excerpt}</p>
+            <div className="ai-insight-actions">
+              {insight.pathRel ? (
+                <button type="button" className="secondary-button" onClick={() => onOpenInsight(insight)}>
+                  {tr("打开来源")}
+                </button>
+              ) : null}
+              {isAiInsightApplicable(insight) ? (
+                <button type="button" className="secondary-button" onClick={() => onApplyInsight(insight)}>
+                  {tr("应用建议")}
+                </button>
+              ) : null}
+            </div>
+          </article>
+        ))}
+        {insightsLoading ? <div className="empty-state">{tr("正在刷新建议...")}</div> : null}
+        {!insightsLoading && insights.length === 0 && insightsWarnings.length === 0 ? <div className="empty-state">{tr("暂无整理建议。")}</div> : null}
+      </section>
+      <section className="ai-message-list" aria-label={tr("AI 对话")}>
+        <div className="ai-message-list-header">
+          <strong>{tr("AI 对话")}</strong>
+          <button
+            type="button"
+            className="icon-button compact"
+            title={tr("清空对话")}
+            aria-label={tr("清空对话")}
+            onClick={onClearMessages}
+            disabled={messages.length === 0 || Boolean(runningRequestId)}
+          >
+            <Trash2 size={14} />
+          </button>
+        </div>
+        {messages.length === 0 ? <div className="empty-state">{tr("选择命令或直接提问。")}</div> : null}
+        {messages.map((message) => (
+          <article key={message.id} className={`ai-message is-${message.role}${message.status === "error" ? " is-error" : ""}`}>
+            <header>
+              <strong>{message.role === "assistant" ? tr("AI") : message.role === "system" ? tr("系统") : tr("你")}</strong>
+              {message.commandName ? <span>{message.commandName}</span> : null}
+            </header>
+            <p>{message.text || (message.status === "pending" ? tr("正在生成...") : "")}</p>
+            {message.citations?.length ? (
+              <div className="ai-citations">
+                {message.citations.slice(0, 6).map((citation) => (
+                  <button
+                    key={`${citation.contextItemId}:${citation.pathRel ?? ""}:${citation.line ?? ""}`}
+                    type="button"
+                    title={citation.line !== undefined ? tr("{path} 第 {line} 行", { path: citation.pathRel ?? citation.title ?? citation.contextItemId, line: citation.line }) : citation.pathRel ?? citation.title ?? citation.contextItemId}
+                    onClick={() => onOpenCitation(citation)}
+                    disabled={!citation.pathRel}
+                  >
+                    {citation.pathRel ?? citation.title ?? citation.contextItemId}
+                  </button>
+                ))}
+              </div>
+            ) : null}
+          </article>
+        ))}
+      </section>
+      {latestAnswer?.text ? (
+        <div className="ai-result-actions" role="toolbar" aria-label={tr("AI 结果操作")}>
+          <button type="button" className="secondary-button" onClick={() => onApply(latestAnswer.text, "copy")}>{tr("复制")}</button>
+          <button type="button" className="secondary-button" onClick={() => onApply(latestAnswer.text, "insert")}>{tr("插入")}</button>
+          <button type="button" className="secondary-button" onClick={() => onApply(latestAnswer.text, "replace")}>{tr("替换选区")}</button>
+          <button type="button" className="secondary-button" onClick={() => onApply(latestAnswer.text, "append")}>{tr("追加")}</button>
+          <button type="button" className="secondary-button" onClick={() => onApply(latestAnswer.text, "new-document")}>{tr("新建笔记")}</button>
+          <button type="button" className="secondary-button" onClick={() => onApply(latestAnswer.text, "diff")}>{tr("变更计划")}</button>
+        </div>
+      ) : null}
+      <form
+        className="ai-composer"
+        onSubmit={(event) => {
+          event.preventDefault();
+          const nextPrompt = prompt.trim();
+          if (!canAsk) {
+            return;
+          }
+          setPrompt("");
+          onAsk(nextPrompt, scope);
+        }}
+      >
+        <textarea value={prompt} onChange={(event) => setPrompt(event.target.value)} placeholder={tr("向当前上下文提问")} rows={3} />
+        <div className="ai-composer-actions">
+          {runningRequestId ? (
+            <button type="button" className="secondary-button" onClick={onCancel}>{tr("停止")}</button>
+          ) : null}
+          <button type="submit" className="primary-button" disabled={!canAsk || Boolean(runningRequestId)}>
+            <Send size={14} /> {tr("发送")}
+          </button>
+        </div>
+      </form>
+    </div>
+  );
+}
+
+function AiChangePlanDialog({
+  plan,
+  onClose,
+  onApplyChange,
+  onApplyAll,
+  onSetChangeStatus
+}: {
+  plan?: AiChangePlanState;
+  onClose: () => void;
+  onApplyChange: (changeId: string) => void;
+  onApplyAll: () => void;
+  onSetChangeStatus: (changeId: string, status: AiChangePlanOperation["status"]) => void;
+}) {
+  const { tr } = useRendererI18n();
+  if (!plan) {
+    return null;
+  }
+  const pendingCount = plan.operations.filter(isAiChangeApplicable).length;
+  return (
+    <div className="modal-layer" role="dialog" aria-modal="true" aria-label={tr("AI 变更计划")}>
+      <button type="button" className="modal-backdrop" aria-hidden="true" tabIndex={-1} aria-label={tr("关闭")} onClick={onClose} />
+      <section className="modal-surface ai-change-plan-dialog">
+        <header className="settings-dialog-header">
+          <div>
+            <strong>{tr("AI 变更计划")}</strong>
+            <span>{plan.error ?? tr("审核后再写入工作区")}</span>
+          </div>
+          <button type="button" className="icon-button settings-close-button" aria-label={tr("关闭")} onClick={onClose}>
+            <X size={20} />
+          </button>
+        </header>
+        <div className="ai-change-plan-body">
+          {plan.error ? (
+            <div className="plugin-empty-state is-warning">
+              <strong>{plan.error}</strong>
+              <span>{tr("请让 AI 按变更计划 JSON 格式重新生成。")}</span>
+            </div>
+          ) : null}
+          {plan.operations.map((change) => (
+            <article key={change.id} className={`ai-change-item is-${change.status ?? "pending"}`}>
+              <header>
+                <div>
+                  <strong>{change.title || change.pathRel}</strong>
+                  <span>{aiChangeActionLabel(change.action, tr)} · {aiChangeResultPath(change)}</span>
+                </div>
+                <div className="ai-change-actions">
+                  {change.status === "rejected" ? (
+                    <button type="button" className="secondary-button" onClick={() => onSetChangeStatus(change.id, "pending")}>
+                      {tr("重新接受")}
+                    </button>
+                  ) : null}
+                  {change.status !== "rejected" && change.status !== "applied" && change.status !== "applying" ? (
+                    <button type="button" className="secondary-button" onClick={() => onSetChangeStatus(change.id, "rejected")}>
+                      {tr("拒绝")}
+                    </button>
+                  ) : null}
+                  <button
+                    type="button"
+                    className="secondary-button"
+                    onClick={() => onApplyChange(change.id)}
+                    disabled={!isAiChangeApplicable(change)}
+                  >
+                    {change.status === "applied" ? tr("已应用") : change.status === "applying" ? tr("应用中") : tr("应用")}
+                  </button>
+                </div>
+              </header>
+              <pre>{aiChangePreview(change, tr).slice(0, 2000)}</pre>
+              {change.message ? <span className="ai-change-message">{change.message}</span> : null}
+            </article>
+          ))}
+          {plan.warnings.map((warning) => <div key={warning} className="ai-warning">{warning}</div>)}
+          {!plan.error && plan.operations.length === 0 ? <div className="empty-state">{tr("没有可应用的变更。")}</div> : null}
+        </div>
+        <footer className="ai-change-plan-actions">
+          <button type="button" className="secondary-button" onClick={onClose}>{tr("关闭")}</button>
+          <button type="button" className="primary-button" disabled={Boolean(plan.error) || pendingCount === 0} onClick={onApplyAll}>
+            <SquareCheckBig size={14} /> {tr("应用全部")}
+          </button>
+        </footer>
+      </section>
+    </div>
+  );
+}
+
+function AiContextApprovalDialog({
+  pending,
+  rememberEnabled,
+  onToggleContextItem,
+  onCancel,
+  onConfirm
+}: {
+  pending?: AiPendingContextApproval;
+  rememberEnabled: boolean;
+  onToggleContextItem: (itemId: string) => void;
+  onCancel: () => void;
+  onConfirm: (remember: boolean) => void;
+}) {
+  const { tr } = useRendererI18n();
+  const [remember, setRemember] = useState(false);
+
+  useEffect(() => {
+    if (pending) {
+      setRemember(false);
+    }
+  }, [pending?.preview.previewId]);
+
+  if (!pending) {
+    return null;
+  }
+
+  const excluded = new Set(pending.excludedContextItemIds);
+  const includedItems = pending.preview.items.filter((item) => !excluded.has(item.id));
+
+  return (
+    <div className="modal-layer" role="dialog" aria-modal="true" aria-label={tr("确认 AI 上下文")}>
+      <button type="button" className="modal-backdrop" aria-hidden="true" tabIndex={-1} aria-label={tr("取消")} onClick={onCancel} />
+      <section className="modal-surface ai-context-approval-dialog">
+        <header className="settings-dialog-header">
+          <div>
+            <strong>{tr("确认 AI 上下文")}</strong>
+            <span>{tr("发送前检查将提供给模型的内容。")}</span>
+          </div>
+          <button type="button" className="icon-button settings-close-button" aria-label={tr("关闭")} onClick={onCancel}>
+            <X size={20} />
+          </button>
+        </header>
+        <div className="ai-context-approval-body">
+          <div className="ai-context-approval-summary">
+            <strong>{pending.commandName ?? aiScopeLabel(pending.scope, tr)}</strong>
+            <span>
+              {pending.preview.items.length
+                ? tr("将发送 {count} 个上下文来源", { count: includedItems.length })
+                : tr("暂无上下文，将仅发送用户请求。")}
+            </span>
+          </div>
+          {pending.preview.warnings.map((warning) => (
+            <div key={warning} className="ai-warning">{warning}</div>
+          ))}
+          <div className="ai-context-approval-list">
+            {pending.preview.items.map((item) => {
+              const isExcluded = excluded.has(item.id);
+              return (
+                <article key={item.id} className={`ai-context-approval-item${isExcluded ? " is-excluded" : ""}`}>
+                  <div>
+                    <strong>{item.label}</strong>
+                    <span>{item.pathRel ?? item.title ?? aiContextKindLabel(item.kind, tr)}</span>
+                    <p>{item.excerpt}</p>
+                  </div>
+                  <button type="button" className="secondary-button" onClick={() => onToggleContextItem(item.id)}>
+                    {isExcluded ? tr("包含") : tr("排除")}
+                  </button>
+                </article>
+              );
+            })}
+            {pending.preview.items.length === 0 ? (
+              <div className="empty-state">{tr("暂无上下文，将仅发送用户请求。")}</div>
+            ) : null}
+          </div>
+        </div>
+        <footer className="ai-context-approval-actions">
+          <label className="plugin-toggle">
+            <input type="checkbox" checked={remember} disabled={!rememberEnabled} onChange={(event) => setRemember(event.target.checked)} />
+            <span>{tr("跳过本工作区同类确认")}</span>
+          </label>
+          <div>
+            <button type="button" className="secondary-button" onClick={onCancel}>{tr("取消")}</button>
+            <button type="button" className="primary-button" onClick={() => onConfirm(remember)}>
+              <Send size={14} /> {tr("确认发送")}
+            </button>
+          </div>
+        </footer>
+      </section>
+    </div>
+  );
+}
+
+function aiScopeLabel(scope: AiEditorSnapshot["scope"], tr = createTranslator("zh-CN")): string {
+  switch (scope) {
+    case "selection":
+      return tr("选区");
+    case "folder":
+      return tr("文件夹");
+    case "workspace":
+      return tr("工作区");
+    case "document":
+    default:
+      return tr("文档");
+  }
+}
+
+function aiIndexStatusLabel(status: AiIndexStatus | undefined, tr = createTranslator("zh-CN")): string {
+  switch (status?.status) {
+    case "disabled":
+      return tr("AI 索引未启用");
+    case "indexing":
+      return tr("AI 索引构建中");
+    case "paused":
+      return tr("AI 索引已暂停");
+    case "ready":
+      return tr("AI 索引可用");
+    case "error":
+      return tr("AI 索引异常");
+    case "idle":
+    default:
+      return tr("AI 索引待构建");
+  }
+}
+
+function aiContextKindLabel(kind: AiContextPreviewResponse["items"][number]["kind"], tr = createTranslator("zh-CN")): string {
+  switch (kind) {
+    case "selection":
+      return tr("选区");
+    case "current-document":
+      return tr("当前文档");
+    case "workspace-search-result":
+      return tr("工作区搜索");
+    case "backlink":
+      return tr("反向链接");
+    case "attachment":
+      return tr("附件");
+    case "web":
+      return tr("网页");
+    default:
+      return kind;
+  }
+}
+
+function aiInsightKindLabel(kind: AiInsightItem["kind"], tr = createTranslator("zh-CN")): string {
+  switch (kind) {
+    case "similar":
+      return tr("相关笔记");
+    case "duplicate":
+      return tr("疑似重复");
+    case "tag":
+      return tr("标签建议");
+    case "backlink":
+      return tr("双链建议");
+    case "topic":
+      return tr("主题线索");
+    default:
+      return kind;
   }
 }
 

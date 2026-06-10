@@ -16,6 +16,8 @@ import { HistoryService } from "./services/historyService";
 import { PLUGIN_PROTOCOL, PluginService } from "./services/pluginService";
 import { SettingsService } from "./services/settingsService";
 import { WorkspaceService } from "./services/workspaceService";
+import { AiService } from "./services/ai/aiService";
+import { CredentialService } from "./services/ai/credentialService";
 import { registerIpcHandlers } from "./ipc";
 import { createMainWindow } from "./mainWindow";
 import { installApplicationMenu } from "./menu";
@@ -92,6 +94,8 @@ app.whenReady().then(async () => {
 
   const settings = new SettingsService(app.getPath("userData"));
   await settings.init();
+  const credentials = new CredentialService(app.getPath("userData"));
+  await credentials.init();
   const startupLocale = resolveLocale(settings.getSettings().language, app.getLocale());
   const plugins = new PluginService(app.getPath("userData"), settings, diagnostics, startupLocale);
   await plugins.init();
@@ -107,6 +111,7 @@ app.whenReady().then(async () => {
   const files = new FileSystemService(workspaces, history);
   const attachments = new AttachmentService(workspaces, startupLocale);
   const exporter = new ExportService(workspaces, startupLocale);
+  const ai = new AiService(settings, credentials, workspaces, files, diagnostics, plugins);
 
   if (!process.env.VITE_DEV_SERVER_URL) {
     registerRendererProtocol();
@@ -127,6 +132,7 @@ app.whenReady().then(async () => {
     attachments,
     exporter,
     settings,
+    ai,
     diagnostics,
     plugins,
     syncExtensionMenus: (menus) => installApplicationMenu(() => mainWindow, menus, startupLocale)

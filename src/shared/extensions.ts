@@ -1,4 +1,5 @@
 import type { AppSettings } from "./types";
+import type { AiCommandDefinition, AiExtractorKind } from "./ai";
 
 export const EXTENSION_API_VERSION = 2;
 
@@ -156,6 +157,8 @@ export interface ExtensionContributions {
   exporters?: ExporterContribution[];
   searchProviders?: SearchProviderContribution[];
   aiProviders?: AiProviderContribution[];
+  aiExtractors?: AiExtractorContribution[];
+  aiCommands?: AiCommandContribution[];
   automations?: AutomationContribution[];
   contextMenus?: MenuContribution[];
 }
@@ -188,6 +191,19 @@ export interface AiProviderContribution {
   models?: string[];
   order?: number;
 }
+
+export interface AiExtractorContribution {
+  id: string;
+  title: string;
+  kinds?: AiExtractorKind[];
+  extensions?: string[];
+  mimeTypes?: string[];
+  order?: number;
+}
+
+export type AiCommandContribution =
+  Pick<AiCommandDefinition, "id" | "name" | "promptTemplate"> &
+  Partial<Omit<AiCommandDefinition, "id" | "source" | "pluginId" | "name" | "promptTemplate">>;
 
 export interface AutomationContribution {
   id: string;

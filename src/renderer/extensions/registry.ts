@@ -4,6 +4,7 @@ import type {
   ExtensionManifest,
   FileEditorContribution,
   FileViewerContribution,
+  AiExtractorContribution,
   MenuContribution,
   SettingContribution,
   SidebarPanelContribution
@@ -34,6 +35,7 @@ export interface ExtensionRegistrySnapshot {
   exporters: NonNullable<ExtensionManifest["contributes"]["exporters"]>;
   searchProviders: NonNullable<ExtensionManifest["contributes"]["searchProviders"]>;
   aiProviders: NonNullable<ExtensionManifest["contributes"]["aiProviders"]>;
+  aiExtractors: AiExtractorContribution[];
   automations: NonNullable<ExtensionManifest["contributes"]["automations"]>;
 }
 
@@ -56,6 +58,7 @@ export function createExtensionRegistry(manifests: ExtensionManifest[], settings
     exporters: sortContributions(enabledManifests.flatMap((manifest) => manifest.contributes.exporters ?? [])),
     searchProviders: sortContributions(enabledManifests.flatMap((manifest) => manifest.contributes.searchProviders ?? [])),
     aiProviders: sortContributions(enabledManifests.flatMap((manifest) => manifest.contributes.aiProviders ?? [])),
+    aiExtractors: sortContributions(enabledManifests.flatMap((manifest) => manifest.contributes.aiExtractors ?? [])),
     automations: sortContributions(enabledManifests.flatMap((manifest) => manifest.contributes.automations ?? []))
   };
 }

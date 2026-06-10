@@ -1,4 +1,5 @@
 import { expect, test, type Locator } from "@playwright/test";
+import { DEFAULT_AI_SETTINGS } from "../../src/shared/ai";
 import type { AppSettings, FileTreeNode, ParsedDocument, RecentWorkspace, WorkspaceInfo } from "../../src/shared/types";
 import { installMockNolia } from "./helpers/mockNolia";
 
@@ -14,6 +15,7 @@ const settings: AppSettings = {
   focusMode: false,
   autoSaveDelayMs: 800,
   attachmentStrategy: "workspace_assets",
+  ai: DEFAULT_AI_SETTINGS,
   pluginSafeMode: false,
   plugins: {}
 };

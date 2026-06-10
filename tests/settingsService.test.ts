@@ -1,4 +1,4 @@
-import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { describe, expect, it } from "vitest";
@@ -50,6 +50,7 @@ describe("settings and plugin services", () => {
       await reloaded.init();
 
       expect(reloaded.getSettings().language).toBe("en-US");
+      expect((await readdir(root)).filter((fileName) => fileName.startsWith("global-state.json.") && fileName.endsWith(".tmp"))).toEqual([]);
     } finally {
       await rm(root, { recursive: true, force: true });
     }

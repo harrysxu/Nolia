@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 
+import { DEFAULT_AI_SETTINGS } from "../src/shared/ai";
 import { BUILT_IN_EXTENSION_MANIFESTS } from "../src/shared/builtinExtensions";
 import type { AppSettings } from "../src/shared/types";
 import type { ExtensionManifest } from "../src/shared/extensions";
@@ -14,6 +15,7 @@ const settings: AppSettings = {
   focusMode: false,
   autoSaveDelayMs: 80,
   attachmentStrategy: "workspace_assets",
+  ai: DEFAULT_AI_SETTINGS,
   pluginSafeMode: false,
   plugins: {}
 };
@@ -73,6 +75,39 @@ describe("extension registry", () => {
     expect(createExtensionRegistry([external], settings).commands).toHaveLength(0);
     expect(createExtensionRegistry([external], { ...settings, plugins: { "local.demo": { enabled: true } } }).commands).toHaveLength(0);
     expect(createExtensionRegistry([external], { ...settings, plugins: { "local.demo": { enabled: true, permissionsAcceptedAt: 1, acceptedPermissionHash: "ui:contribute" } } }).commands[0]?.id).toBe("demo.hello");
+  });
+
+  it("registers accepted plugin AI extractor contributions", () => {
+    const external: ExtensionManifest = {
+      id: "local.ai",
+      name: "Local AI",
+      version: "1.0.0",
+      activationEvents: ["onStartup"],
+      permissions: ["workspace:file:read"],
+      contributes: {
+        aiExtractors: [{
+          id: "local.ai.imageText",
+          title: "Image OCR",
+          kinds: ["image"],
+          extensions: [".png", ".jpg"],
+          order: 5
+        }]
+      }
+    };
+
+    const registry = createExtensionRegistry([external], {
+      ...settings,
+      plugins: {
+        "local.ai": {
+          enabled: true,
+          permissionsAcceptedAt: 1,
+          acceptedPermissionHash: "workspace:file:read"
+        }
+      }
+    });
+
+    expect(registry.aiExtractors).toHaveLength(1);
+    expect(registry.aiExtractors[0]).toMatchObject({ id: "local.ai.imageText", kinds: ["image"] });
   });
 
   it("blocks external plugins in safe mode and after permission changes", () => {

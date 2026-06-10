@@ -2,6 +2,25 @@ import { contextBridge, ipcRenderer } from "electron";
 
 import { IpcChannels } from "../shared/channels";
 import {
+  type AiAttachmentExtractRequest,
+  type AiChangePlanApplyRequest,
+  type AiChangePlanPrepareRequest,
+  type AiChatCancelRequest,
+  type AiChatStartRequest,
+  type AiCommandRunRequest,
+  type AiCommandsListRequest,
+  type AiContextPreviewRequest,
+  type AiCredentialDeleteRequest,
+  type AiCredentialListRequest,
+  type AiCredentialSetRequest,
+  type AiIndexCancelRequest,
+  type AiIndexClearRequest,
+  type AiIndexRebuildRequest,
+  type AiIndexStatusRequest,
+  type AiInsightsRequest,
+  type AiModelsListRequest,
+  type AiProviderTestRequest,
+  type AiWebSearchRequest,
   type AttachmentImportRequest,
   type AttachmentPickImageRequest,
   type ClipboardWriteRichRequest,
@@ -29,6 +48,21 @@ import {
   type WorkspaceRemoveRecentRequest,
   type WorkspaceSwitchRequest
 } from "../shared/ipc";
+import type {
+  AiAttachmentExtractResponse,
+  AiChangePlanApplyResponse,
+  AiChangePlanPrepareResponse,
+  AiChatStartResponse,
+  AiChatStreamEvent,
+  AiCommandDefinition,
+  AiContextPreviewResponse,
+  AiCredentialSummary,
+  AiIndexStatus,
+  AiInsightsResponse,
+  AiModelsListResponse,
+  AiProviderTestResponse,
+  AiWebSearchResponse
+} from "../shared/ai";
 import type { PluginDescriptor } from "../shared/extensions";
 import type {
   AppSettings,
@@ -115,6 +149,28 @@ export interface NoliaApi {
     get: () => Promise<AppSettings>;
     set: (request: SettingsSetRequest) => Promise<AppSettings>;
   };
+  ai?: {
+    listCredentials: (request?: AiCredentialListRequest) => Promise<AiCredentialSummary[]>;
+    setCredential: (request: AiCredentialSetRequest) => Promise<AiCredentialSummary>;
+    deleteCredential: (request: AiCredentialDeleteRequest) => Promise<{ ok: boolean }>;
+    testProvider: (request: AiProviderTestRequest) => Promise<AiProviderTestResponse>;
+    listModels: (request: AiModelsListRequest) => Promise<AiModelsListResponse>;
+    previewContext: (request: AiContextPreviewRequest) => Promise<AiContextPreviewResponse>;
+    startChat: (request: AiChatStartRequest) => Promise<AiChatStartResponse>;
+    cancelChat: (request: AiChatCancelRequest) => Promise<{ ok: boolean }>;
+    listCommands: (request?: AiCommandsListRequest) => Promise<AiCommandDefinition[]>;
+    runCommand: (request: AiCommandRunRequest) => Promise<AiChatStartResponse>;
+    indexStatus: (request?: AiIndexStatusRequest) => Promise<AiIndexStatus>;
+    rebuildIndex: (request: AiIndexRebuildRequest) => Promise<AiIndexStatus>;
+    clearIndex: (request: AiIndexClearRequest) => Promise<AiIndexStatus>;
+    cancelIndex: (request: AiIndexCancelRequest) => Promise<AiIndexStatus>;
+    webSearch: (request: AiWebSearchRequest) => Promise<AiWebSearchResponse>;
+    extractAttachment: (request: AiAttachmentExtractRequest) => Promise<AiAttachmentExtractResponse>;
+    prepareChangePlan: (request: AiChangePlanPrepareRequest) => Promise<AiChangePlanPrepareResponse>;
+    applyChangePlan: (request: AiChangePlanApplyRequest) => Promise<AiChangePlanApplyResponse>;
+    insights: (request: AiInsightsRequest) => Promise<AiInsightsResponse>;
+    onChatEvent: (listener: (event: AiChatStreamEvent) => void) => Unsubscribe;
+  };
   plugins?: {
     list: () => Promise<PluginDescriptor[]>;
     setEnabled: (request: PluginSetEnabledRequest) => Promise<PluginDescriptor[]>;
@@ -184,6 +240,28 @@ const api: NoliaApi = {
   settings: {
     get: () => invoke(IpcChannels.settingsGet, {}),
     set: (request) => invoke(IpcChannels.settingsSet, request)
+  },
+  ai: {
+    listCredentials: (request = {}) => invoke(IpcChannels.aiCredentialsList, request),
+    setCredential: (request) => invoke(IpcChannels.aiCredentialsSet, request),
+    deleteCredential: (request) => invoke(IpcChannels.aiCredentialsDelete, request),
+    testProvider: (request) => invoke(IpcChannels.aiProviderTest, request),
+    listModels: (request) => invoke(IpcChannels.aiModelsList, request),
+    previewContext: (request) => invoke(IpcChannels.aiContextPreview, request),
+    startChat: (request) => invoke(IpcChannels.aiChatStart, request),
+    cancelChat: (request) => invoke(IpcChannels.aiChatCancel, request),
+    listCommands: (request = {}) => invoke(IpcChannels.aiCommandsList, request),
+    runCommand: (request) => invoke(IpcChannels.aiCommandRun, request),
+    indexStatus: (request = {}) => invoke(IpcChannels.aiIndexStatus, request),
+    rebuildIndex: (request) => invoke(IpcChannels.aiIndexRebuild, request),
+    clearIndex: (request) => invoke(IpcChannels.aiIndexClear, request),
+    cancelIndex: (request) => invoke(IpcChannels.aiIndexCancel, request),
+    webSearch: (request) => invoke(IpcChannels.aiWebSearch, request),
+    extractAttachment: (request) => invoke(IpcChannels.aiAttachmentExtract, request),
+    prepareChangePlan: (request) => invoke(IpcChannels.aiChangePlanPrepare, request),
+    applyChangePlan: (request) => invoke(IpcChannels.aiChangePlanApply, request),
+    insights: (request) => invoke(IpcChannels.aiInsights, request),
+    onChatEvent: (listener) => subscribe(IpcChannels.aiChatEvent, listener)
   },
   plugins: {
     list: () => invoke(IpcChannels.pluginsList, {}),

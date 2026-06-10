@@ -122,12 +122,16 @@ interface WysiwygEditorProps {
   onInsertToc?: (currentHtml: string) => void;
   readOnly?: boolean;
   showToolbar?: boolean;
+  toolbarExtra?: ReactNode;
+  onAiContextMenu?: (x: number, y: number) => void;
 }
 
 export interface WysiwygEditorHandle {
   undoEdit: () => boolean;
   redoEdit: () => boolean;
   scrollToHeading: (headingIndex: number) => boolean;
+  captureAiSelection: () => string | undefined;
+  applyAiText: (text: string, mode: "insert" | "replace" | "append") => boolean;
 }
 
 type TableDialogState = {
@@ -485,7 +489,7 @@ function hasBlockChildren(element: HTMLElement): boolean {
 }
 
 export const WysiwygEditor = forwardRef<WysiwygEditorHandle, WysiwygEditorProps>(function WysiwygEditor(
-  { html, sourceText, workspaceId, documentPathRel, onChange, onMarkdownPaste, onSelectionLengthChange, onOpenMarkdownTarget, onInsertToc, readOnly, showToolbar = true },
+  { html, sourceText, workspaceId, documentPathRel, onChange, onMarkdownPaste, onSelectionLengthChange, onOpenMarkdownTarget, onInsertToc, readOnly, showToolbar = true, toolbarExtra, onAiContextMenu },
   ref
 ) {
   const { tr } = useRendererI18n();
@@ -505,6 +509,7 @@ export const WysiwygEditor = forwardRef<WysiwygEditorHandle, WysiwygEditorProps>
   const tableMenuModeRef = useRef<TableMenuMode>("toolbar");
   const sourceTextRef = useRef<string | undefined>(sourceText);
   const onOpenMarkdownTargetRef = useRef<typeof onOpenMarkdownTarget>(onOpenMarkdownTarget);
+  const onAiContextMenuRef = useRef<typeof onAiContextMenu>(onAiContextMenu);
   const userEditIntentAt = useRef(0);
   const emitOpenMarkdownTarget = useCallback((target: MarkdownOpenTarget) => {
     onOpenMarkdownTargetRef.current?.(target);
@@ -640,6 +645,16 @@ export const WysiwygEditor = forwardRef<WysiwygEditorHandle, WysiwygEditorProps>
           const table = target?.closest("table");
           const shell = view.dom.closest(".wysiwyg-shell");
           if (!table || !shell) {
+            if (onAiContextMenuRef.current) {
+              const position = view.posAtCoords({ left: event.clientX, top: event.clientY })?.pos;
+              if (position !== undefined && view.state.selection.empty) {
+                view.dispatch(view.state.tr.setSelection(TextSelection.create(view.state.doc, position)));
+              }
+              view.focus();
+              onAiContextMenuRef.current(event.clientX, event.clientY);
+              event.preventDefault();
+              return true;
+            }
             return false;
           }
           const tableCell = tableCellElementFromTarget(view, target);
@@ -824,6 +839,10 @@ export const WysiwygEditor = forwardRef<WysiwygEditorHandle, WysiwygEditorProps>
     onOpenMarkdownTargetRef.current = onOpenMarkdownTarget;
   }, [onOpenMarkdownTarget]);
 
+  useEffect(() => {
+    onAiContextMenuRef.current = onAiContextMenu;
+  }, [onAiContextMenu]);
+
   useImperativeHandle(ref, () => ({
     undoEdit: () => {
       if (!editor) {
@@ -847,8 +866,33 @@ export const WysiwygEditor = forwardRef<WysiwygEditorHandle, WysiwygEditorProps>
       markUserEditIntent();
       return editor.chain().focus().redo().run();
     },
-    scrollToHeading: (headingIndex: number) => scrollToEditorHeading(editor, headingIndex)
-  }), [editor]);
+    scrollToHeading: (headingIndex: number) => scrollToEditorHeading(editor, headingIndex),
+    captureAiSelection: () => {
+      if (!editor) {
+        return undefined;
+      }
+      const text = selectedText(editor.state);
+      return text.trim() ? text : undefined;
+    },
+    applyAiText: (text: string, mode: "insert" | "replace" | "append") => {
+      if (!editor || readOnly) {
+        return false;
+      }
+      markUserEditIntent();
+      if (mode === "append") {
+        editor.chain().focus("end").run();
+        const appendix = editor.getText().trim() ? `\n\n${text.trim()}` : text.trim();
+        void insertMarkdownPlainText(editor, editor.view, appendix, { workspaceId, documentPathRel }, onChange);
+        return true;
+      }
+      if (mode === "replace" || mode === "insert") {
+        editor.commands.focus();
+        void insertMarkdownPlainText(editor, editor.view, text, { workspaceId, documentPathRel }, onChange);
+        return true;
+      }
+      return false;
+    }
+  }), [documentPathRel, editor, onChange, readOnly, workspaceId]);
 
   useEffect(() => {
     if (!editor) {
@@ -1167,6 +1211,12 @@ export const WysiwygEditor = forwardRef<WysiwygEditorHandle, WysiwygEditorProps>
     <div className="wysiwyg-shell">
       {showToolbar ? (
       <div className="editor-toolbar" role="toolbar" aria-label={tr("Markdown 工具")} onMouseDown={markUserEditIntent}>
+        {toolbarExtra ? (
+          <>
+            {toolbarExtra}
+            <ToolbarDivider />
+          </>
+        ) : null}
         <IconButton title={tr("插入目录")} onClick={() => void insertOrUpdateToc()} icon={<TableOfContents size={16} />} />
         <ToolbarDivider />
         <IconButton title={tr("撤销")} onClick={() => {

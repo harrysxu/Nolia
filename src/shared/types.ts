@@ -1,3 +1,5 @@
+import type { AiSettings } from "./ai";
+
 export type ThemeId = "system" | "light" | "dark" | "paper" | "technical";
 export type EditorMode = "wysiwyg" | "source" | "split";
 export type FileKind = "directory" | "markdown" | "asset" | "other";
@@ -15,6 +17,7 @@ export interface AppSettings {
   focusMode: boolean;
   autoSaveDelayMs: number;
   attachmentStrategy: "workspace_assets" | "document_assets";
+  ai: AiSettings;
   pluginSafeMode: boolean;
   plugins: Record<string, {
     enabled: boolean;

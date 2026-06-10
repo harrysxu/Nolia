@@ -4,6 +4,7 @@ import { z } from "zod";
 
 import { EXTENSION_API_VERSION, extensionPermissionHash, type ExtensionManifest, type ExtensionPermission, type PluginDescriptor } from "../../shared/extensions";
 import { createTranslator, type Translator } from "../../shared/i18n";
+import type { AiCommandDefinition } from "../../shared/ai";
 import type { ResolvedLocale } from "../../shared/types";
 import { DiagnosticsService } from "./diagnosticsService";
 import { SettingsService } from "./settingsService";
@@ -28,6 +29,8 @@ const ContributionSchema = z
     exporters: z.array(z.object({ id: z.string(), title: z.string(), formats: z.array(z.string()) }).passthrough()).optional(),
     searchProviders: z.array(z.object({ id: z.string(), title: z.string() }).passthrough()).optional(),
     aiProviders: z.array(z.object({ id: z.string(), title: z.string() }).passthrough()).optional(),
+    aiExtractors: z.array(z.object({ id: z.string(), title: z.string() }).passthrough()).optional(),
+    aiCommands: z.array(z.object({ id: z.string(), name: z.string(), promptTemplate: z.string() }).passthrough()).optional(),
     automations: z.array(z.object({ id: z.string(), title: z.string(), trigger: z.string() }).passthrough()).optional(),
     contextMenus: z.array(z.object({ id: z.string(), label: z.string(), location: z.string() }).passthrough()).optional()
   })
@@ -139,6 +142,28 @@ export class PluginService {
     this.diagnostics.error("Plugin disabled after runtime failure", { pluginId, message });
     await this.settings.markPluginDisabled(pluginId, message);
     return this.listPlugins();
+  }
+
+  listAiCommands(): AiCommandDefinition[] {
+    return this.listPlugins().flatMap((descriptor) => {
+      if (!descriptor.enabled || !descriptor.manifest?.contributes.aiCommands?.length) {
+        return [];
+      }
+      return descriptor.manifest.contributes.aiCommands.map((command, index) => ({
+        id: command.id,
+        source: "plugin" as const,
+        pluginId: descriptor.pluginId,
+        name: command.name,
+        description: command.description,
+        enabled: command.enabled !== false,
+        order: command.order ?? 20_000 + index,
+        scopes: command.scopes?.length ? command.scopes : ["selection", "document", "workspace"],
+        promptTemplate: command.promptTemplate,
+        defaultContext: command.defaultContext ?? { includeSelection: true, includeCurrentDocument: true },
+        defaultApplyMode: command.defaultApplyMode ?? "answer",
+        ui: command.ui ?? { commandPalette: true, editorToolbar: false, contextMenu: false, aiPanel: true }
+      }));
+    });
   }
 
   resolvePluginFile(pluginId: string, requestPath: string): string | undefined {
@@ -276,6 +301,8 @@ function validateManifestContributions(manifest: ExtensionManifest, tr: Translat
     ...(manifest.contributes.exporters?.map((item) => item.id) ?? []),
     ...(manifest.contributes.searchProviders?.map((item) => item.id) ?? []),
     ...(manifest.contributes.aiProviders?.map((item) => item.id) ?? []),
+    ...(manifest.contributes.aiExtractors?.map((item) => item.id) ?? []),
+    ...(manifest.contributes.aiCommands?.map((item) => item.id) ?? []),
     ...(manifest.contributes.automations?.map((item) => item.id) ?? [])
   ];
   for (const id of ids) {

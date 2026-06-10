@@ -1,3 +1,5 @@
+import { DEFAULT_AI_SETTINGS } from "./ai";
+
 export const APP_NAME = "Nolia";
 export const BUNDLE_IDENTIFIER = "com.nolia.app";
 export const WORKSPACE_META_DIR = ".nolia";
@@ -15,6 +17,7 @@ export const DEFAULT_SETTINGS = {
   focusMode: false,
   autoSaveDelayMs: 800,
   attachmentStrategy: "workspace_assets",
+  ai: DEFAULT_AI_SETTINGS,
   pluginSafeMode: false,
   plugins: {}
 } as const;
