@@ -1,3 +1,5 @@
+import type { AiSettings } from "./ai";
+
 export type ThemeId = "system" | "light" | "dark" | "paper" | "technical";
 export type EditorMode = "wysiwyg" | "source" | "split";
 export type FileKind = "directory" | "markdown" | "asset" | "other";
@@ -16,6 +18,7 @@ export interface AppSettings {
   autoSaveDelayMs: number;
   attachmentStrategy: "workspace_assets" | "document_assets";
   pluginSafeMode: boolean;
+  ai: AiSettings;
   plugins: Record<string, {
     enabled: boolean;
     permissionsAcceptedAt?: number;
@@ -97,6 +100,21 @@ export interface FileWriteResponse {
     diskHash: string;
     mtimeMs: number;
   };
+}
+
+export interface FileHistoryEntry {
+  id: number;
+  pathRel: string;
+  snapshotPath: string;
+  reason: "autosave" | "manual" | "conflict" | "restore" | string;
+  size: number;
+  sha256: string;
+  createdAt: number;
+}
+
+export interface FileHistoryReadResponse {
+  entry: FileHistoryEntry;
+  content: string;
 }
 
 export interface OutlineItem {

@@ -1,7 +1,7 @@
 import type { BacklinksResponse, EditorMode, FileTreeNode, ParsedDocument, SearchResultItem, WorkspaceInfo } from "../../shared/types";
 
 export type SidebarView = string;
-export type RightPanelView = "outline" | "details" | "errors";
+export type RightPanelView = "outline" | "details" | "history" | "errors";
 export type NewItemKind = "file" | "directory";
 export type ItemKind = "file" | "directory" | "resource";
 export type RenameTarget = { pathRel: string; kind: ItemKind; name: string };

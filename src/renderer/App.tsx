@@ -1,5 +1,6 @@
 /* eslint-disable react-hooks/exhaustive-deps -- The shell coordinates IPC subscriptions and ref-backed debounced document state. */
 import {
+  Component,
   useEffect,
   forwardRef,
   useLayoutEffect,
@@ -13,7 +14,8 @@ import {
   type MouseEvent as ReactMouseEvent,
   type PointerEvent as ReactPointerEvent,
   type ReactNode,
-  type RefObject
+  type RefObject,
+  type ErrorInfo
 } from "react";
 import type { ReactCodeMirrorRef } from "@uiw/react-codemirror";
 import { redo as redoCodeMirror, redoDepth as redoDepthCodeMirror, undo as undoCodeMirror, undoDepth as undoDepthCodeMirror } from "@codemirror/commands";
@@ -63,6 +65,7 @@ import {
   RefreshCw,
   Search,
   Settings2,
+  Sparkles,
   SquareCheckBig,
   Sigma,
   Star,
@@ -80,10 +83,13 @@ import { DEFAULT_SETTINGS } from "../shared/constants";
 import { getBuiltInExtensionManifests } from "../shared/builtinExtensions";
 import { createTranslator, formatFileSize as formatLocalizedFileSize, resolveLocale, type Translator } from "../shared/i18n";
 import { hasExtensionPermission, type ExtensionContributions, type ExtensionManifest, type ExtensionPermission, type FileEditorContribution, type PluginDescriptor, type SettingContribution, type SidebarPanelContribution } from "../shared/extensions";
-import type { AppSettings, BacklinksResponse, EditorMode, FileBinaryReadResponse, FileReadResponse, FileTreeNode, FileWriteResponse, RecentWorkspace, ResolvedLocale, SearchResultItem, WorkspaceInfo } from "../shared/types";
+import { normalizeAiSettings, normalizeAiSettingsPublic, type AiEmbeddingSettings, type AiPatchOperation, type AiPatchProposal, type AiProviderProfile, type AiProviderTestResult, type AiRunEvent, type AiSelectionActionId, type AiSemanticIndexStatus, type AiSettings, type AiSettingsPublic, type AiSourceRef } from "../shared/ai";
+import type { AppSettings, BacklinksResponse, EditorMode, FileBinaryReadResponse, FileHistoryEntry, FileReadResponse, FileTreeNode, FileWriteResponse, RecentWorkspace, ResolvedLocale, SearchResultItem, WorkspaceInfo } from "../shared/types";
+import { AiSettingsPanel } from "./ai/AiSettingsPanel";
+import { AiSidebar, type AiMessageView } from "./ai/AiSidebar";
 import { CommandPalette, type PaletteAction } from "./components/CommandPalette";
 import { MarkdownPreview } from "./components/MarkdownPreview";
-import { SourceEditor } from "./components/SourceEditor";
+import { SourceEditor, type SourceEditorHandle } from "./components/SourceEditor";
 import { TextResourceEditor, type TextResourceEditorHandle } from "./components/TextResourceEditor";
 import { WelcomeScreen } from "./components/WelcomeScreen";
 import { WysiwygEditor, type WysiwygEditorHandle } from "./components/WysiwygEditor";
@@ -151,6 +157,19 @@ type AppRuntimeInfo = {
   pluginDirectory: string;
   logsDirectory: string;
 };
+type AiRunUiOptions = {
+  displayText?: string;
+  requireCurrentNote?: boolean;
+  patchFallback?: boolean;
+  patchApplyMode?: "current-document" | "new-document";
+};
+type AiRunUiState = {
+  textReceived: boolean;
+  patchReceived: boolean;
+  eventReceived: boolean;
+  watchdogTimer?: number;
+};
+type AiRunTerminalReason = "done" | "cancelled" | "error" | "watchdog";
 const LEFT_PANEL_WIDTH_STORAGE_KEY = "nolia.leftPanelWidth.v2";
 const RIGHT_PANEL_WIDTH_STORAGE_KEY = "nolia.rightPanelWidth.v1";
 const TOOLBAR_VISIBLE_STORAGE_KEY = "nolia.toolbarVisible.v1";
@@ -167,6 +186,17 @@ const MAX_SPLIT_LEFT_PERCENT = 75;
 const EXTERNAL_PARSE_WORKSPACE_ID = "external";
 const SPLIT_PREVIEW_RENDER_DELAY_MS = 180;
 const USER_STATUS_PROTECT_MS = 1800;
+const AI_RUN_UI_WATCHDOG_MS = Number(import.meta.env.VITE_NOLIA_AI_WATCHDOG_MS ?? 120_000);
+const AI_RUN_START_WATCHDOG_MS = Math.min(10_000, AI_RUN_UI_WATCHDOG_MS);
+const AI_TERMINAL_EVENT_TTL_MS = 5 * 60_000;
+
+function isAiRunProgressEvent(event: AiRunEvent): boolean {
+  return event.type === "run-started" || event.type === "text-delta" || event.type === "tool-call" || event.type === "tool-result" || event.type === "source-used" || event.type === "patch-proposal" || event.type === "approval-required";
+}
+
+function isAiRunStateEvent(event: AiRunEvent): boolean {
+  return event.type === "task-updated" || event.type === "task-restored" || event.type === "run-started" || event.type === "text-delta" || event.type === "tool-call" || event.type === "tool-result" || event.type === "source-used" || event.type === "patch-proposal" || event.type === "approval-required" || event.type === "done" || event.type === "cancelled" || event.type === "error";
+}
 
 type MarkdownWorkspaceTarget = {
   pathRel: string;
@@ -226,8 +256,31 @@ export function App() {
   const [pluginFileViewers, setPluginFileViewers] = useState<Map<string, RegisteredPluginRenderer<PluginFileViewerContext>>>(new Map());
   const [pluginFileEditors, setPluginFileEditors] = useState<Map<string, RegisteredPluginRenderer<PluginFileEditorContext>>>(new Map());
   const [settingsOpen, setSettingsOpen] = useState(false);
+  const [settingsInitialTab, setSettingsInitialTab] = useState<SettingsTabId>("preferences");
   const [selectedCharCount, setSelectedCharCount] = useState(0);
   const [modifiedOpenCursorActive, setModifiedOpenCursorActive] = useState(false);
+  const [historyEntries, setHistoryEntries] = useState<FileHistoryEntry[]>([]);
+  const [historyLoading, setHistoryLoading] = useState(false);
+  const [historyPreview, setHistoryPreview] = useState<{ entry: FileHistoryEntry; content: string } | undefined>();
+  const [aiSettings, setAiSettings] = useState<AiSettingsPublic | undefined>();
+  const [aiSemanticStatus, setAiSemanticStatus] = useState<AiSemanticIndexStatus | undefined>();
+  const [aiSidebarOpen, setAiSidebarOpen] = useState(false);
+  const [aiMessages, setAiMessages] = useState<AiMessageView[]>([]);
+  const [aiSources, setAiSources] = useState<AiSourceRef[]>([]);
+  const [aiPatchProposal, setAiPatchProposal] = useState<AiPatchProposal | undefined>();
+  const [aiPatchApplyMode, setAiPatchApplyMode] = useState<"current-document" | "new-document">("current-document");
+  const [aiActiveRunId, setAiActiveRunId] = useState<string | undefined>();
+  const [aiRunning, setAiRunning] = useState(false);
+  const [aiCanRetry, setAiCanRetry] = useState(false);
+  const aiLastInstructionRef = useRef<string>("");
+  const aiLastDisplayTextRef = useRef<string>("");
+  const aiLastActionRef = useRef<AiSelectionActionId | undefined>(undefined);
+  const aiLastRunOptionsRef = useRef<AiRunUiOptions | undefined>(undefined);
+  const aiActiveRunIdRef = useRef<string | undefined>(undefined);
+  const aiTerminalRunIdsRef = useRef<Map<string, AiRunTerminalReason>>(new Map());
+  const aiRunStatesRef = useRef<Map<string, AiRunUiState>>(new Map());
+  const aiStartWatchdogRef = useRef<number | undefined>(undefined);
+  const aiStartSequenceRef = useRef(0);
   const openDocsRef = useRef(openDocs);
   const activeResourceRef = useRef(activeResource);
   const suspendedShellRef = useRef<SuspendedShellState | undefined>(undefined);
@@ -265,7 +318,7 @@ export function App() {
   const isExternalDocument = visibleDocument?.sourceKind === "external";
   const showWelcome = !workspace && !visibleDocument;
   const showWorkspacePanels = Boolean(workspace) && !immersiveMode;
-  const effectiveSettings = appSettings ?? (DEFAULT_SETTINGS as AppSettings);
+  const effectiveSettings = appSettings ?? defaultAppSettings();
   const languageRestartRequired = appSettings ? resolveLocale(appSettings.language, navigator.language) !== startupLocale : false;
   const builtInExtensionManifests = useMemo(() => getBuiltInExtensionManifests(startupLocale), [startupLocale]);
   const pluginManifests = useMemo(() => pluginDescriptors.map((descriptor) => descriptor.manifest).filter(isExtensionManifest), [pluginDescriptors]);
@@ -480,6 +533,7 @@ export function App() {
         return;
       }
       void loadWorkspaceData(workspace);
+      void refreshAiSemanticStatus();
       if (Date.now() > userStatusProtectedUntilRef.current) {
         setStatusMessage(event.pathRel ? tr("已更新文件树：{path}", { path: event.pathRel }) : tr("工作区索引已完成"));
       }
@@ -495,6 +549,28 @@ export function App() {
     });
     return () => {
       commandUnsub();
+    };
+  }, []);
+
+  useEffect(() => {
+    const unsubscribe = window.nolia.ai?.onRunEvent((event) => {
+      handleAiRunEvent(event);
+    });
+    return () => {
+      unsubscribe?.();
+    };
+  }, []);
+
+  useEffect(() => {
+    return () => {
+      clearAiStartWatchdog();
+      for (const state of aiRunStatesRef.current.values()) {
+        if (state.watchdogTimer) {
+          window.clearTimeout(state.watchdogTimer);
+        }
+      }
+      aiRunStatesRef.current.clear();
+      aiTerminalRunIdsRef.current.clear();
     };
   }, []);
 
@@ -570,6 +646,18 @@ export function App() {
     }
   }, [sidebarView, activePathRel, workspace?.workspaceId]);
 
+  useEffect(() => {
+    const active = currentDocument();
+    if (rightPanelView === "history" && workspace && active && active.sourceKind !== "external") {
+      void refreshHistory(active.pathRel);
+      return;
+    }
+    if (!active || active.sourceKind === "external") {
+      setHistoryEntries([]);
+      setHistoryPreview(undefined);
+    }
+  }, [rightPanelView, activePathRel, workspace?.workspaceId]);
+
   const commandHandlers = useMemo<Record<string, () => void | Promise<void>>>(
     () => ({
       "workspace.open": () => openWorkspace(),
@@ -587,7 +675,13 @@ export function App() {
       "view.search": () => setSidebarView("search"),
       "view.backlinks": () => setSidebarView("backlinks"),
       "view.recent": () => setSidebarView("recent"),
-      "view.settings": () => setSettingsOpen(true),
+      "view.settings": () => openSettings("preferences"),
+      "ai.assistant.open": () => setAiSidebarOpen(true),
+      "ai.currentNote.summarize": () => startAiRun(currentNoteSummaryInstruction(tr), undefined, { displayText: tr("总结当前笔记"), requireCurrentNote: true }),
+      "ai.selection.polish": () => startSelectionAiAction("polish"),
+      "ai.selection.explain": () => startSelectionAiAction("explain"),
+      "ai.selection.translate": () => startSelectionAiAction("translate"),
+      "ai.selection.todo": () => startSelectionAiAction("todo"),
       "view.immersive.toggle": () => toggleImmersiveMode(),
       "view.toolbar.toggle": () => setToolbarVisible(!toolbarVisible),
       "view.lineNumbers.toggle": () => setLineNumbersVisible(!lineNumbersVisible),
@@ -595,7 +689,7 @@ export function App() {
       "mode.source": () => setActiveMode("source"),
       "mode.split": () => setActiveMode("split")
     }),
-    [workspace?.workspaceId, visibleDocument?.pathRel, immersiveMode, toolbarVisible, lineNumbersVisible, setCommandPaletteOpen, setLineNumbersVisible, setSidebarView, setToolbarVisible]
+    [workspace?.workspaceId, visibleDocument?.pathRel, immersiveMode, toolbarVisible, lineNumbersVisible, setCommandPaletteOpen, setLineNumbersVisible, setSidebarView, setToolbarVisible, tr]
   );
 
   useEffect(() => {
@@ -604,7 +698,15 @@ export function App() {
 
   const paletteActions = useMemo<PaletteAction[]>(
     () =>
-      extensionRegistry.commands
+      [
+        ...extensionRegistry.commands,
+        { id: "ai.assistant.open", title: tr("打开 AI Assistant"), keywords: ["ai", "assistant"], order: 20 },
+        { id: "ai.currentNote.summarize", title: tr("总结当前笔记"), keywords: ["ai", "summarize"], order: 21 },
+        { id: "ai.selection.polish", title: tr("润色选中文本"), keywords: ["ai", "polish"], order: 22 },
+        { id: "ai.selection.explain", title: tr("解释选中文本"), keywords: ["ai", "explain"], order: 23 },
+        { id: "ai.selection.translate", title: tr("翻译选中文本"), keywords: ["ai", "translate"], order: 24 },
+        { id: "ai.selection.todo", title: tr("转为待办"), keywords: ["ai", "todo"], order: 25 }
+      ]
         .filter((command) => Boolean(commandHandlers[command.id] ?? pluginCommandIds.includes(command.id)))
         .map((command) => ({
           id: command.id,
@@ -732,12 +834,25 @@ export function App() {
       />
       <SettingsDialog
         open={settingsOpen}
+        initialTab={settingsInitialTab}
         settings={appSettings}
+        aiSettings={aiSettings}
+        workspaceId={workspace?.workspaceId}
+        aiSemanticStatus={aiSemanticStatus}
         extensionManifests={allExtensionManifests}
         pluginDescriptors={pluginDescriptors}
         settingContributions={settingContributions}
         onClose={() => setSettingsOpen(false)}
         onUpdate={updateAppSetting}
+        onUpdateAiSettings={updateAiSettings}
+        onSetAiApiKey={setAiApiKey}
+        onClearAiApiKey={clearAiApiKey}
+        onGetAiApiKey={getAiApiKey}
+        onTestAiProvider={(provider, apiKey) => window.nolia.ai?.testProvider({ providerProfileId: provider.id, provider: aiProviderRequest(provider), apiKey }) ?? Promise.resolve({ ok: false, providerId: "ollama", localOnly: true, message: tr("AI API 不可用") })}
+        onListAiModels={(provider, apiKey) => window.nolia.ai?.listModels({ providerProfileId: provider.id, provider: aiProviderRequest(provider), apiKey }) ?? Promise.resolve([])}
+        onRefreshAiSemanticStatus={refreshAiSemanticStatus}
+        onTestAiEmbedding={testAiEmbedding}
+        onUpdateAiSemanticIndex={updateAiSemanticIndex}
         onSetPluginEnabled={setPluginEnabled}
         onAcceptPluginPermissions={acceptPluginPermissions}
         onReload={() => void bootstrap()}
@@ -748,6 +863,9 @@ export function App() {
         <div className="titlebar-left">
           <button type="button" className="icon-button" title={tr("命令面板")} aria-label={tr("命令面板")} onClick={() => setCommandPaletteOpen(true)}>
             <Menu size={16} />
+          </button>
+          <button type="button" className={`icon-button${aiSidebarOpen ? " is-active" : ""}`} title={tr("Nolia AI")} aria-label={tr("Nolia AI")} onClick={() => setAiSidebarOpen((open) => !open)}>
+            <Sparkles size={16} />
           </button>
           <div className="workspace-title">
             <strong>{shellTitle}</strong>
@@ -773,7 +891,7 @@ export function App() {
               setRightPanelCollapsed(false);
             }}
             onToggleSettings={() => {
-              setSettingsOpen(true);
+              openSettings("preferences");
             }}
             settingsOpen={settingsOpen}
           />
@@ -856,6 +974,10 @@ export function App() {
               setRightPanelView("outline");
               setRightPanelCollapsed(false);
             }}
+            onOpenHistory={() => {
+              setRightPanelView("history");
+              setRightPanelCollapsed(false);
+            }}
             onModeChange={(mode) => void setActiveMode(mode)}
             onToggleFavorite={() => toggleFavoriteDocument()}
           />
@@ -902,7 +1024,7 @@ export function App() {
         {showWorkspacePanels ? (
         <aside className={`right-panel ${rightPanelView}`} aria-hidden={rightPanelCollapsed}>
           <PanelHeader
-            title={rightPanelTitle(rightPanelView)}
+            title={rightPanelTitle(rightPanelView, tr)}
             onToggle={() => setRightPanelCollapsed(true)}
           />
           <div className="right-panel-body">
@@ -916,6 +1038,19 @@ export function App() {
               />
             ) : null}
             {rightPanelView === "details" ? <DocumentDetails doc={visibleDocument} backlinks={backlinks} /> : null}
+            {rightPanelView === "history" ? (
+              <HistoryPanel
+                doc={visibleDocument}
+                entries={historyEntries}
+                loading={historyLoading}
+                preview={historyPreview}
+                locale={startupLocale}
+                onRefresh={() => void refreshHistory()}
+                onCreateSnapshot={() => void createManualHistorySnapshot()}
+                onPreview={(entry) => void previewHistoryEntry(entry)}
+                onRestore={(entry) => void restoreHistoryEntry(entry)}
+              />
+            ) : null}
             {rightPanelView === "errors" ? <ErrorPanel statusMessage={statusMessage} /> : null}
           </div>
         </aside>
@@ -940,6 +1075,58 @@ export function App() {
           </>
         )}
       </footer>
+      <AiSidebar
+        open={aiSidebarOpen}
+        settings={aiSettings}
+        activeRunId={aiActiveRunId}
+        running={aiRunning}
+        messages={aiMessages}
+        sources={aiSources}
+        patchProposal={aiPatchProposal}
+        patchApplyMode={aiPatchApplyMode}
+        contextSummary={aiContextSummary(visibleDocument, selectedCharCount, aiSettings, tr)}
+        onClose={() => setAiSidebarOpen(false)}
+        onOpenSettings={() => openSettings("ai")}
+        onUpdateDefaultProvider={(patch) => void updateDefaultAiProvider(patch)}
+        onSend={(message, intent) => {
+          if (isRegenerateLastAiRequest(message) && retryLastAiRun(message)) {
+            return;
+          }
+          if (isWritePreviousAiResponseToNewDocumentRequest(message) && proposeNewDocumentFromLastAiResponse(message)) {
+            return;
+          }
+          const createDocument = isDocumentGenerationRequest(message);
+          const editInstruction = isDocumentEditRequest(message) ? (createDocument ? documentGenerationInstruction(message, tr) : documentEditInstruction(message, tr)) : undefined;
+          if (!editInstruction) {
+            setAiPatchProposal(undefined);
+            setAiPatchApplyMode("current-document");
+          }
+          const requiresCurrentNote = intent === "summarize-current-note" || Boolean(editInstruction) || isCurrentNoteBodyRequest(message);
+          void startAiRun(
+            intent === "summarize-current-note" ? currentNoteSummaryInstruction(tr) : editInstruction ?? message,
+            undefined,
+            requiresCurrentNote && intent === "summarize-current-note"
+              ? { displayText: message, requireCurrentNote: true }
+              : editInstruction
+                ? { displayText: message, requireCurrentNote: true, patchFallback: true, patchApplyMode: createDocument ? "new-document" : "current-document" }
+                : requiresCurrentNote
+                  ? { displayText: message, requireCurrentNote: true }
+                : undefined
+          );
+        }}
+        onCancel={() => {
+          if (aiActiveRunId) {
+            void window.nolia.ai?.cancelRun({ runId: aiActiveRunId });
+          }
+        }}
+        canRetry={aiCanRetry}
+        onRetry={() => {
+          retryLastAiRun(aiLastDisplayTextRef.current || tr("重新生成"));
+        }}
+        onCopy={(text) => void window.nolia.clipboard.writeRich({ text, html: `<pre>${escapeHtml(text)}</pre>` })}
+        onApplyPatch={applyAiPatch}
+        onDiscardPatch={() => setAiPatchProposal(undefined)}
+      />
     </div>
     </RendererI18nProvider>
   );
@@ -1057,9 +1244,10 @@ export function App() {
   }
 
   async function bootstrap() {
-    const [state, plugins] = await Promise.all([
+    const [state, plugins, aiState] = await Promise.all([
       window.nolia.workspace.bootstrap(),
-      window.nolia.plugins?.list?.() ?? Promise.resolve([])
+      window.nolia.plugins?.list?.() ?? Promise.resolve([]),
+      window.nolia.ai?.getSettings?.() ?? Promise.resolve(undefined)
     ]);
     if (!startupLocaleInitializedRef.current) {
       startupLocaleInitializedRef.current = true;
@@ -1068,6 +1256,7 @@ export function App() {
     setRecentWorkspaces(state.recentWorkspaces);
     setPluginDescriptors(plugins);
     setAppSettings(state.settings);
+    setAiSettings(normalizeAiSettingsPublic(aiState));
     setAppInfo(state.appInfo);
     setTheme(state.settings.theme);
     setEditorModeSetting(state.settings.editorMode);
@@ -1095,6 +1284,626 @@ export function App() {
         void openTreeNode(firstOpenableNode, workspaceInfo);
       }
     }
+  }
+
+  function handleAiRunEvent(event: AiRunEvent) {
+    if (aiTerminalRunIdsRef.current.has(event.runId)) {
+      return;
+    }
+    if (isAiRunProgressEvent(event)) {
+      clearAiStartWatchdog();
+    }
+    if (isAiRunStateEvent(event)) {
+      ensureAiRunState(event.runId);
+    }
+    if (event.type === "task-updated") {
+      if (aiStartWatchdogRef.current && !aiActiveRunIdRef.current && (event.task.status === "queued" || event.task.status === "running")) {
+        clearAiStartWatchdog();
+        aiActiveRunIdRef.current = event.runId;
+        setAiActiveRunId(event.runId);
+      }
+      return;
+    }
+    if (event.type === "task-restored") {
+      return;
+    }
+    if (event.type === "run-started") {
+      aiActiveRunIdRef.current = event.runId;
+      setAiRunning(true);
+      setAiActiveRunId(event.runId);
+      return;
+    }
+    if (event.type === "text-delta") {
+      markAiRunOutput(event.runId, "text");
+      setAiMessages((messages) => appendAiDelta(messages, event.runId, event.text));
+      return;
+    }
+    if (event.type === "tool-call") {
+      markAiRunOutput(event.runId, "event");
+      setAiMessages((messages) => [...messages, { id: `${event.runId}:${event.callId}:call`, role: "event", text: tr("调用工具：{tool}", { tool: event.toolName }) }]);
+      return;
+    }
+    if (event.type === "tool-result") {
+      markAiRunOutput(event.runId, "event");
+      setAiMessages((messages) => [...messages, { id: `${event.runId}:${event.callId}:result`, role: "event", text: event.resultSummary }]);
+      if (event.sourceRefs?.length) {
+        setAiSources((sources) => dedupeAiSources([...sources, ...(event.sourceRefs ?? [])]));
+      }
+      return;
+    }
+    if (event.type === "source-used") {
+      markAiRunOutput(event.runId, "event");
+      setAiSources((sources) => dedupeAiSources([...sources, event.source]));
+      return;
+    }
+    if (event.type === "approval-required") {
+      markAiRunOutput(event.runId, "patch");
+      setAiPatchProposal(event.proposal);
+      return;
+    }
+    if (event.type === "patch-proposal") {
+      markAiRunOutput(event.runId, "patch");
+      setAiPatchProposal(event.proposal);
+      return;
+    }
+    if (event.type === "error") {
+      markAiRunTerminal(event.runId, "error");
+      finishAiRun(event.runId);
+      if (event.code === "run_cancelled") {
+        return;
+      }
+      setAiMessages((messages) => [
+        ...messages,
+        {
+          id: `${event.runId}:error:${messages.length}`,
+          role: "error",
+          text: event.message,
+          errorCode: event.code,
+          retryable: event.retryable
+        }
+      ]);
+      return;
+    }
+    if (event.type === "done" || event.type === "cancelled") {
+      markAiRunTerminal(event.runId, event.type);
+      const runState = finishAiRun(event.runId);
+      if (event.type === "done" && runState && !runState.textReceived && !runState.patchReceived && !runState.eventReceived) {
+        setAiMessages((messages) => [...messages, { id: `${event.runId}:empty`, role: "error", text: tr("AI 本轮请求已结束，但没有收到任何文本、工具结果或修改建议。请检查模型服务日志、接口模式和模型是否支持流式输出。"), errorCode: "provider_empty_response", retryable: true }]);
+      }
+      return;
+    }
+  }
+
+  function ensureAiRunState(runId: string): void {
+    if (aiRunStatesRef.current.has(runId)) {
+      return;
+    }
+    const state: AiRunUiState = {
+      textReceived: false,
+      patchReceived: false,
+      eventReceived: false
+    };
+    state.watchdogTimer = window.setTimeout(() => {
+      if (!aiRunStatesRef.current.has(runId)) {
+        return;
+      }
+      markAiRunTerminal(runId, "watchdog");
+      void window.nolia.ai?.cancelRun({ runId });
+      finishAiRun(runId);
+      setAiMessages((messages) => [...messages, { id: `${runId}:watchdog`, role: "error", text: tr("AI 请求长时间没有返回结果，已自动释放输入框。请检查模型服务或网络后重试。"), errorCode: "run_timeout", retryable: true }]);
+    }, AI_RUN_UI_WATCHDOG_MS);
+    aiRunStatesRef.current.set(runId, state);
+  }
+
+  function clearAiRunState(runId: string): AiRunUiState | undefined {
+    const state = aiRunStatesRef.current.get(runId);
+    if (state?.watchdogTimer) {
+      window.clearTimeout(state.watchdogTimer);
+    }
+    aiRunStatesRef.current.delete(runId);
+    return state;
+  }
+
+  function markAiRunOutput(runId: string, kind: "text" | "patch" | "event"): void {
+    const state = aiRunStatesRef.current.get(runId);
+    if (!state) {
+      return;
+    }
+    if (kind === "text") {
+      state.textReceived = true;
+    } else if (kind === "patch") {
+      state.patchReceived = true;
+    } else {
+      state.eventReceived = true;
+    }
+  }
+
+  function markAiRunTerminal(runId: string, reason: AiRunTerminalReason): void {
+    aiTerminalRunIdsRef.current.set(runId, reason);
+    window.setTimeout(() => {
+      if (aiTerminalRunIdsRef.current.get(runId) === reason) {
+        aiTerminalRunIdsRef.current.delete(runId);
+      }
+    }, AI_TERMINAL_EVENT_TTL_MS);
+  }
+
+  function finishAiRun(runId: string): AiRunUiState | undefined {
+    const state = clearAiRunState(runId);
+    if (!aiActiveRunIdRef.current || aiActiveRunIdRef.current === runId) {
+      aiActiveRunIdRef.current = undefined;
+      setAiRunning(false);
+      setAiActiveRunId(undefined);
+    }
+    return state;
+  }
+
+  async function updateAiSettings(next: Partial<AiSettings>) {
+    const settings = await window.nolia.ai?.setSettings({ settings: next });
+    if (settings) {
+      setAiSettings(normalizeAiSettingsPublic(settings));
+    }
+  }
+
+  async function updateDefaultAiProvider(patch: Partial<AiProviderProfile> & { defaultProviderId?: string }) {
+    if (!aiSettings?.activeProvider) {
+      return;
+    }
+    const targetProviderId = patch.defaultProviderId ?? aiSettings.activeProvider.id;
+    const providers = aiSettings.providers.map((provider) =>
+      provider.id === targetProviderId
+        ? {
+            id: provider.id,
+            name: patch.name ?? provider.name,
+            providerId: patch.providerId ?? provider.providerId,
+            model: patch.model ?? provider.model,
+            baseUrl: patch.baseUrl ?? provider.baseUrl,
+            apiMode: patch.apiMode ?? provider.apiMode,
+            disabled: provider.disabled
+          }
+        : {
+            id: provider.id,
+            name: provider.name,
+            providerId: provider.providerId,
+            model: provider.model,
+            baseUrl: provider.baseUrl,
+            apiMode: provider.apiMode,
+            disabled: provider.disabled
+          }
+    );
+    await updateAiSettings({ defaultProviderId: targetProviderId, providers });
+  }
+
+  async function setAiApiKey(providerProfileId: string, apiKey: string) {
+    const settings = await window.nolia.ai?.setApiKey({ providerProfileId, apiKey });
+    if (settings) {
+      setAiSettings(normalizeAiSettingsPublic(settings));
+    }
+  }
+
+  async function clearAiApiKey(providerProfileId: string) {
+    const settings = await window.nolia.ai?.clearApiKey({ providerProfileId });
+    if (settings) {
+      setAiSettings(normalizeAiSettingsPublic(settings));
+    }
+  }
+
+  async function getAiApiKey(providerProfileId: string): Promise<string | undefined> {
+    return (await window.nolia.ai?.getApiKey({ providerProfileId }))?.apiKey;
+  }
+
+  async function refreshAiSemanticStatus(): Promise<void> {
+    if (!workspace || !window.nolia.ai?.semanticIndexStatus) {
+      setAiSemanticStatus(undefined);
+      return;
+    }
+    setAiSemanticStatus(await window.nolia.ai.semanticIndexStatus({ workspaceId: workspace.workspaceId }));
+  }
+
+  async function testAiEmbedding(settings: AiEmbeddingSettings, apiKey?: string): Promise<AiProviderTestResult> {
+    if (!window.nolia.ai?.testEmbedding) {
+      return { ok: false, providerId: settings.providerId, model: settings.model, localOnly: settings.providerId === "ollama", message: tr("AI API 不可用") };
+    }
+    const result = await window.nolia.ai.testEmbedding({ settings, apiKey });
+    await refreshAiSemanticStatus();
+    return result;
+  }
+
+  async function updateAiSemanticIndex(reset = false): Promise<AiSemanticIndexStatus | undefined> {
+    if (!workspace) {
+      return undefined;
+    }
+    const handler = reset ? window.nolia.ai?.resetSemanticIndex : window.nolia.ai?.updateSemanticIndex;
+    if (!handler) {
+      return undefined;
+    }
+    const result = await handler({ workspaceId: workspace.workspaceId });
+    setAiSemanticStatus(result.status);
+    return result.status;
+  }
+
+  async function startAiRun(instruction: string, actionId?: AiSelectionActionId, options: AiRunUiOptions = {}) {
+    if (!window.nolia.ai) {
+      setAiSidebarOpen(true);
+      setAiMessages((messages) => [...messages, { id: `ai-unavailable:${Date.now()}`, role: "error", text: tr("AI API 不可用"), retryable: true }]);
+      return;
+    }
+    const displayText = options.displayText ?? instruction;
+    const clientContext = buildAiClientContext();
+    const conversation = aiConversationHistory(aiMessages, aiSettings?.conversationHistoryTurns ?? 0);
+    setAiSidebarOpen(true);
+    setAiMessages((messages) => [...messages, { id: `user:${Date.now()}`, role: "user", text: displayText }]);
+    setAiSources([]);
+    setAiPatchProposal(undefined);
+    setAiPatchApplyMode(options.patchApplyMode ?? "current-document");
+    aiLastInstructionRef.current = instruction;
+    aiLastDisplayTextRef.current = displayText;
+    aiLastActionRef.current = actionId;
+    aiLastRunOptionsRef.current = options;
+    setAiCanRetry(true);
+    const validationError = validateAiRunRequest(clientContext, options);
+    if (validationError) {
+      setAiMessages((messages) => [...messages, validationError]);
+      return;
+    }
+    setAiRunning(true);
+    const startSequence = ++aiStartSequenceRef.current;
+    clearAiStartWatchdog();
+    aiStartWatchdogRef.current = window.setTimeout(() => {
+      if (aiStartSequenceRef.current === startSequence && !aiActiveRunIdRef.current) {
+        aiStartSequenceRef.current += 1;
+        aiStartWatchdogRef.current = undefined;
+        setAiRunning(false);
+        setAiActiveRunId(undefined);
+        setAiMessages((messages) => [...messages, { id: `start-watchdog:${Date.now()}`, role: "error", text: tr("AI 请求长时间没有返回结果，已自动释放输入框。请检查模型服务或网络后重试。"), errorCode: "run_timeout", retryable: true }]);
+      }
+    }, AI_RUN_START_WATCHDOG_MS);
+    try {
+      const runRequest = {
+        entryPoint: actionId ? "selection-action" : "chat",
+        instruction,
+        title: displayText.slice(0, 80),
+        actionId,
+        conversation,
+        clientContext,
+        options: {
+          includeCurrentNote: true,
+          requireCurrentNote: options.requireCurrentNote,
+          includeSelection: true,
+          allowWorkspaceSearch: true,
+          allowWorkspaceRead: true,
+          allowWorkspaceOperations: true,
+          allowTools: true,
+          patchFallback: options.patchFallback,
+          maxToolRounds: aiSettings?.agentMaxSteps ?? 12
+        }
+      } as const;
+      const legacyRunRequest = {
+        ...runRequest,
+        options: {
+          ...runRequest.options,
+          maxToolRounds: 3
+        }
+      };
+      let response: Awaited<ReturnType<NonNullable<typeof window.nolia.ai>["startRun"]>>;
+      try {
+        response = window.nolia.ai.startTask ? await window.nolia.ai.startTask(runRequest) : await window.nolia.ai.startRun(legacyRunRequest);
+      } catch (error) {
+        if (!isMissingAiTaskHandlerError(error) || !window.nolia.ai.startRun) {
+          throw error;
+        }
+        response = await window.nolia.ai.startRun(legacyRunRequest);
+      }
+      if (aiStartSequenceRef.current !== startSequence) {
+        markAiRunTerminal(response.runId, "cancelled");
+        void window.nolia.ai.cancelRun({ runId: response.runId });
+        return;
+      }
+      clearAiStartWatchdog();
+      const terminalReason = aiTerminalRunIdsRef.current.get(response.runId);
+      if (terminalReason) {
+        aiActiveRunIdRef.current = undefined;
+        setAiActiveRunId(undefined);
+        setAiRunning(false);
+      } else {
+        ensureAiRunState(response.runId);
+        aiActiveRunIdRef.current = response.runId;
+        setAiActiveRunId(response.runId);
+      }
+    } catch (error) {
+      if (aiStartSequenceRef.current !== startSequence) {
+        return;
+      }
+      clearAiStartWatchdog();
+      aiActiveRunIdRef.current = undefined;
+      setAiActiveRunId(undefined);
+      setAiRunning(false);
+      setAiMessages((messages) => [...messages, { id: `start-error:${Date.now()}`, role: "error", text: errorMessageFor(error, tr("AI API 不可用")), retryable: true }]);
+    }
+  }
+
+  function validateAiRunRequest(clientContext: import("../shared/ai").AiClientContext, options: AiRunUiOptions): AiMessageView | undefined {
+    if (!options.requireCurrentNote) {
+      return undefined;
+    }
+    if (!clientContext.activeDocument) {
+      return {
+        id: `current-note-missing:${Date.now()}`,
+        role: "error",
+        text: tr("当前请求需要读取当前笔记正文，但当前没有打开可读取的 Markdown 笔记。"),
+        errorCode: "tool_permission_denied",
+        retryable: false
+      };
+    }
+    if (!aiSettings?.allowCurrentNoteContent) {
+      return {
+        id: `current-note-permission:${Date.now()}`,
+        role: "error",
+        text: tr("当前请求需要读取当前笔记正文，但 AI 设置未允许发送当前笔记正文。请在 AI 设置中开启“允许发送当前笔记正文”后重试。"),
+        errorCode: "tool_permission_denied",
+        retryable: true
+      };
+    }
+    return undefined;
+  }
+
+  function clearAiStartWatchdog(): void {
+    if (aiStartWatchdogRef.current) {
+      window.clearTimeout(aiStartWatchdogRef.current);
+      aiStartWatchdogRef.current = undefined;
+    }
+  }
+
+  function startSelectionAiAction(actionId: AiSelectionActionId) {
+    const snapshot = editorPaneRef.current?.getAiSnapshot();
+    if (!snapshot?.selectionText) {
+      setAiSidebarOpen(true);
+      setAiMessages((messages) => [...messages, { id: `selection-empty:${Date.now()}`, role: "error", text: tr("请先选择文本。") }]);
+      return;
+    }
+    void startAiRun(selectionInstruction(actionId, tr), actionId);
+  }
+
+  function retryLastAiRun(displayText: string): boolean {
+    if (!aiLastInstructionRef.current || aiRunning) {
+      return false;
+    }
+    void startAiRun(aiLastInstructionRef.current, aiLastActionRef.current, {
+      ...aiLastRunOptionsRef.current,
+      displayText
+    });
+    return true;
+  }
+
+  function proposeNewDocumentFromLastAiResponse(request: string): boolean {
+    const document = currentDocumentFromRef();
+    if (!workspace || !document) {
+      return false;
+    }
+    const content = lastAssistantDocumentContent(aiMessages);
+    if (!content) {
+      return false;
+    }
+    const proposal: AiPatchProposal = {
+      id: `local-new-document:${Date.now()}`,
+      runId: `local-new-document:${Date.now()}`,
+      workspaceId: workspace.workspaceId,
+      pathRel: document.pathRel,
+      title: document.parsed.title || document.title,
+      summary: tr("将上一条 AI 回复写入新文档"),
+      sourceSnapshotHash: document.baseHash,
+      baseHash: document.baseHash,
+      operations: [
+        {
+          type: "replaceDocument",
+          beforeText: document.sourceText,
+          afterText: content
+        }
+      ]
+    };
+    setAiSidebarOpen(true);
+    setAiMessages((messages) => [...messages, { id: `user:${Date.now()}`, role: "user", text: request }]);
+    setAiSources([]);
+    setAiPatchProposal(proposal);
+    setAiPatchApplyMode("new-document");
+    setAiCanRetry(false);
+    aiLastInstructionRef.current = "";
+    aiLastDisplayTextRef.current = "";
+    aiLastActionRef.current = undefined;
+    aiLastRunOptionsRef.current = {};
+    return true;
+  }
+
+  function buildAiClientContext(): import("../shared/ai").AiClientContext {
+    const doc = visibleDocument;
+    const snapshot = editorPaneRef.current?.getAiSnapshot();
+    return {
+      workspaceId: doc?.sourceKind === "external" ? undefined : workspace?.workspaceId,
+      activeDocument: doc
+        ? {
+            pathRel: doc.pathRel,
+            title: doc.title,
+            mode: doc.mode,
+            sourceText: doc.sourceText,
+            baseHash: doc.baseHash,
+            dirty: doc.dirty,
+            parsedTitle: doc.parsed.title,
+            headings: doc.parsed.headings.map((heading) => ({ text: heading.text, depth: heading.depth, line: heading.line }))
+          }
+        : undefined,
+      selection: snapshot?.selectionText
+        ? {
+            text: snapshot.selectionText,
+            range: snapshot.selectionRange,
+            source: snapshot.source
+          }
+        : undefined,
+      cursor: snapshot
+        ? {
+            offset: snapshot.cursorOffset,
+            line: snapshot.line,
+            column: snapshot.column
+          }
+        : undefined
+    };
+  }
+
+  async function applyAiPatch(proposal: AiPatchProposal, mode: "replace" | "insert" | "append" | "new-document") {
+    if (isWorkspacePatchProposal(proposal)) {
+      await applyWorkspacePatchProposal(proposal);
+      return;
+    }
+    const document = currentDocumentFromRef();
+    if (!document || document.pathRel !== proposal.pathRel) {
+      setAiMessages((messages) => [...messages, { id: `patch-error:${Date.now()}`, role: "error", text: tr("只能应用到当前打开的笔记。") }]);
+      return;
+    }
+    const patchMode = mode === "new-document" ? "replace" : mode;
+    const next = applyPatchOperations(document.sourceText, proposal.operations, patchMode);
+    if (!next.ok) {
+      setAiMessages((messages) => [...messages, { id: `patch-error:${Date.now()}`, role: "error", text: next.message }]);
+      return;
+    }
+    if (mode === "new-document" || (aiPatchApplyMode === "new-document" && mode === "replace")) {
+      await createDocumentFromAiPatch(proposal, next.content);
+      return;
+    }
+    if (workspace && document.sourceKind !== "external") {
+      void window.nolia.file.createHistorySnapshot?.({ workspaceId: workspace.workspaceId, pathRel: document.pathRel, reason: "manual", content: document.sourceText });
+    }
+    await applyAiPatchContentToDocument(document, next.content);
+    setAiPatchProposal(undefined);
+    setUserStatusMessage(tr("已应用 AI 修改，可撤销或从历史版本恢复。"));
+    queueAutosave(document.pathRel);
+  }
+
+  async function applyWorkspacePatchProposal(proposal: AiPatchProposal) {
+    if (!workspace) {
+      setAiMessages((messages) => [...messages, { id: `patch-error:${Date.now()}`, role: "error", text: tr("未打开工作区") }]);
+      return;
+    }
+    try {
+      for (const operation of proposal.operations) {
+        const targetPath = operationTargetPath(operation, proposal.pathRel);
+        if (!targetPath || !isMarkdownPath(targetPath)) {
+          throw new Error(tr("AI 工作区操作只能修改 Markdown 文件。"));
+        }
+        if (operation.type === "createFile") {
+          await window.nolia.file.create({
+            workspaceId: workspace.workspaceId,
+            pathRel: targetPath,
+            kind: "file",
+            content: operation.afterText
+          });
+          await window.nolia.file.createHistorySnapshot?.({ workspaceId: workspace.workspaceId, pathRel: targetPath, reason: "manual", content: operation.afterText });
+          continue;
+        }
+        const current = await window.nolia.file.read({ workspaceId: workspace.workspaceId, pathRel: targetPath });
+        const next = applyPatchOperations(current.content, [{ ...operation, pathRel: targetPath }], operation.type === "append" ? "append" : "replace");
+        if (!next.ok) {
+          throw new Error(`${targetPath}: ${next.message}`);
+        }
+        const result = await window.nolia.file.writeAtomic({
+          workspaceId: workspace.workspaceId,
+          pathRel: targetPath,
+          content: next.content,
+          baseHash: current.sha256,
+          createSnapshot: true
+        });
+        if (result.status !== "saved") {
+          throw new Error(`${targetPath}: ${result.status === "conflict" ? tr("保存冲突") : tr("保存失败")}`);
+        }
+        await syncOpenDocumentAfterWorkspacePatch(targetPath, next.content, result.sha256 ?? current.sha256);
+      }
+      setAiPatchProposal(undefined);
+      await loadWorkspaceData(workspace);
+      const firstPath = operationTargetPath(proposal.operations[0], proposal.pathRel);
+      if (firstPath) {
+        await openDocument(firstPath);
+        setRightPanelView("history");
+        setRightPanelCollapsed(false);
+        await refreshHistory(firstPath);
+      }
+      setUserStatusMessage(tr("已应用 AI 工作区操作，可从历史版本恢复。"));
+    } catch (error) {
+      setAiMessages((messages) => [...messages, { id: `patch-error:${Date.now()}`, role: "error", text: tr("应用 AI 工作区操作失败：{message}", { message: errorMessageFor(error, tr("未知错误")) }) }]);
+    }
+  }
+
+  async function syncOpenDocumentAfterWorkspacePatch(pathRel: string, content: string, sha256: string) {
+    const existing = openDocsRef.current.find((doc) => doc.pathRel === pathRel);
+    if (!existing) {
+      return;
+    }
+    const parsed = await window.nolia.document.parse({ workspaceId: workspace?.workspaceId ?? EXTERNAL_PARSE_WORKSPACE_ID, pathRel, content, mode: "full" });
+    htmlDraftsRef.current.delete(pathRel);
+    updateOpenDocs((docs) =>
+      docs.map((doc) =>
+        doc.pathRel === pathRel
+          ? {
+              ...doc,
+              sourceText: content,
+              baseHash: sha256,
+              lastSavedHash: sha256,
+              dirty: false,
+              pendingHtml: undefined,
+              parsed,
+              title: parsed.title,
+              lastSavedAt: Date.now()
+            }
+          : doc
+      )
+    );
+  }
+
+  async function applyAiPatchContentToDocument(document: OpenDocumentTab, content: string) {
+    const replacedInEditor = await (editorPaneRef.current?.replaceSourceText(content) ?? Promise.resolve(false));
+    htmlDraftsRef.current.delete(document.pathRel);
+    if (!replacedInEditor) {
+      updateOpenDocs((docs) =>
+        docs.map((doc) =>
+          doc.pathRel === document.pathRel
+            ? {
+                ...doc,
+                sourceText: content,
+                dirty: true,
+                pendingHtml: undefined
+              }
+            : doc
+        )
+      );
+    }
+  }
+
+  async function createDocumentFromAiPatch(proposal: AiPatchProposal, content: string) {
+    if (!workspace) {
+      setAiMessages((messages) => [...messages, { id: `patch-error:${Date.now()}`, role: "error", text: tr("未打开工作区") }]);
+      return;
+    }
+    const pathRel = generatedDocumentPath(proposal, content, collectPathSet(fileTree), tr);
+    try {
+      await window.nolia.file.create({
+        workspaceId: workspace.workspaceId,
+        pathRel,
+        kind: "file",
+        content
+      });
+      await window.nolia.file.createHistorySnapshot?.({ workspaceId: workspace.workspaceId, pathRel, reason: "manual", content });
+      setAiPatchProposal(undefined);
+      await loadWorkspaceData(workspace);
+      setTreeSelection({ pathRel, kind: "file" });
+      await openDocument(pathRel);
+      setRightPanelView("history");
+      setRightPanelCollapsed(false);
+      await refreshHistory(pathRel);
+      setUserStatusMessage(tr("已创建 AI 文档 {path}", { path: pathRel }));
+    } catch (error) {
+      setAiMessages((messages) => [...messages, { id: `patch-error:${Date.now()}`, role: "error", text: tr("创建 AI 文档失败：{message}", { message: errorMessageFor(error, tr("未知错误")) }) }]);
+    }
+  }
+
+  function openSettings(tab: SettingsTabId = "preferences") {
+    setSettingsInitialTab(tab);
+    setSettingsOpen(true);
   }
 
   function setUserStatusMessage(message: string): void {
@@ -1228,6 +2037,79 @@ export function App() {
       return;
     }
     setBacklinks(await window.nolia.graph.getBacklinks({ workspaceId: workspaceInfo.workspaceId, pathRel, includeUnlinkedMentions: true }));
+  }
+
+  async function refreshHistory(pathRel = currentDocumentFromRef()?.pathRel, workspaceInfo = workspace) {
+    if (!workspaceInfo || !pathRel || !window.nolia.file.listHistory) {
+      setHistoryEntries([]);
+      return;
+    }
+    setHistoryLoading(true);
+    try {
+      const response = await window.nolia.file.listHistory({ workspaceId: workspaceInfo.workspaceId, pathRel, limit: 80 });
+      setHistoryEntries(response.entries);
+      setHistoryPreview((preview) => preview && response.entries.some((entry) => entry.id === preview.entry.id) ? preview : undefined);
+    } catch (error) {
+      setStatusMessage(tr("读取历史版本失败：{message}", { message: errorMessageFor(error, tr("未知错误")) }));
+    } finally {
+      setHistoryLoading(false);
+    }
+  }
+
+  async function createManualHistorySnapshot() {
+    const doc = currentDocumentFromRef();
+    if (!workspace || !doc || doc.sourceKind === "external" || !window.nolia.file.createHistorySnapshot) {
+      return;
+    }
+    const response = await window.nolia.file.createHistorySnapshot({ workspaceId: workspace.workspaceId, pathRel: doc.pathRel, reason: "manual", content: doc.sourceText });
+    setStatusMessage(response.entry ? tr("已创建历史版本") : tr("创建历史版本失败"));
+    await refreshHistory(doc.pathRel);
+  }
+
+  async function previewHistoryEntry(entry: FileHistoryEntry) {
+    if (!workspace || !window.nolia.file.readHistory) {
+      return;
+    }
+    try {
+      const response = await window.nolia.file.readHistory({ workspaceId: workspace.workspaceId, snapshotId: entry.id });
+      if (response) {
+        setHistoryPreview(response);
+      }
+    } catch (error) {
+      setStatusMessage(tr("读取历史版本失败：{message}", { message: errorMessageFor(error, tr("未知错误")) }));
+    }
+  }
+
+  async function restoreHistoryEntry(entry: FileHistoryEntry) {
+    const doc = currentDocumentFromRef();
+    if (!workspace || !doc || doc.sourceKind === "external" || !window.nolia.file.readHistory) {
+      return;
+    }
+    const response = await window.nolia.file.readHistory({ workspaceId: workspace.workspaceId, snapshotId: entry.id });
+    if (!response) {
+      setStatusMessage(tr("历史版本不存在"));
+      return;
+    }
+    const replacedInEditor = await (editorPaneRef.current?.replaceSourceText(response.content) ?? Promise.resolve(false));
+    htmlDraftsRef.current.delete(doc.pathRel);
+    if (!replacedInEditor) {
+      updateOpenDocs((docs) =>
+        docs.map((item) =>
+          item.pathRel === doc.pathRel
+            ? {
+                ...item,
+                sourceText: response.content,
+                dirty: true,
+                pendingHtml: undefined
+              }
+            : item
+        )
+      );
+    }
+    setHistoryPreview(response);
+    setUserStatusMessage(tr("已恢复历史版本，保存后写入文件。"));
+    queueAutosave(doc.pathRel);
+    await refreshHistory(doc.pathRel);
   }
 
   async function runSearch(query: string) {
@@ -1425,6 +2307,9 @@ export function App() {
     setActiveHtml("");
     setTreeSelection(undefined);
     setBacklinks(emptyBacklinks);
+    setHistoryEntries([]);
+    setHistoryPreview(undefined);
+    setHistoryLoading(false);
     setNoteFilterQuery("");
     setWorkspaceSearchQuery("");
     setCreateMenu(undefined);
@@ -1456,8 +2341,13 @@ export function App() {
     setNoteFilterQuery("");
     setWorkspaceSearchQuery("");
     setBacklinks(emptyBacklinks);
+    setHistoryEntries([]);
+    setHistoryPreview(undefined);
+    setHistoryLoading(false);
+    setAiSemanticStatus(undefined);
     setStatusMessage(tr("工作区已加载"));
     void loadWorkspaceData(info);
+    window.setTimeout(() => void refreshAiSemanticStatus(), 0);
   }
 
   async function runCommand(command: string) {
@@ -2552,10 +3442,12 @@ export function App() {
   }
 }
 
-function rightPanelTitle(view: "outline" | "details" | "errors", tr = createTranslator("zh-CN")): string {
+function rightPanelTitle(view: "outline" | "details" | "history" | "errors", tr = createTranslator("zh-CN")): string {
   switch (view) {
     case "details":
       return tr("详情");
+    case "history":
+      return tr("历史版本");
     case "errors":
       return tr("诊断");
     case "outline":
@@ -2582,6 +3474,10 @@ function editorModeLabel(mode: OpenDocumentTab["mode"], tr = createTranslator("z
 
 function errorMessageFor(error: unknown, fallback: string): string {
   return error instanceof Error && error.message ? error.message : fallback;
+}
+
+function isMissingAiTaskHandlerError(error: unknown): boolean {
+  return /No handler registered for 'ai\.task\.start'/.test(errorMessageFor(error, ""));
 }
 
 function containsRelatedTarget(event: Pick<ReactDragEvent<HTMLElement>, "currentTarget" | "relatedTarget">): boolean {
@@ -3021,6 +3917,123 @@ function formatFileSize(size: number, locale?: ResolvedLocale): string {
   return `${(size / 1024 / 1024).toFixed(1)} MB`;
 }
 
+function formatHistoryTime(value: number, locale: ResolvedLocale): string {
+  return new Intl.DateTimeFormat(locale, {
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit"
+  }).format(value);
+}
+
+function historyReasonLabel(reason: string, tr = createTranslator("zh-CN")): string {
+  switch (reason) {
+    case "autosave":
+      return tr("自动保存");
+    case "manual":
+      return tr("手动版本");
+    case "restore":
+      return tr("恢复前版本");
+    case "conflict":
+      return tr("冲突备份");
+    default:
+      return reason;
+  }
+}
+
+const HISTORY_DIFF_MAX_INPUT_LINES = 180;
+const HISTORY_DIFF_MAX_OUTPUT_LINES = 240;
+
+type HistoryDiffLine = {
+  key: string;
+  type: "same" | "added" | "removed";
+  text: string;
+};
+
+function buildHistoryDiff(historyContent: string, currentContent: string): {
+  lines: HistoryDiffLine[];
+  addedCount: number;
+  removedCount: number;
+  changed: boolean;
+  truncated: boolean;
+} {
+  const historyLines = splitDocumentLines(historyContent);
+  const currentLines = splitDocumentLines(currentContent);
+  const inputTruncated = historyLines.length > HISTORY_DIFF_MAX_INPUT_LINES || currentLines.length > HISTORY_DIFF_MAX_INPUT_LINES;
+  const oldLines = historyLines.slice(0, HISTORY_DIFF_MAX_INPUT_LINES);
+  const newLines = currentLines.slice(0, HISTORY_DIFF_MAX_INPUT_LINES);
+  const table = Array.from({ length: oldLines.length + 1 }, () => Array<number>(newLines.length + 1).fill(0));
+  for (let oldIndex = oldLines.length - 1; oldIndex >= 0; oldIndex -= 1) {
+    for (let newIndex = newLines.length - 1; newIndex >= 0; newIndex -= 1) {
+      table[oldIndex][newIndex] = oldLines[oldIndex] === newLines[newIndex]
+        ? table[oldIndex + 1][newIndex + 1] + 1
+        : Math.max(table[oldIndex + 1][newIndex], table[oldIndex][newIndex + 1]);
+    }
+  }
+
+  const lines: HistoryDiffLine[] = [];
+  let addedCount = 0;
+  let removedCount = 0;
+  let oldIndex = 0;
+  let newIndex = 0;
+  const pushLine = (type: HistoryDiffLine["type"], text: string) => {
+    if (lines.length >= HISTORY_DIFF_MAX_OUTPUT_LINES) {
+      return;
+    }
+    lines.push({ key: `${type}:${oldIndex}:${newIndex}:${lines.length}`, type, text });
+  };
+
+  while (oldIndex < oldLines.length && newIndex < newLines.length) {
+    if (oldLines[oldIndex] === newLines[newIndex]) {
+      pushLine("same", oldLines[oldIndex]);
+      oldIndex += 1;
+      newIndex += 1;
+      continue;
+    }
+    if (table[oldIndex + 1][newIndex] >= table[oldIndex][newIndex + 1]) {
+      pushLine("removed", oldLines[oldIndex]);
+      removedCount += 1;
+      oldIndex += 1;
+      continue;
+    }
+    pushLine("added", newLines[newIndex]);
+    addedCount += 1;
+    newIndex += 1;
+  }
+  while (oldIndex < oldLines.length) {
+    pushLine("removed", oldLines[oldIndex]);
+    removedCount += 1;
+    oldIndex += 1;
+  }
+  while (newIndex < newLines.length) {
+    pushLine("added", newLines[newIndex]);
+    addedCount += 1;
+    newIndex += 1;
+  }
+
+  return {
+    lines,
+    addedCount,
+    removedCount,
+    changed: historyContent !== currentContent,
+    truncated: inputTruncated || lines.length >= HISTORY_DIFF_MAX_OUTPUT_LINES
+  };
+}
+
+function splitDocumentLines(content: string): string[] {
+  return content.length ? content.replace(/\r\n/g, "\n").split("\n") : [];
+}
+
+function historyDiffMarker(type: HistoryDiffLine["type"]): string {
+  if (type === "added") {
+    return "+";
+  }
+  if (type === "removed") {
+    return "-";
+  }
+  return " ";
+}
+
 function editorWidthToCss(width: AppSettings["editorWidth"]): string {
   switch (width) {
     case "narrow":
@@ -3125,6 +4138,24 @@ function statusBarMessage(message: string, tr = createTranslator("zh-CN")): stri
     return tr("已保存");
   }
   return message;
+}
+
+function defaultAppSettings(): AppSettings {
+  return {
+    ...DEFAULT_SETTINGS,
+    ai: normalizeAiSettings(DEFAULT_SETTINGS.ai)
+  };
+}
+
+function aiProviderRequest(provider: AiProviderProfile): AiProviderProfile {
+  return {
+    id: provider.id,
+    name: provider.name,
+    providerId: provider.providerId,
+    model: provider.model,
+    baseUrl: provider.baseUrl,
+    apiMode: provider.apiMode
+  };
 }
 
 function commandLabel(commandId: string, fallback: string, state: { immersiveMode: boolean; toolbarVisible: boolean; lineNumbersVisible: boolean }, tr = createTranslator("zh-CN")): string {
@@ -3574,6 +4605,210 @@ function useFloatingMenuPosition(
   return [menuRef, style];
 }
 
+function appendAiDelta(messages: AiMessageView[], runId: string, text: string): AiMessageView[] {
+  const targetId = `${runId}:assistant`;
+  const existing = messages.find((message) => message.id === targetId);
+  if (!existing) {
+    return [...messages, { id: targetId, role: "assistant", text }];
+  }
+  return messages.map((message) => (message.id === targetId ? { ...message, text: `${message.text}${text}` } : message));
+}
+
+function aiConversationHistory(messages: AiMessageView[], turns: number): Array<{ role: "user" | "assistant"; content: string }> {
+  if (turns <= 0) {
+    return [];
+  }
+  const history = messages
+    .filter((message): message is AiMessageView & { role: "user" | "assistant" } => (message.role === "user" || message.role === "assistant") && Boolean(message.text.trim()))
+    .map((message) => ({ role: message.role, content: message.text.trim() }));
+  let userTurns = 0;
+  let startIndex = history.length;
+  for (let index = history.length - 1; index >= 0; index -= 1) {
+    if (history[index].role === "user") {
+      userTurns += 1;
+      if (userTurns === turns) {
+        startIndex = index;
+        break;
+      }
+    }
+  }
+  if (userTurns < turns) {
+    startIndex = 0;
+  }
+  return history.slice(startIndex);
+}
+
+function dedupeAiSources(sources: AiSourceRef[]): AiSourceRef[] {
+  const seen = new Set<string>();
+  const result: AiSourceRef[] = [];
+  for (const source of sources) {
+    const key = `${source.kind}:${source.pathRel ?? source.title ?? source.snippet ?? ""}`;
+    if (seen.has(key)) {
+      continue;
+    }
+    seen.add(key);
+    result.push(source);
+  }
+  return result;
+}
+
+function applyPatchOperations(sourceText: string, operations: AiPatchOperation[], mode: "replace" | "insert" | "append"): { ok: true; content: string } | { ok: false; message: string } {
+  if (mode === "append") {
+    const appended = operations.map((operation) => ("afterText" in operation ? operation.afterText : "")).filter(Boolean).join("\n\n");
+    return { ok: true, content: `${sourceText}${sourceText.endsWith("\n") ? "" : "\n\n"}${appended}` };
+  }
+  const first = operations[0];
+  if (!first) {
+    return { ok: false, message: "No patch operation." };
+  }
+  if (first.type === "createFile") {
+    return { ok: true, content: first.afterText };
+  }
+  if (mode === "insert") {
+    const text = "afterText" in first ? first.afterText : "";
+    if (first.type === "insertAt") {
+      return { ok: true, content: `${sourceText.slice(0, first.offset)}${text}${sourceText.slice(first.offset)}` };
+    }
+    if (first.type === "replaceRange") {
+      return { ok: true, content: `${sourceText.slice(0, first.range.to)}\n${text}${sourceText.slice(first.range.to)}` };
+    }
+    return { ok: true, content: `${sourceText}${sourceText.endsWith("\n") ? "" : "\n"}${text}` };
+  }
+  if (first.type === "replaceDocument") {
+    if (sourceText !== first.beforeText) {
+      return { ok: false, message: "The note changed after the suggestion was generated." };
+    }
+    return { ok: true, content: first.afterText };
+  }
+  if (first.type === "replaceRange") {
+    const before = sourceText.slice(first.range.from, first.range.to);
+    if (before !== first.beforeText) {
+      return { ok: false, message: "The selected text changed after the suggestion was generated." };
+    }
+    return { ok: true, content: `${sourceText.slice(0, first.range.from)}${first.afterText}${sourceText.slice(first.range.to)}` };
+  }
+  return { ok: false, message: "This suggestion cannot replace text safely." };
+}
+
+function isWorkspacePatchProposal(proposal: AiPatchProposal): boolean {
+  return proposal.operations.some((operation) => operation.type === "createFile" || Boolean(operationTargetPath(operation, "")));
+}
+
+function operationTargetPath(operation: AiPatchOperation | undefined, fallbackPath: string): string | undefined {
+  if (!operation) {
+    return fallbackPath;
+  }
+  if ("pathRel" in operation && operation.pathRel) {
+    return operation.pathRel;
+  }
+  return fallbackPath;
+}
+
+function selectionInstruction(actionId: AiSelectionActionId, tr = createTranslator("zh-CN")): string {
+  switch (actionId) {
+    case "polish":
+      return tr("润色选中文本，保持原意，保留 Markdown 结构，输出可直接替换的文本。");
+    case "summarize":
+      return tr("总结选中文本，保留关键信息，用简洁中文输出。");
+    case "translate":
+      return tr("翻译选中文本。中文翻译为英文，英文翻译为中文，保留 Markdown 结构。");
+    case "todo":
+      return tr("从选中文本中提取可执行事项，输出 Markdown 待办列表。");
+    case "explain":
+      return tr("解释选中文本的含义和关键点。");
+    default:
+      return tr("处理选中文本。");
+  }
+}
+
+function currentNoteSummaryInstruction(tr = createTranslator("zh-CN")): string {
+  return tr("请直接基于当前笔记正文输出一份简洁中文总结，覆盖主要主题、关键结论和可执行事项；不要只说明你将查看文档。");
+}
+
+function documentEditInstruction(request: string, tr = createTranslator("zh-CN")): string {
+  return tr("请基于当前笔记正文完成这个编辑请求：{request}\n\n只输出完整的目标 Markdown 文档内容，不要解释计划，不要说将会生成，也不要包含代码围栏。", { request });
+}
+
+function documentGenerationInstruction(request: string, tr = createTranslator("zh-CN")): string {
+  return tr("请基于当前笔记正文生成一篇新的 Markdown 文档，满足这个请求：{request}\n\n应用会自动创建文件名和路径；不要向用户追问目标路径或文件名。只输出完整的新文档 Markdown 内容，不要解释计划，不要说将会生成，也不要包含代码围栏。", { request });
+}
+
+function isDocumentEditRequest(value: string): boolean {
+  const normalized = value.toLowerCase().replace(/\s+/g, "");
+  if (isDocumentGenerationRequest(value)) {
+    return true;
+  }
+  if (isPlainChatTransformRequest(normalized)) {
+    return false;
+  }
+  return /(修改|改写|重写|去掉|去除|删除|整理|更新|替换|应用|覆盖|插入|追加|写回|写入当前|保存到当前|更新当前|替换全文|替换选区|提案|patch|proposal)/i.test(normalized);
+}
+
+function isDocumentGenerationRequest(value: string): boolean {
+  const normalized = value.toLowerCase().replace(/\s+/g, "");
+  return (
+    /(新建|创建|生成|重新生成|另存|保存|写入|输出).*(新|新的|单独|另一个)?(文档|笔记|markdown|md|总结|summary|note)/i.test(normalized) ||
+    /(文档|笔记|markdown|md|note).*(新建|创建|生成|保存|另存|写入|输出)/i.test(normalized) ||
+    /(写入|保存|输出).*(到|至|为)?(新|新的|单独|另一个)(文档|笔记|markdown|md|note)/i.test(normalized) ||
+    /(总结|summary).*(文档|笔记|markdown|md|note).*(新建|创建|生成|保存|另存|写入|输出)/i.test(normalized)
+  );
+}
+
+function isWritePreviousAiResponseToNewDocumentRequest(value: string): boolean {
+  const normalized = value.toLowerCase().replace(/\s+/g, "");
+  return (
+    /(写入|保存|输出|放到|存到).*(新|新的|单独|另一个)(文档|笔记|markdown|md|note)/i.test(normalized) ||
+    /(新|新的|单独|另一个)(文档|笔记|markdown|md|note).*(写入|保存|输出|放到|存到)/i.test(normalized)
+  );
+}
+
+function isPlainChatTransformRequest(normalized: string): boolean {
+  return (
+    /^(翻译|译成|翻成|translate|解释|说明|总结|概括|润色|校对|分析)/i.test(normalized) &&
+    !/(写入|保存|输出|新建|创建|生成|另存|替换|更新|修改|改写|重写|插入|追加|文档|笔记|markdown|md|note)/i.test(normalized)
+  );
+}
+
+function isCurrentNoteBodyRequest(value: string): boolean {
+  const normalized = value.toLowerCase().replace(/\s+/g, "");
+  return (
+    /(当前|这篇|本文|这个|此)(文档|笔记|markdown|md|note)/i.test(normalized) ||
+    /(文档|笔记|markdown|md|note).*(内容|正文|全文)/i.test(normalized)
+  );
+}
+
+function isRegenerateLastAiRequest(value: string): boolean {
+  const normalized = value.toLowerCase().replace(/\s+/g, "");
+  return /^(重新生成|再生成|再生成一次|重试|retry|regenerate)$/.test(normalized);
+}
+
+function lastAssistantDocumentContent(messages: AiMessageView[]): string | undefined {
+  for (let index = messages.length - 1; index >= 0; index -= 1) {
+    const message = messages[index];
+    if (message.role !== "assistant") {
+      continue;
+    }
+    const text = message.text.trim();
+    if (text) {
+      return text;
+    }
+  }
+  return undefined;
+}
+
+function generatedDocumentPath(proposal: AiPatchProposal, content: string, existingPaths: Set<string>, tr = createTranslator("zh-CN")): string {
+  const title = content.match(/^#\s+(.+)$/m)?.[1]?.trim() || `${fileNameFor(proposal.pathRel).replace(/\.md(?:own|arkdown)?$/i, "")}-${tr("AI 生成")}`;
+  const safeStem = sanitizeItemName(title).replace(/\/+/g, "-").replace(/\.md(?:own|arkdown)?$/i, "").slice(0, 72) || "ai-document";
+  const parent = pathParent(proposal.pathRel);
+  let candidate = joinPath(parent, `${safeStem}.md`);
+  let index = 2;
+  while (existingPaths.has(candidate)) {
+    candidate = joinPath(parent, `${safeStem} ${index}.md`);
+    index += 1;
+  }
+  return candidate;
+}
+
 function floatingMenuStyle(x: number, y: number, size: { width: number; height: number }): CSSProperties {
   if (typeof window === "undefined") {
     return { left: x, top: y };
@@ -3647,6 +4882,7 @@ function EditorTopBar({
   isFavorite,
   onToggleLeft,
   onOpenOutline,
+  onOpenHistory,
   onModeChange,
   onToggleFavorite
 }: {
@@ -3660,6 +4896,7 @@ function EditorTopBar({
   isFavorite: boolean;
   onToggleLeft: () => void;
   onOpenOutline: () => void;
+  onOpenHistory: () => void;
   onModeChange: (mode: OpenDocumentTab["mode"]) => void;
   onToggleFavorite: () => void;
 }) {
@@ -3714,6 +4951,12 @@ function EditorTopBar({
                 <List size={15} />
                 <span>{tr("目录")}</span>
               </button>
+              {document.sourceKind !== "external" ? (
+                <button type="button" className="outline-toggle-button" title={tr("历史版本")} aria-label={tr("历史版本")} onClick={onOpenHistory}>
+                  <Clock3 size={15} />
+                  <span>{tr("历史")}</span>
+                </button>
+              ) : null}
             </div>
             <div className="segmented-control" aria-label={tr("编辑模式")}>
               {(["wysiwyg", "source", "split"] as const).map((item) => (
@@ -3740,9 +4983,23 @@ type EditorScrollSnapshot = {
 type EditorPaneHandle = {
   undoEdit: () => boolean;
   redoEdit: () => boolean;
+  replaceSourceText: (content: string) => Promise<boolean>;
   captureScrollForModeSwitch: () => void;
   jumpToHeading: (line: number, headingIndex: number) => boolean;
+  getAiSnapshot: () => EditorAiSnapshot | undefined;
 };
+
+type EditorAiSnapshot = {
+  selectionText: string;
+  selectionRange?: { from: number; to: number };
+  source: "source" | "wysiwyg";
+  cursorOffset?: number;
+  line?: number;
+  column?: number;
+  canReplaceSelection: boolean;
+};
+
+type SourceEditorViewRef = RefObject<Pick<SourceEditorHandle, "view"> | null>;
 
 const EditorPane = forwardRef<EditorPaneHandle, {
   document?: OpenDocumentTab;
@@ -3798,7 +5055,7 @@ const EditorPane = forwardRef<EditorPaneHandle, {
 ) {
   const { tr } = useRendererI18n();
   const editorPaneRootRef = useRef<HTMLDivElement>(null);
-  const sourceEditorRef = useRef<ReactCodeMirrorRef>(null);
+  const sourceEditorRef = useRef<SourceEditorHandle>(null);
   const wysiwygEditorRef = useRef<WysiwygEditorHandle>(null);
   const textResourceEditorRef = useRef<TextResourceEditorHandle>(null);
   const splitPreviewRef = useRef<HTMLDivElement>(null);
@@ -3882,6 +5139,15 @@ const EditorPane = forwardRef<EditorPaneHandle, {
   useImperativeHandle(ref, () => ({
     undoEdit: () => runHistoryCommand("undo"),
     redoEdit: () => runHistoryCommand("redo"),
+    replaceSourceText: async (content: string) => {
+      if (!document) {
+        return false;
+      }
+      if (document.mode === "wysiwyg") {
+        return wysiwygEditorRef.current?.replaceMarkdownDocument(content) ?? false;
+      }
+      return sourceEditorRef.current?.replaceDocument(content) ?? false;
+    },
     captureScrollForModeSwitch: () => {
       if (!document) {
         return;
@@ -3902,6 +5168,30 @@ const EditorPane = forwardRef<EditorPaneHandle, {
         return focusSourceEditorLine(sourceEditorRef, line);
       }
       return false;
+    },
+    getAiSnapshot: () => {
+      if (!document) {
+        return undefined;
+      }
+      if (document.mode === "source" || document.mode === "split") {
+        const snapshot = sourceEditorRef.current?.getAiSnapshot();
+        return snapshot
+          ? {
+              selectionText: snapshot.selectionText,
+              selectionRange: snapshot.selectionRange,
+              source: "source",
+              cursorOffset: snapshot.cursorOffset,
+              line: snapshot.line,
+              column: snapshot.column,
+              canReplaceSelection: Boolean(snapshot.selectionRange)
+            }
+          : undefined;
+      }
+      if (document.mode === "wysiwyg") {
+        const snapshot = wysiwygEditorRef.current?.getAiSnapshot();
+        return snapshot ? { selectionText: snapshot.selectionText, source: "wysiwyg", canReplaceSelection: false } : undefined;
+      }
+      return undefined;
     }
   }), [document?.mode, document?.pathRel, resource?.pathRel]);
 
@@ -5089,7 +6379,7 @@ function restoreEditorScroll(scroller: HTMLElement, snapshot: EditorScrollSnapsh
   scroller.scrollTop = top || Math.min(maxScrollTop, snapshot.top);
 }
 
-function insertSnippetIntoSourceEditor(ref: RefObject<ReactCodeMirrorRef | null>, snippet: MarkdownSnippet) {
+function insertSnippetIntoSourceEditor(ref: SourceEditorViewRef, snippet: MarkdownSnippet) {
   const view = ref.current?.view;
   if (!view) {
     return;
@@ -5117,7 +6407,7 @@ interface MermaidSourceLocation {
   markdown: string;
 }
 
-function focusSourceEditorAt(ref: RefObject<ReactCodeMirrorRef | null>, position: number) {
+function focusSourceEditorAt(ref: SourceEditorViewRef, position: number) {
   const view = ref.current?.view;
   if (!view) {
     return;
@@ -5130,7 +6420,7 @@ function focusSourceEditorAt(ref: RefObject<ReactCodeMirrorRef | null>, position
   view.focus();
 }
 
-function focusSourceEditorLine(ref: RefObject<ReactCodeMirrorRef | null>, line: number): boolean {
+function focusSourceEditorLine(ref: SourceEditorViewRef, line: number): boolean {
   const view = ref.current?.view;
   if (!view) {
     return false;
@@ -5737,7 +7027,7 @@ function DocumentSimpleList({
   );
 }
 
-type SettingsTabId = "preferences" | "plugins";
+type SettingsTabId = "preferences" | "ai" | "plugins";
 
 function settingsTabs(tr: Translator): Array<{
   id: SettingsTabId;
@@ -5757,6 +7047,14 @@ function settingsTabs(tr: Translator): Array<{
       icon: Settings2
     },
     {
+      id: "ai",
+      label: "AI",
+      title: tr("AI 设置"),
+      description: tr("AI Assistant"),
+      help: tr("配置 Provider、模型、上下文权限和写入确认。"),
+      icon: Sparkles
+    },
+    {
       id: "plugins",
       label: tr("插件管理"),
       title: tr("插件管理"),
@@ -5769,11 +7067,24 @@ function settingsTabs(tr: Translator): Array<{
 
 function SettingsDialog({
   open,
+  initialTab,
   settings,
+  aiSettings,
+  workspaceId,
+  aiSemanticStatus,
   extensionManifests,
   pluginDescriptors,
   settingContributions,
   onUpdate,
+  onUpdateAiSettings,
+  onSetAiApiKey,
+  onClearAiApiKey,
+  onGetAiApiKey,
+  onTestAiProvider,
+  onListAiModels,
+  onRefreshAiSemanticStatus,
+  onTestAiEmbedding,
+  onUpdateAiSemanticIndex,
   onSetPluginEnabled,
   onAcceptPluginPermissions,
   onClose,
@@ -5782,11 +7093,24 @@ function SettingsDialog({
   pluginDirectory
 }: {
   open: boolean;
+  initialTab: SettingsTabId;
   settings?: AppSettings;
+  aiSettings?: AiSettingsPublic;
+  workspaceId?: string;
+  aiSemanticStatus?: AiSemanticIndexStatus;
   extensionManifests: ExtensionManifest[];
   pluginDescriptors: PluginDescriptor[];
   settingContributions: SettingContribution[];
   onUpdate: (key: string, value: unknown) => Promise<void>;
+  onUpdateAiSettings: (settings: Partial<AiSettings>) => Promise<void>;
+  onSetAiApiKey: (providerProfileId: string, apiKey: string) => Promise<void>;
+  onClearAiApiKey: (providerProfileId: string) => Promise<void>;
+  onGetAiApiKey: (providerProfileId: string) => Promise<string | undefined>;
+  onTestAiProvider: (provider: AiProviderProfile, apiKey?: string) => Promise<import("../shared/ai").AiProviderTestResult>;
+  onListAiModels: (provider: AiProviderProfile, apiKey?: string) => Promise<import("../shared/ai").AiModelDescriptor[]>;
+  onRefreshAiSemanticStatus: () => Promise<void>;
+  onTestAiEmbedding: (settings: AiEmbeddingSettings, apiKey?: string) => Promise<AiProviderTestResult>;
+  onUpdateAiSemanticIndex: (reset?: boolean) => Promise<AiSemanticIndexStatus | undefined>;
   onSetPluginEnabled: (pluginId: string, enabled: boolean) => Promise<void>;
   onAcceptPluginPermissions: (pluginId: string) => Promise<void>;
   onClose: () => void;
@@ -5800,8 +7124,15 @@ function SettingsDialog({
   const activeTabItem = settingsTabs(tr).find((tab) => tab.id === activeTab) ?? settingsTabs(tr)[0];
 
   useEffect(() => {
-    if (!open) {
+    if (open) {
+      setActiveTab(initialTab);
+    } else {
       setPermissionReviewManifest(undefined);
+    }
+  }, [initialTab, open]);
+
+  useEffect(() => {
+    if (!open) {
       return;
     }
     const onKeyDown = (event: KeyboardEvent) => {
@@ -5884,39 +7215,57 @@ function SettingsDialog({
               <h2>{activeTabItem.title}</h2>
               <p>{activeTabItem.help}</p>
             </div>
-            {activeTab === "preferences" ? (
-              <div className="settings-tab-content">
-                {languageRestartRequired ? (
-                  <div className="plugin-empty-state is-warning">
-                    <strong>{tr("重启后生效")}</strong>
-                    <span>{tr("语言更改将在重启 Nolia 后生效。")}</span>
-                  </div>
-                ) : null}
-                <div className="settings-form">
-                  {preferenceSettingContributions.map((setting) => (
-                    <SettingContributionControl key={setting.id} setting={setting} settings={settings} onUpdate={onUpdate} />
-                  ))}
-                </div>
-              </div>
-            ) : (
-              <div className="settings-tab-content settings-tab-content-plugins">
-                {pluginSettingContributions.length ? (
-                  <div className="settings-form plugin-control-form">
-                    {pluginSettingContributions.map((setting) => (
+            <SettingsPanelErrorBoundary key={activeTab} title={tr("设置页面加载失败")} reloadLabel={tr("重新加载")} onReload={onReload}>
+              {activeTab === "preferences" ? (
+                <div className="settings-tab-content">
+                  {languageRestartRequired ? (
+                    <div className="plugin-empty-state is-warning">
+                      <strong>{tr("重启后生效")}</strong>
+                      <span>{tr("语言更改将在重启 Nolia 后生效。")}</span>
+                    </div>
+                  ) : null}
+                  <div className="settings-form">
+                    {preferenceSettingContributions.map((setting) => (
                       <SettingContributionControl key={setting.id} setting={setting} settings={settings} onUpdate={onUpdate} />
                     ))}
                   </div>
-                ) : null}
-                <PluginSettingsList
-                  settings={settings}
-                  manifests={dedupeExtensionManifests(extensionManifests)}
-                  pluginDescriptors={pluginDescriptors}
-                  pluginDirectory={pluginDirectory}
-                  onSetPluginEnabled={onSetPluginEnabled}
-                  onRequestAcceptPluginPermissions={setPermissionReviewManifest}
+                </div>
+              ) : activeTab === "ai" && aiSettings ? (
+                <AiSettingsPanel
+                  settings={aiSettings}
+                  onUpdate={onUpdateAiSettings}
+                  onSetApiKey={onSetAiApiKey}
+                  onClearApiKey={onClearAiApiKey}
+                  onGetApiKey={onGetAiApiKey}
+                  onTestProvider={onTestAiProvider}
+                  onListModels={onListAiModels}
+                  workspaceId={workspaceId}
+                  semanticStatus={aiSemanticStatus}
+                  onRefreshSemanticStatus={onRefreshAiSemanticStatus}
+                  onTestEmbedding={onTestAiEmbedding}
+                  onUpdateSemanticIndex={() => onUpdateAiSemanticIndex(false)}
+                  onResetSemanticIndex={() => onUpdateAiSemanticIndex(true)}
                 />
-              </div>
-            )}
+              ) : (
+                <div className="settings-tab-content settings-tab-content-plugins">
+                  {pluginSettingContributions.length ? (
+                    <div className="settings-form plugin-control-form">
+                      {pluginSettingContributions.map((setting) => (
+                        <SettingContributionControl key={setting.id} setting={setting} settings={settings} onUpdate={onUpdate} />
+                      ))}
+                    </div>
+                  ) : null}
+                  <PluginSettingsList
+                    settings={settings}
+                    manifests={dedupeExtensionManifests(extensionManifests)}
+                    pluginDescriptors={pluginDescriptors}
+                    pluginDirectory={pluginDirectory}
+                    onSetPluginEnabled={onSetPluginEnabled}
+                    onRequestAcceptPluginPermissions={setPermissionReviewManifest}
+                  />
+                </div>
+              )}
+            </SettingsPanelErrorBoundary>
           </section>
         </div>
       </section>
@@ -5943,6 +7292,38 @@ function SettingsDialog({
     />
     </>
   );
+}
+
+class SettingsPanelErrorBoundary extends Component<
+  { children: ReactNode; title: string; reloadLabel: string; onReload: () => void },
+  { error?: Error }
+> {
+  static getDerivedStateFromError(error: Error) {
+    return { error };
+  }
+
+  override state: { error?: Error } = {};
+
+  override componentDidCatch(error: Error, info: ErrorInfo) {
+    console.error("[SettingsPanelErrorBoundary]", error, info.componentStack);
+  }
+
+  override render() {
+    if (!this.state.error) {
+      return this.props.children;
+    }
+    return (
+      <div className="settings-tab-content">
+        <div className="plugin-empty-state is-warning" role="alert">
+          <strong>{this.props.title}</strong>
+          <span>{this.state.error.message}</span>
+          <button type="button" className="secondary-button" onClick={this.props.onReload}>
+            <Wrench size={14} /> {this.props.reloadLabel}
+          </button>
+        </div>
+      </div>
+    );
+  }
 }
 
 function SettingContributionControl({
@@ -6141,6 +7522,34 @@ function formatPermissionList(permissions: ExtensionPermission[] | undefined, tr
   return permissions.map((permission) => formatExtensionPermission(permission, tr)).join(tr("权限分隔符"));
 }
 
+function escapeHtml(value: string): string {
+  return value
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;");
+}
+
+function aiContextSummary(doc: OpenDocumentTab | undefined, selectedCharCount: number, settings: AiSettingsPublic | undefined, tr = createTranslator("zh-CN")): string[] {
+  const items: string[] = [];
+  if (doc) {
+    items.push(settings?.allowCurrentNoteContent ? tr("当前笔记正文：{title}", { title: doc.title || fileNameFor(doc.pathRel) }) : tr("当前笔记标题：{title}", { title: doc.title || fileNameFor(doc.pathRel) }));
+  }
+  if (selectedCharCount > 0) {
+    items.push(tr("已选择 {count} 字符", { count: selectedCharCount }));
+  }
+  if (settings?.allowWorkspaceSearch) {
+    items.push(tr("允许搜索笔记"));
+  }
+  if (settings?.allowWorkspaceRead) {
+    items.push(tr("允许读取整个工作区"));
+  }
+  if (settings?.allowWorkspaceOperations) {
+    items.push(tr("允许提出工作区操作"));
+  }
+  return items;
+}
+
 function documentListKindLabel(pathRel: string, kind: "file" | "resource", tr = createTranslator("zh-CN")): string {
   if (kind === "file") {
     return tr("笔记");
@@ -6197,6 +7606,84 @@ function DocumentDetails({
           </div>
         ))}
       </SidebarBox>
+    </div>
+  );
+}
+
+function HistoryPanel({
+  doc,
+  entries,
+  loading,
+  preview,
+  locale,
+  onRefresh,
+  onCreateSnapshot,
+  onPreview,
+  onRestore
+}: {
+  doc?: OpenDocumentTab;
+  entries: FileHistoryEntry[];
+  loading: boolean;
+  preview?: { entry: FileHistoryEntry; content: string };
+  locale: ResolvedLocale;
+  onRefresh: () => void;
+  onCreateSnapshot: () => void;
+  onPreview: (entry: FileHistoryEntry) => void;
+  onRestore: (entry: FileHistoryEntry) => void;
+}) {
+  const { tr } = useRendererI18n();
+  if (!doc || doc.sourceKind === "external") {
+    return <div className="panel-empty">{tr("当前文档没有历史版本。")}</div>;
+  }
+  const diff = preview ? buildHistoryDiff(preview.content, doc.sourceText) : undefined;
+  return (
+    <div className="history-panel">
+      <div className="history-toolbar">
+        <button type="button" className="secondary-button" onClick={onCreateSnapshot}>{tr("创建版本")}</button>
+        <button type="button" className="secondary-button" disabled={loading} onClick={onRefresh}>{tr("重新加载")}</button>
+      </div>
+      <div className="history-list">
+        {loading ? <div className="panel-empty">{tr("正在读取历史版本...")}</div> : null}
+        {!loading && entries.length === 0 ? <div className="panel-empty">{tr("暂无历史版本。")}</div> : null}
+        {entries.map((entry) => (
+          <article key={entry.id} className={`history-item${preview?.entry.id === entry.id ? " is-active" : ""}`}>
+            <button type="button" onClick={() => onPreview(entry)}>
+              <strong>{formatHistoryTime(entry.createdAt, locale)}</strong>
+              <span>{historyReasonLabel(entry.reason, tr)} · {formatFileSize(entry.size, locale)}</span>
+            </button>
+            <button type="button" className="secondary-button" onClick={() => onRestore(entry)}>{tr("恢复")}</button>
+          </article>
+        ))}
+      </div>
+      {preview ? (
+        <section className="history-preview">
+          <header>
+            <strong>{formatHistoryTime(preview.entry.createdAt, locale)}</strong>
+            <span>{historyReasonLabel(preview.entry.reason, tr)}</span>
+          </header>
+          {diff ? (
+            <section className="history-compare" aria-label={tr("历史版本与当前版本对比")}>
+              <header>
+                <strong>{tr("历史版本与当前版本对比")}</strong>
+                <span>{diff.changed ? tr("新增 {added} 行，删除 {removed} 行", { added: diff.addedCount, removed: diff.removedCount }) : tr("内容一致")}</span>
+              </header>
+              <div className="history-diff" role="list">
+                {diff.lines.map((line) => (
+                  <div key={line.key} className={`history-diff-line is-${line.type}`} role="listitem">
+                    <span className="history-diff-marker">{historyDiffMarker(line.type)}</span>
+                    <span className="history-diff-text">{line.text || " "}</span>
+                  </div>
+                ))}
+              </div>
+              {diff.truncated ? <p className="history-diff-note">{tr("仅显示前 {count} 行对比。", { count: diff.lines.length })}</p> : null}
+            </section>
+          ) : null}
+          <details className="history-raw-preview">
+            <summary>{tr("查看历史原文")}</summary>
+            <pre>{preview.content}</pre>
+          </details>
+        </section>
+      ) : null}
     </div>
   );
 }

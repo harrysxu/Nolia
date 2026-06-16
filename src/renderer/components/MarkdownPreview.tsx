@@ -8,6 +8,7 @@ import { getCodeBlockLanguageSelectOptions } from "./codeBlockLanguageSelect";
 
 interface MarkdownPreviewProps {
   html: string;
+  renderDiagrams?: boolean;
   onMermaidClick?: (diagram: MarkdownPreviewDiagramClick) => void;
   onCodeLanguageChange?: (change: MarkdownPreviewCodeLanguageChange) => void;
 }
@@ -22,13 +23,13 @@ export interface MarkdownPreviewCodeLanguageChange {
   language: string;
 }
 
-export function MarkdownPreview({ html, onMermaidClick, onCodeLanguageChange }: MarkdownPreviewProps) {
+export function MarkdownPreview({ html, renderDiagrams = true, onMermaidClick, onCodeLanguageChange }: MarkdownPreviewProps) {
   const { tr } = useRendererI18n();
   const previewRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
     const root = previewRef.current;
-    if (!root) {
+    if (!root || !renderDiagrams) {
       return;
     }
     const diagrams = Array.from(root.querySelectorAll<HTMLElement>(".mermaid")).filter(
@@ -42,7 +43,7 @@ export function MarkdownPreview({ html, onMermaidClick, onCodeLanguageChange }: 
     return () => {
       canceled = true;
     };
-  });
+  }, [html, renderDiagrams]);
 
   useEffect(() => {
     const root = previewRef.current;

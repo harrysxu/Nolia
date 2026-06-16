@@ -10,6 +10,43 @@ import { SettingsService } from "../src/main/services/settingsService";
 import { WorkspaceService } from "../src/main/services/workspaceService";
 
 describe("file system binary operations", () => {
+  it("creates, lists, and reads text history snapshots", async () => {
+    const userData = await makeTempDir();
+    const home = await makeTempDir();
+    const workspaceRoot = await makeTempDir();
+    let workspaces: WorkspaceService | undefined;
+    try {
+      await writeFile(path.join(workspaceRoot, "note.md"), "# Note\n\nDisk content.");
+
+      const settings = new SettingsService(userData);
+      await settings.init();
+      const diagnostics = new DiagnosticsService(home);
+      await diagnostics.init();
+      workspaces = new WorkspaceService(settings, diagnostics);
+      const workspace = await workspaces.createWorkspace({ path: workspaceRoot });
+      expect(workspace).toBeDefined();
+
+      const files = new FileSystemService(workspaces, new HistoryService());
+      const created = await files.createHistorySnapshot({
+        workspaceId: workspace!.workspaceId,
+        pathRel: "note.md",
+        reason: "manual",
+        content: "# Note\n\nUnsaved content."
+      });
+      expect(created.entry?.reason).toBe("manual");
+
+      const history = await files.listHistory({ workspaceId: workspace!.workspaceId, pathRel: "note.md" });
+      expect(history.entries).toHaveLength(1);
+      const read = await files.readHistory({ workspaceId: workspace!.workspaceId, snapshotId: history.entries[0].id });
+      expect(read?.content).toBe("# Note\n\nUnsaved content.");
+    } finally {
+      await workspaces?.closeActiveWorkspace();
+      await rm(userData, { recursive: true, force: true });
+      await rm(home, { recursive: true, force: true });
+      await rm(workspaceRoot, { recursive: true, force: true });
+    }
+  });
+
   it("reads and writes workspace binary files atomically with conflict checks", async () => {
     const userData = await makeTempDir();
     const home = await makeTempDir();

@@ -4,6 +4,23 @@ import { IpcChannels } from "../shared/channels";
 import {
   type AttachmentImportRequest,
   type AttachmentPickImageRequest,
+  type AiModelsListRequest,
+  type AiEmbeddingTestRequest,
+  type AiProviderTestRequest,
+  type AiRunCancelRequest,
+  type AiRunStartRequest,
+  type AiTaskApprovalRequest,
+  type AiTaskCancelRequest,
+  type AiTaskReadRequest,
+  type AiTaskRejectRequest,
+  type AiTaskResumeRequest,
+  type AiTaskStartRequest,
+  type AiTaskUndoWriteRequest,
+  type AiSecretClearRequest,
+  type AiSecretGetRequest,
+  type AiSecretSetRequest,
+  type AiSemanticIndexRequest,
+  type AiSettingsSetRequest,
   type ClipboardWriteRichRequest,
   type DocumentParseRequest,
   type ExtensionsSyncMenusRequest,
@@ -11,6 +28,9 @@ import {
   type ExternalFileReadRequest,
   type ExternalFileWriteAtomicRequest,
   type FileCreateRequest,
+  type FileHistoryCreateRequest,
+  type FileHistoryListRequest,
+  type FileHistoryReadRequest,
   type FileListTreeRequest,
   type FileReadRequest,
   type FileRenameRequest,
@@ -29,11 +49,14 @@ import {
   type WorkspaceRemoveRecentRequest,
   type WorkspaceSwitchRequest
 } from "../shared/ipc";
+import type { AiModelDescriptor, AiProviderTestResult, AiRunEvent, AiRunStartResponse, AiSecretGetResponse, AiSemanticIndexResult, AiSemanticIndexStatus, AiSettingsPublic, AiTaskSnapshot, AiTaskStartResponse, AiTaskSummary } from "../shared/ai";
 import type { PluginDescriptor } from "../shared/extensions";
 import type {
   AppSettings,
   BacklinksResponse,
   FileBinaryReadResponse,
+  FileHistoryEntry,
+  FileHistoryReadResponse,
   FileReadResponse,
   FileTreeNode,
   FileWriteResponse,
@@ -72,6 +95,9 @@ export interface NoliaApi {
     readBinary?: (request: FileReadRequest) => Promise<FileBinaryReadResponse>;
     writeAtomic: (request: FileWriteAtomicRequest) => Promise<FileWriteResponse>;
     writeBinaryAtomic?: (request: FileWriteBinaryAtomicRequest) => Promise<FileWriteResponse>;
+    listHistory?: (request: FileHistoryListRequest) => Promise<{ entries: FileHistoryEntry[] }>;
+    readHistory?: (request: FileHistoryReadRequest) => Promise<FileHistoryReadResponse | undefined>;
+    createHistorySnapshot?: (request: FileHistoryCreateRequest) => Promise<{ entry?: FileHistoryEntry }>;
     create: (request: FileCreateRequest) => Promise<{ ok: boolean; affectedPaths: string[] }>;
     rename: (request: FileRenameRequest) => Promise<{ ok: boolean; affectedPaths: string[] }>;
     trash: (request: FileTrashRequest) => Promise<{ ok: boolean; affectedPaths: string[] }>;
@@ -124,6 +150,30 @@ export interface NoliaApi {
   extensions?: {
     syncMenus: (request: ExtensionsSyncMenusRequest) => Promise<{ ok: boolean }>;
   };
+  ai?: {
+    getSettings: () => Promise<AiSettingsPublic>;
+    setSettings: (request: AiSettingsSetRequest) => Promise<AiSettingsPublic>;
+    setApiKey: (request: AiSecretSetRequest) => Promise<AiSettingsPublic>;
+    clearApiKey: (request: AiSecretClearRequest) => Promise<AiSettingsPublic>;
+    getApiKey: (request: AiSecretGetRequest) => Promise<AiSecretGetResponse>;
+    testProvider: (request?: AiProviderTestRequest) => Promise<AiProviderTestResult>;
+    listModels: (request?: AiModelsListRequest) => Promise<AiModelDescriptor[]>;
+    testEmbedding?: (request?: AiEmbeddingTestRequest) => Promise<AiProviderTestResult>;
+    semanticIndexStatus?: (request: AiSemanticIndexRequest) => Promise<AiSemanticIndexStatus>;
+    updateSemanticIndex?: (request: AiSemanticIndexRequest) => Promise<AiSemanticIndexResult>;
+    resetSemanticIndex?: (request: AiSemanticIndexRequest) => Promise<AiSemanticIndexResult>;
+    startRun: (request: AiRunStartRequest) => Promise<AiRunStartResponse>;
+    cancelRun: (request: AiRunCancelRequest) => Promise<{ ok: boolean }>;
+    startTask?: (request: AiTaskStartRequest) => Promise<AiTaskStartResponse>;
+    listTasks?: () => Promise<AiTaskSummary[]>;
+    readTask?: (request: AiTaskReadRequest) => Promise<AiTaskSnapshot | undefined>;
+    resumeTask?: (request: AiTaskResumeRequest) => Promise<AiTaskSummary | undefined>;
+    cancelTask?: (request: AiTaskCancelRequest) => Promise<{ ok: boolean }>;
+    approveProposal?: (request: AiTaskApprovalRequest) => Promise<AiTaskSnapshot | undefined>;
+    rejectProposal?: (request: AiTaskRejectRequest) => Promise<AiTaskSnapshot | undefined>;
+    undoWrite?: (request: AiTaskUndoWriteRequest) => Promise<AiTaskSnapshot | undefined>;
+    onRunEvent: (listener: (event: AiRunEvent) => void) => Unsubscribe;
+  };
   diagnostics: {
     openLogs: () => Promise<string>;
   };
@@ -151,6 +201,9 @@ const api: NoliaApi = {
     readBinary: (request) => invoke(IpcChannels.fileReadBinary, request),
     writeAtomic: (request) => invoke(IpcChannels.fileWriteAtomic, request),
     writeBinaryAtomic: (request) => invoke(IpcChannels.fileWriteBinaryAtomic, request),
+    listHistory: (request) => invoke(IpcChannels.fileHistoryList, request),
+    readHistory: (request) => invoke(IpcChannels.fileHistoryRead, request),
+    createHistorySnapshot: (request) => invoke(IpcChannels.fileHistoryCreate, request),
     create: (request) => invoke(IpcChannels.fileCreate, request),
     rename: (request) => invoke(IpcChannels.fileRename, request),
     trash: (request) => invoke(IpcChannels.fileTrash, request),
@@ -194,6 +247,30 @@ const api: NoliaApi = {
   extensions: {
     syncMenus: (request) => invoke(IpcChannels.extensionsSyncMenus, request)
   },
+  ai: {
+    getSettings: () => invoke(IpcChannels.aiSettingsGet, {}),
+    setSettings: (request) => invoke(IpcChannels.aiSettingsSet, request),
+    setApiKey: (request) => invoke(IpcChannels.aiSecretSet, request),
+    clearApiKey: (request) => invoke(IpcChannels.aiSecretClear, request),
+    getApiKey: (request) => invoke(IpcChannels.aiSecretGet, request),
+    testProvider: (request = {}) => invoke(IpcChannels.aiProviderTest, request),
+    listModels: (request = {}) => invoke(IpcChannels.aiModelsList, request),
+    testEmbedding: (request = {}) => invoke(IpcChannels.aiEmbeddingTest, request),
+    semanticIndexStatus: (request) => invoke(IpcChannels.aiSemanticIndexStatus, request),
+    updateSemanticIndex: (request) => invoke(IpcChannels.aiSemanticIndexUpdate, request),
+    resetSemanticIndex: (request) => invoke(IpcChannels.aiSemanticIndexReset, request),
+    startRun: (request) => invoke(IpcChannels.aiRunStart, request),
+    cancelRun: (request) => invoke(IpcChannels.aiRunCancel, request),
+    startTask: (request) => invoke(IpcChannels.aiTaskStart, request),
+    listTasks: () => invoke(IpcChannels.aiTaskList, {}),
+    readTask: (request) => invoke(IpcChannels.aiTaskRead, request),
+    resumeTask: (request) => invoke(IpcChannels.aiTaskResume, request),
+    cancelTask: (request) => invoke(IpcChannels.aiTaskCancel, request),
+    approveProposal: (request) => invoke(IpcChannels.aiTaskApproveProposal, request),
+    rejectProposal: (request) => invoke(IpcChannels.aiTaskRejectProposal, request),
+    undoWrite: (request) => invoke(IpcChannels.aiTaskUndoWrite, request),
+    onRunEvent: (listener) => subscribe(IpcChannels.aiRunEvent, listener)
+  },
   diagnostics: {
     openLogs: () => invoke(IpcChannels.diagnosticsOpenLogs, {})
   },
@@ -205,6 +282,11 @@ const api: NoliaApi = {
 };
 
 contextBridge.exposeInMainWorld("nolia", api);
+if (process.env.NOLIA_E2E_TEST_HOOKS === "1") {
+  contextBridge.exposeInMainWorld("__noliaE2e", {
+    emitAiRunEvent: (event: unknown) => invoke("ai.test.emitRunEvent", event)
+  });
+}
 
 function invoke<T>(channel: string, payload: unknown): Promise<T> {
   return ipcRenderer.invoke(channel, payload) as Promise<T>;

@@ -8,6 +8,10 @@ import { APP_NAME, BUNDLE_IDENTIFIER } from "../shared/constants";
 import { IpcChannels } from "../shared/channels";
 import { getBuiltInMenuContributions } from "../shared/builtinExtensions";
 import { resolveLocale } from "../shared/i18n";
+import { AiService } from "./ai/aiService";
+import { AiSettingsService } from "./ai/aiSettingsService";
+import { AiTaskService } from "./ai/aiTaskService";
+import { AiSecretService } from "./ai/security/secretService";
 import { AttachmentService } from "./services/attachmentService";
 import { DiagnosticsService } from "./services/diagnosticsService";
 import { ExportService } from "./services/exportService";
@@ -15,6 +19,7 @@ import { FileSystemService } from "./services/fileSystemService";
 import { HistoryService } from "./services/historyService";
 import { PLUGIN_PROTOCOL, PluginService } from "./services/pluginService";
 import { SettingsService } from "./services/settingsService";
+import { SemanticIndexService } from "./services/semanticIndexService";
 import { WorkspaceService } from "./services/workspaceService";
 import { registerIpcHandlers } from "./ipc";
 import { createMainWindow } from "./mainWindow";
@@ -30,6 +35,9 @@ const EXTERNAL_ASSET_HOST = "external";
 
 app.setName(APP_NAME);
 app.setAppUserModelId(BUNDLE_IDENTIFIER);
+if (process.env.NOLIA_USER_DATA_DIR) {
+  app.setPath("userData", process.env.NOLIA_USER_DATA_DIR);
+}
 
 protocol.registerSchemesAsPrivileged([
   {
@@ -64,7 +72,7 @@ protocol.registerSchemesAsPrivileged([
   }
 ]);
 
-const hasLock = app.requestSingleInstanceLock();
+const hasLock = process.env.NOLIA_DISABLE_SINGLE_INSTANCE_LOCK === "1" || app.requestSingleInstanceLock();
 if (!hasLock) {
   app.quit();
 }
@@ -92,6 +100,9 @@ app.whenReady().then(async () => {
 
   const settings = new SettingsService(app.getPath("userData"));
   await settings.init();
+  const aiSecrets = new AiSecretService(app.getPath("userData"));
+  await aiSecrets.init();
+  const aiSettings = new AiSettingsService(settings, aiSecrets);
   const startupLocale = resolveLocale(settings.getSettings().language, app.getLocale());
   const plugins = new PluginService(app.getPath("userData"), settings, diagnostics, startupLocale);
   await plugins.init();
@@ -107,6 +118,16 @@ app.whenReady().then(async () => {
   const files = new FileSystemService(workspaces, history);
   const attachments = new AttachmentService(workspaces, startupLocale);
   const exporter = new ExportService(workspaces, startupLocale);
+  const semanticIndex = new SemanticIndexService();
+  const aiRuntimeServices = { workspaces, files, settings, aiSettings, diagnostics, semanticIndex };
+  let aiTasks: AiTaskService | undefined;
+  const emitAiEvent = (event: import("../shared/ai").AiRunEvent) => {
+    void aiTasks?.recordEvent(event).catch((error: unknown) => diagnostics.error("Failed to persist AI task event", { error: formatError(error) }));
+    mainWindow?.webContents.send(IpcChannels.aiRunEvent, event);
+  };
+  const ai = new AiService(aiSettings, aiRuntimeServices, () => mainWindow, emitAiEvent);
+  aiTasks = new AiTaskService(ai, aiRuntimeServices, emitAiEvent);
+  await aiTasks.markInterruptedRunningTasks();
 
   if (!process.env.VITE_DEV_SERVER_URL) {
     registerRendererProtocol();
@@ -129,6 +150,8 @@ app.whenReady().then(async () => {
     settings,
     diagnostics,
     plugins,
+    ai,
+    aiTasks,
     syncExtensionMenus: (menus) => installApplicationMenu(() => mainWindow, menus, startupLocale)
   });
   installApplicationMenu(() => mainWindow, getBuiltInMenuContributions(startupLocale), startupLocale);

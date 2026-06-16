@@ -1,4 +1,4 @@
-import { forwardRef, useMemo } from "react";
+import { forwardRef, useImperativeHandle, useMemo, useRef } from "react";
 import CodeMirror, { type ReactCodeMirrorRef } from "@uiw/react-codemirror";
 import { insertNewlineContinueMarkup, markdown, markdownKeymap } from "@codemirror/lang-markdown";
 import { keymap, EditorView, type ViewUpdate } from "@codemirror/view";
@@ -11,7 +11,22 @@ interface SourceEditorProps {
   showLineNumbers?: boolean;
 }
 
-export const SourceEditor = forwardRef<ReactCodeMirrorRef, SourceEditorProps>(function SourceEditor({ value, onChange, onSelectionLengthChange, readOnly, showLineNumbers = true }, ref) {
+export interface SourceEditorAiSnapshot {
+  selectionText: string;
+  selectionRange?: { from: number; to: number };
+  cursorOffset: number;
+  line: number;
+  column: number;
+}
+
+export interface SourceEditorHandle {
+  view: ReactCodeMirrorRef["view"];
+  getAiSnapshot: () => SourceEditorAiSnapshot | undefined;
+  replaceDocument: (content: string) => boolean;
+}
+
+export const SourceEditor = forwardRef<SourceEditorHandle, SourceEditorProps>(function SourceEditor({ value, onChange, onSelectionLengthChange, readOnly, showLineNumbers = true }, ref) {
+  const codeMirrorRef = useRef<ReactCodeMirrorRef>(null);
   const extensions = useMemo(
     () => [
       markdown({ addKeymap: false }),
@@ -27,9 +42,44 @@ export const SourceEditor = forwardRef<ReactCodeMirrorRef, SourceEditorProps>(fu
     [onSelectionLengthChange]
   );
 
+  useImperativeHandle(ref, () => ({
+    get view() {
+      return codeMirrorRef.current?.view;
+    },
+    replaceDocument: (content: string) => {
+      const view = codeMirrorRef.current?.view;
+      if (!view) {
+        return false;
+      }
+      view.dispatch({
+        changes: { from: 0, to: view.state.doc.length, insert: content },
+        selection: { anchor: Math.min(content.length, view.state.selection.main.head) },
+        scrollIntoView: true
+      });
+      view.focus();
+      return true;
+    },
+    getAiSnapshot: () => {
+      const view = codeMirrorRef.current?.view;
+      if (!view) {
+        return undefined;
+      }
+      const range = view.state.selection.main;
+      const line = view.state.doc.lineAt(range.head);
+      const selectionText = range.empty ? "" : view.state.sliceDoc(range.from, range.to);
+      return {
+        selectionText,
+        selectionRange: range.empty ? undefined : { from: range.from, to: range.to },
+        cursorOffset: range.head,
+        line: line.number,
+        column: range.head - line.from + 1
+      };
+    }
+  }));
+
   return (
     <CodeMirror
-      ref={ref}
+      ref={codeMirrorRef}
       value={value}
       height="100%"
       extensions={extensions}

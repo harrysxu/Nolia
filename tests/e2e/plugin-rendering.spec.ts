@@ -2,6 +2,7 @@ import { expect, test } from "@playwright/test";
 import { readFileSync } from "node:fs";
 import path from "node:path";
 
+import { DEFAULT_SETTINGS } from "../../src/shared/constants";
 import type { AppSettings, ParsedDocument, WorkspaceInfo } from "../../src/shared/types";
 import type { ExtensionManifest, PluginDescriptor } from "../../src/shared/extensions";
 import { installMockNolia } from "./helpers/mockNolia";
@@ -21,6 +22,7 @@ const pluginManifest: ExtensionManifest = {
 };
 
 const settings: AppSettings = {
+  ...DEFAULT_SETTINGS,
   language: "zh-CN",
   theme: "light",
   editorMode: "source",

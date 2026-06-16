@@ -1,10 +1,12 @@
 import { expect, test, type Page } from "@playwright/test";
+import { DEFAULT_SETTINGS } from "../../src/shared/constants";
 import type { AppSettings, FileTreeNode, ParsedDocument, WorkspaceInfo } from "../../src/shared/types";
 
 const shortcutModifier = process.platform === "darwin" ? "Meta" : "Control";
 const shortcut = (key: string) => `${shortcutModifier}+${key}`;
 
 const settings: AppSettings = {
+  ...DEFAULT_SETTINGS,
   language: "zh-CN",
   theme: "light",
   editorMode: "source",

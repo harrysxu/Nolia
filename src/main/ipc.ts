@@ -4,6 +4,23 @@ import type { ZodType } from "zod";
 import {
   AttachmentImportRequestSchema,
   AttachmentPickImageRequestSchema,
+  AiModelsListRequestSchema,
+  AiEmbeddingTestRequestSchema,
+  AiTaskApprovalRequestSchema,
+  AiTaskCancelRequestSchema,
+  AiTaskReadRequestSchema,
+  AiTaskRejectRequestSchema,
+  AiTaskResumeRequestSchema,
+  AiTaskStartRequestSchema,
+  AiTaskUndoWriteRequestSchema,
+  AiProviderTestRequestSchema,
+  AiRunCancelRequestSchema,
+  AiRunStartRequestSchema,
+  AiSecretClearRequestSchema,
+  AiSecretGetRequestSchema,
+  AiSecretSetRequestSchema,
+  AiSemanticIndexRequestSchema,
+  AiSettingsSetRequestSchema,
   ClipboardWriteRichRequestSchema,
   DocumentParseRequestSchema,
   EmptySchema,
@@ -12,6 +29,9 @@ import {
   ExternalFileReadRequestSchema,
   ExternalFileWriteAtomicRequestSchema,
   FileCreateRequestSchema,
+  FileHistoryCreateRequestSchema,
+  FileHistoryListRequestSchema,
+  FileHistoryReadRequestSchema,
   FileListTreeRequestSchema,
   FileReadRequestSchema,
   FileRenameRequestSchema,
@@ -33,6 +53,8 @@ import {
 } from "../shared/ipc";
 import { parseMarkdown } from "../shared/markdown";
 import { AttachmentService } from "./services/attachmentService";
+import { AiService } from "./ai/aiService";
+import { AiTaskService } from "./ai/aiTaskService";
 import { DiagnosticsService } from "./services/diagnosticsService";
 import { ExportService } from "./services/exportService";
 import { FileSystemService } from "./services/fileSystemService";
@@ -49,6 +71,8 @@ interface IpcServices {
   settings: SettingsService;
   diagnostics: DiagnosticsService;
   plugins: PluginService;
+  ai: AiService;
+  aiTasks: AiTaskService;
   syncExtensionMenus: (menus: MenuContribution[]) => void;
 }
 
@@ -81,6 +105,9 @@ export function registerIpcHandlers(services: IpcServices): void {
   handle(IpcChannels.fileReadBinary, FileReadRequestSchema, (request) => services.files.readBinaryFile(request));
   handle(IpcChannels.fileWriteAtomic, FileWriteAtomicRequestSchema, (request) => services.files.writeAtomic(request));
   handle(IpcChannels.fileWriteBinaryAtomic, FileWriteBinaryAtomicRequestSchema, (request) => services.files.writeBinaryAtomic(request));
+  handle(IpcChannels.fileHistoryList, FileHistoryListRequestSchema, (request) => services.files.listHistory(request));
+  handle(IpcChannels.fileHistoryRead, FileHistoryReadRequestSchema, (request) => services.files.readHistory(request));
+  handle(IpcChannels.fileHistoryCreate, FileHistoryCreateRequestSchema, (request) => services.files.createHistorySnapshot(request));
   handle(IpcChannels.fileCreate, FileCreateRequestSchema, (request) => services.files.create(request));
   handle(IpcChannels.fileRename, FileRenameRequestSchema, (request) => services.files.rename(request));
   handle(IpcChannels.fileTrash, FileTrashRequestSchema, (request) => services.files.trash(request));
@@ -121,6 +148,33 @@ export function registerIpcHandlers(services: IpcServices): void {
     services.syncExtensionMenus(request.menus);
     return { ok: true };
   });
+  handle(IpcChannels.aiSettingsGet, EmptySchema, () => services.ai.getSettings());
+  handle(IpcChannels.aiSettingsSet, AiSettingsSetRequestSchema, (request) => services.ai.setSettings(request));
+  handle(IpcChannels.aiSecretSet, AiSecretSetRequestSchema, (request) => services.ai.setSecret(request));
+  handle(IpcChannels.aiSecretClear, AiSecretClearRequestSchema, (request) => services.ai.clearSecret(request));
+  handle(IpcChannels.aiSecretGet, AiSecretGetRequestSchema, (request) => services.ai.getSecret(request));
+  handle(IpcChannels.aiProviderTest, AiProviderTestRequestSchema, (request) => services.ai.testProvider(request));
+  handle(IpcChannels.aiModelsList, AiModelsListRequestSchema, (request) => services.ai.listModels(request));
+  handle(IpcChannels.aiEmbeddingTest, AiEmbeddingTestRequestSchema, (request) => services.ai.testEmbedding(request));
+  handle(IpcChannels.aiSemanticIndexStatus, AiSemanticIndexRequestSchema, (request) => services.ai.semanticIndexStatus(request));
+  handle(IpcChannels.aiSemanticIndexUpdate, AiSemanticIndexRequestSchema, (request) => services.ai.updateSemanticIndex(request, false));
+  handle(IpcChannels.aiSemanticIndexReset, AiSemanticIndexRequestSchema, (request) => services.ai.updateSemanticIndex(request, true));
+  handle(IpcChannels.aiRunStart, AiRunStartRequestSchema, (request) => services.ai.startRun(request));
+  handle(IpcChannels.aiRunCancel, AiRunCancelRequestSchema, (request) => services.ai.cancelRun(request));
+  handle(IpcChannels.aiTaskStart, AiTaskStartRequestSchema, (request) => services.aiTasks.start(request));
+  handle(IpcChannels.aiTaskList, EmptySchema, () => services.aiTasks.list());
+  handle(IpcChannels.aiTaskRead, AiTaskReadRequestSchema, (request) => services.aiTasks.read(request));
+  handle(IpcChannels.aiTaskResume, AiTaskResumeRequestSchema, (request) => services.aiTasks.resume(request));
+  handle(IpcChannels.aiTaskCancel, AiTaskCancelRequestSchema, (request) => services.aiTasks.cancel(request));
+  handle(IpcChannels.aiTaskApproveProposal, AiTaskApprovalRequestSchema, (request) => services.aiTasks.approveProposal(request));
+  handle(IpcChannels.aiTaskRejectProposal, AiTaskRejectRequestSchema, (request) => services.aiTasks.rejectProposal(request));
+  handle(IpcChannels.aiTaskUndoWrite, AiTaskUndoWriteRequestSchema, (request) => services.aiTasks.undoWrite(request));
+  if (process.env.NOLIA_E2E_TEST_HOOKS === "1") {
+    ipcMain.handle("ai.test.emitRunEvent", (event, payload: unknown) => {
+      event.sender.send(IpcChannels.aiRunEvent, payload);
+      return { ok: true };
+    });
+  }
   handle(IpcChannels.diagnosticsOpenLogs, EmptySchema, () => shell.openPath(services.diagnostics.logRoot));
 }
 

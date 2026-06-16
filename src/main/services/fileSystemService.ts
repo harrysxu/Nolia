@@ -6,6 +6,8 @@ import { lookup as lookupMime } from "mime-types";
 
 import type {
   FileBinaryReadResponse,
+  FileHistoryEntry,
+  FileHistoryReadResponse,
   FileReadResponse,
   FileStatInfo,
   FileTreeNode,
@@ -15,6 +17,9 @@ import type {
   ExternalFileReadRequest,
   ExternalFileWriteAtomicRequest,
   FileCreateRequest,
+  FileHistoryCreateRequest,
+  FileHistoryListRequest,
+  FileHistoryReadRequest,
   FileListTreeRequest,
   FileReadRequest,
   FileRenameRequest,
@@ -82,6 +87,30 @@ export class FileSystemService {
       sha256: sha256Buffer(bytes),
       encoding: "binary",
       mimeType: lookupMime(absolutePath) || undefined
+    };
+  }
+
+  async listHistory(request: FileHistoryListRequest): Promise<{ entries: FileHistoryEntry[] }> {
+    const runtime = this.workspaces.requireWorkspace(request.workspaceId);
+    return {
+      entries: this.history.listSnapshots(runtime.db, request.pathRel, request.limit)
+    };
+  }
+
+  async readHistory(request: FileHistoryReadRequest): Promise<FileHistoryReadResponse | undefined> {
+    const runtime = this.workspaces.requireWorkspace(request.workspaceId);
+    return this.history.readSnapshot(runtime.info.rootPath, runtime.db, request.snapshotId);
+  }
+
+  async createHistorySnapshot(request: FileHistoryCreateRequest): Promise<{ entry?: FileHistoryEntry }> {
+    const runtime = this.workspaces.requireWorkspace(request.workspaceId);
+    const normalized = normalizePathRel(request.pathRel);
+    const snapshotPath = await this.history.createSnapshot(runtime.info.rootPath, runtime.db, normalized, request.reason ?? "manual", request.content);
+    if (!snapshotPath) {
+      return {};
+    }
+    return {
+      entry: runtime.db.listSnapshots(normalized, 1).find((entry) => entry.snapshotPath === snapshotPath)
     };
   }
 

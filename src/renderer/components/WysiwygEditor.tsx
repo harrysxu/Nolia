@@ -128,6 +128,8 @@ export interface WysiwygEditorHandle {
   undoEdit: () => boolean;
   redoEdit: () => boolean;
   scrollToHeading: (headingIndex: number) => boolean;
+  replaceMarkdownDocument: (content: string) => Promise<boolean>;
+  getAiSnapshot: () => { selectionText: string; canReplaceSelection: false } | undefined;
 }
 
 type TableDialogState = {
@@ -847,8 +849,29 @@ export const WysiwygEditor = forwardRef<WysiwygEditorHandle, WysiwygEditorProps>
       markUserEditIntent();
       return editor.chain().focus().redo().run();
     },
-    scrollToHeading: (headingIndex: number) => scrollToEditorHeading(editor, headingIndex)
-  }), [editor]);
+    scrollToHeading: (headingIndex: number) => scrollToEditorHeading(editor, headingIndex),
+    replaceMarkdownDocument: async (content: string) => {
+      if (!editor) {
+        return false;
+      }
+      const renderedHtml = await renderMarkdownToHtml(content);
+      const editableHtml = normalizeRenderedHtmlForWysiwyg(renderedHtml, { workspaceId, documentPathRel });
+      markUserEditIntent();
+      const applied = editor.chain().focus().setMeta("noliaUserEdit", true).setContent(editableHtml, { emitUpdate: true, errorOnInvalidContent: false }).run();
+      if (applied) {
+        const nextHtml = editor.getHTML();
+        lastEmittedHtml.current = nextHtml;
+        onChange(nextHtml);
+      }
+      return applied;
+    },
+    getAiSnapshot: () => {
+      if (!editor) {
+        return undefined;
+      }
+      return { selectionText: selectedText(editor.state), canReplaceSelection: false };
+    }
+  }), [documentPathRel, editor, onChange, workspaceId]);
 
   useEffect(() => {
     if (!editor) {

@@ -1,4 +1,5 @@
 import { expect, test, type Locator } from "@playwright/test";
+import { DEFAULT_SETTINGS } from "../../src/shared/constants";
 import type { AppSettings, FileTreeNode, ParsedDocument, RecentWorkspace, WorkspaceInfo } from "../../src/shared/types";
 import { installMockNolia } from "./helpers/mockNolia";
 
@@ -6,6 +7,7 @@ const shortcutModifier = process.platform === "darwin" ? "Meta" : "Control";
 const shortcut = (key: string) => `${shortcutModifier}+${key}`;
 
 const settings: AppSettings = {
+  ...DEFAULT_SETTINGS,
   language: "zh-CN",
   theme: "light",
   editorMode: "wysiwyg",

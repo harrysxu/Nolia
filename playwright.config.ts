@@ -11,7 +11,7 @@ export default defineConfig({
     trace: "on-first-retry"
   },
   webServer: {
-    command: "npm run dev:renderer -- --port 4273 --strictPort",
+    command: "cross-env VITE_NOLIA_AI_WATCHDOG_MS=800 npm run dev:renderer -- --port 4273 --strictPort",
     url: "http://localhost:4273",
     reuseExistingServer: false,
     timeout: 120_000
