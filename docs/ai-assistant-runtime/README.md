@@ -1,32 +1,68 @@
 # AI Assistant Runtime
 
-本目录用于沉淀 Nolia AI Assistant 与底层 AI Runtime 的产品、技术、隐私、安全和测试文档。
+更新日期：2026-06-19
 
-当前实现已经从早期 V1 规划演进为基于 Vercel AI SDK Core 的 agent runtime。阅读顺序建议先看当前事实来源，再看历史规划。
+本目录是 Nolia AI Assistant 与底层 AI Runtime 的唯一文档入口。当前实现已经演进为基于 Vercel AI SDK Core 的 agent runtime；后续开发、测试和提交自查优先以这里的当前事实文档为准。
 
-## 文档索引
+## 阅读顺序
 
-### 当前实现与交接
+1. [当前实现说明](CURRENT_IMPLEMENTATION.md)：代码已落地的 AI 设置、Provider、agent loop、工具、权限、写入、历史和语义索引。
+2. [语义索引与 RAG](SEMANTIC_INDEX_AND_RAG.md)：embedding、手动索引、全文检索降级、回答前读取真实文件和后续 hybrid retrieval 设计。
+3. [测试交接](TEST_HANDOFF.md)：开发环境启动、模型配置、手动验证、自动化验证和日志检查流程。
+4. [深度测试用例](DEEP_AI_TEST_CASES.md)：语义索引、AI Chat、工作区操作、历史任务、权限边界和桌面页面测试矩阵。
 
-- [文档总览](DOCUMENTATION_SUMMARY.md)：汇总本目录所有 AI 文档、当前事实来源、后续测试入口和提交前状态。
-- [当前实现说明](CURRENT_IMPLEMENTATION.md)：当前代码已经落地的 AI Assistant、Agent Runtime、工具、权限、写入、语义索引和测试状态。
-- [测试交接](TEST_HANDOFF.md)：换位置继续测试时的启动、模型配置、UI 手动验证、自动化验证和日志检查流程。
-- [语义索引与 RAG](SEMANTIC_INDEX_AND_RAG.md)：embedding、手动索引、全文检索降级、回答前读取实际文件和后续 hybrid retrieval 设计。
-- [GitHub 提交说明](GITHUB_SUBMISSION_NOTES.md)：提交远端前的敏感信息检查、生成物排除、PR 描述和后续测试重点。
+## 当前范围
 
-### V1 历史规划与阶段报告
+当前已实现：
 
-- [V1 需求规划](V1_REQUIREMENTS.md)：第一个 AI 版本的产品范围、运行时边界、验收标准和里程碑。
-- [V1 技术方案](V1_TECHNICAL_DESIGN.md)：早期 AI Runtime、Provider、Tool Registry、IPC、上下文、Patch 和安全实现方案。
-- [V1 UI/UX 方案](V1_UI_UX_DESIGN.md)：AI 设置、侧边栏、选中文本操作、上下文透明度和写入确认体验。
-- [V1 UI/UX Review](V1_UI_UX_REVIEW.md)：第一次用户视角走查，记录早期问题和改进方向。
-- [V1 综合测试报告](V1_COMPREHENSIVE_TEST_REPORT.md)：阶段性真实 Provider、UI live workflow、自动化回归和视觉检查结果。
-- [V1 开发进度](V1_DEVELOPMENT_PROGRESS.md)：2026-06-13 阶段实现范围、测试结果、预览安装状态、已知限制和下一步。
+- OpenAI-compatible 和 Ollama provider，多模型配置、禁用、删除和默认模型选择。
+- 聊天、多轮上下文、选中文本操作和当前文档总结。
+- 工作区搜索、读取搜索命中文档、读取整个工作区文本文件、标签、大纲和反链工具。
+- 当前文档和工作区 Markdown 创建/修改 proposal；所有写入必须由用户确认。
+- AI task 持久化、审批、拒绝、写入事务、历史版本和撤销。
+- 手动配置 embedding 模型并创建、更新、清空语义索引；不可用时降级到全文检索。
+- 可见错误：缺权限、缺 API key、空回复、超时、工具失败和 provider 异常不应静默。
+
+当前仍有限制：
+
+- 不是完全自治 agent，删除、重命名、移动、执行 shell、外部连接器、图片/音频处理不在当前支持范围。
+- 语义索引由用户手动创建和更新，不自动调用 embedding。
+- 语义检索还不是完整 hybrid rerank。
+- 长期聊天历史不跨重启持久化。
+- Renderer AI 状态仍有较多逻辑集中在 `App.tsx`，后续应继续拆分。
+
+## 提交自查
+
+提交前确认不要包含：
+
+- API key、私有 OpenAI-compatible Base URL、真实用户 workspace 内容。
+- 临时 userData、`.tmp/`、日志、截图、`dist/`、`release/`、`test-results/`、`coverage/`、`playwright-report/`、`output/`、`node_modules/`。
+
+建议检查：
+
+```sh
+git diff -- docs src tests package.json package-lock.json playwright.config.ts
+rg -n "sk-|api[_-]?key|Authorization|Bearer|nolia-ai-sdk-userdata" docs src tests package.json playwright.config.ts
+```
+
+提交前至少运行：
+
+```sh
+npm run typecheck
+npm run lint
+npm test
+```
+
+如果改动 UI、IPC、AI runtime、文件系统、历史版本或打包配置，再运行：
+
+```sh
+npm run e2e
+npm run build
+```
 
 ## 维护原则
 
-- AI 文档统一放在本目录，避免散落到用户手册、架构文档和插件文档中。
-- `CURRENT_IMPLEMENTATION.md` 是当前代码状态的事实来源；V1 规划和阶段报告保留历史上下文。
-- 需求文档描述用户价值、交互范围和验收标准；技术方案文档描述模块、IPC、数据结构和实现步骤。
-- AI 能力默认按本地优先和显式授权设计：用户不启用 AI 时不发送任何笔记内容到外部服务。
+- `CURRENT_IMPLEMENTATION.md` 是当前代码状态的事实来源；过时规划和一次性报告不进入发布文档。
+- 测试策略以 `TEST_HANDOFF.md` 和 `DEEP_AI_TEST_CASES.md` 为入口，避免把一次性脚本当作长期流程。
+- AI 能力默认本地优先和显式授权：用户不启用 AI 或未授予权限时，不发送对应笔记内容到外部服务。
 - 所有写入类 AI 能力必须走确认或提案机制，不允许模型直接修改用户笔记。

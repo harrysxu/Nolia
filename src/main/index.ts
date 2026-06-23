@@ -24,6 +24,7 @@ import { WorkspaceService } from "./services/workspaceService";
 import { registerIpcHandlers } from "./ipc";
 import { createMainWindow } from "./mainWindow";
 import { installApplicationMenu } from "./menu";
+import { resolveWorkspaceUserPath } from "./utils/filePaths";
 
 let mainWindow: BrowserWindow | undefined;
 let externalFileReceiverWindowId: number | undefined;
@@ -212,22 +213,22 @@ function registerAssetProtocol(workspaces: WorkspaceService, files: FileSystemSe
   protocol.handle(ASSET_PROTOCOL, async (request) => {
     const url = new URL(request.url);
     let filePath: string;
-    if (url.hostname === EXTERNAL_ASSET_HOST) {
-      const requestedPath = decodeURIComponent(url.pathname);
-      filePath = files.resolveExternalAssetPath(requestedPath);
-    } else {
-      const pathSegments = url.pathname.replace(/^\/+/, "").split("/").filter(Boolean);
-      const workspaceId = url.hostname === "workspace" ? decodeURIComponent(pathSegments.shift() ?? "") : url.hostname;
-      const runtime = workspaces.requireWorkspace(workspaceId);
-      const requestedPath =
-        url.hostname === "workspace"
-          ? pathSegments.map((segment) => decodeURIComponent(segment)).join("/")
-          : decodeURIComponent(url.pathname).replace(/^\/+/, "");
-      const normalizedPath = path.normalize(requestedPath);
-      if (normalizedPath.startsWith("..") || path.isAbsolute(normalizedPath)) {
-        return new Response("Not found", { status: 404 });
+    try {
+      if (url.hostname === EXTERNAL_ASSET_HOST) {
+        const requestedPath = decodeURIComponent(url.pathname);
+        filePath = files.resolveExternalAssetPath(requestedPath);
+      } else {
+        const pathSegments = url.pathname.replace(/^\/+/, "").split("/").filter(Boolean);
+        const workspaceId = url.hostname === "workspace" ? decodeURIComponent(pathSegments.shift() ?? "") : url.hostname;
+        const runtime = workspaces.requireWorkspace(workspaceId);
+        const requestedPath =
+          url.hostname === "workspace"
+            ? pathSegments.map((segment) => decodeURIComponent(segment)).join("/")
+            : decodeURIComponent(url.pathname).replace(/^\/+/, "");
+        filePath = resolveWorkspaceUserPath(runtime.info.rootPath, requestedPath);
       }
-      filePath = path.join(runtime.info.rootPath, normalizedPath);
+    } catch {
+      return new Response("Not found", { status: 404 });
     }
     return fileResponse(filePath);
   });

@@ -32,8 +32,9 @@ import {
   fileKindForPath,
   isAlwaysIgnoredWorkspacePath,
   isMarkdownPath,
-  normalizePathRel,
   resolveWorkspacePath,
+  normalizeWorkspaceUserPath,
+  resolveWorkspaceUserPath,
   toWorkspaceRelative
 } from "../utils/filePaths";
 import { sha256Buffer, sha256Text } from "../utils/hash";
@@ -52,19 +53,19 @@ export class FileSystemService {
 
   async listTree(request: FileListTreeRequest): Promise<{ nodes: FileTreeNode[] }> {
     const runtime = this.workspaces.requireWorkspace(request.workspaceId);
-    const rootPath = resolveWorkspacePath(runtime.info.rootPath, request.root ?? "");
+    const rootPath = resolveWorkspaceUserPath(runtime.info.rootPath, request.root ?? "", { allowEmpty: true });
     const nodes = await readTree(runtime.info.rootPath, rootPath, request.showHidden ?? false);
     return { nodes: sortNodes(nodes, request.sortBy ?? "name") };
   }
 
   async readFile(request: FileReadRequest): Promise<FileReadResponse> {
     const runtime = this.workspaces.requireWorkspace(request.workspaceId);
-    const normalized = normalizePathRel(request.pathRel);
+    const normalized = normalizeWorkspaceUserPath(request.pathRel);
     const absolutePath = resolveWorkspacePath(runtime.info.rootPath, normalized);
     const content = await readFile(absolutePath, "utf8");
     const entryStat = await stat(absolutePath);
     runtime.db.touchRecentFile(normalized);
-    await runtime.db.save();
+    runtime.db.scheduleSave();
     return {
       content,
       stat: statInfo(entryStat),
@@ -75,12 +76,12 @@ export class FileSystemService {
 
   async readBinaryFile(request: FileReadRequest): Promise<FileBinaryReadResponse> {
     const runtime = this.workspaces.requireWorkspace(request.workspaceId);
-    const normalized = normalizePathRel(request.pathRel);
+    const normalized = normalizeWorkspaceUserPath(request.pathRel);
     const absolutePath = resolveWorkspacePath(runtime.info.rootPath, normalized);
     const bytes = await readFile(absolutePath);
     const entryStat = await stat(absolutePath);
     runtime.db.touchRecentFile(normalized);
-    await runtime.db.save();
+    runtime.db.scheduleSave();
     return {
       data: bufferToArrayBuffer(bytes),
       stat: statInfo(entryStat),
@@ -92,8 +93,9 @@ export class FileSystemService {
 
   async listHistory(request: FileHistoryListRequest): Promise<{ entries: FileHistoryEntry[] }> {
     const runtime = this.workspaces.requireWorkspace(request.workspaceId);
+    const normalized = normalizeWorkspaceUserPath(request.pathRel);
     return {
-      entries: this.history.listSnapshots(runtime.db, request.pathRel, request.limit)
+      entries: this.history.listSnapshots(runtime.db, normalized, request.limit)
     };
   }
 
@@ -104,7 +106,7 @@ export class FileSystemService {
 
   async createHistorySnapshot(request: FileHistoryCreateRequest): Promise<{ entry?: FileHistoryEntry }> {
     const runtime = this.workspaces.requireWorkspace(request.workspaceId);
-    const normalized = normalizePathRel(request.pathRel);
+    const normalized = normalizeWorkspaceUserPath(request.pathRel);
     const snapshotPath = await this.history.createSnapshot(runtime.info.rootPath, runtime.db, normalized, request.reason ?? "manual", request.content);
     if (!snapshotPath) {
       return {};
@@ -129,7 +131,7 @@ export class FileSystemService {
 
   async writeAtomic(request: FileWriteAtomicRequest): Promise<FileWriteResponse> {
     const runtime = this.workspaces.requireWorkspace(request.workspaceId);
-    const normalized = normalizePathRel(request.pathRel);
+    const normalized = normalizeWorkspaceUserPath(request.pathRel);
     const absolutePath = resolveWorkspacePath(runtime.info.rootPath, normalized);
     await mkdir(path.dirname(absolutePath), { recursive: true });
 
@@ -176,7 +178,7 @@ export class FileSystemService {
 
   async writeBinaryAtomic(request: FileWriteBinaryAtomicRequest): Promise<FileWriteResponse> {
     const runtime = this.workspaces.requireWorkspace(request.workspaceId);
-    const normalized = normalizePathRel(request.pathRel);
+    const normalized = normalizeWorkspaceUserPath(request.pathRel);
     const absolutePath = resolveWorkspacePath(runtime.info.rootPath, normalized);
     await mkdir(path.dirname(absolutePath), { recursive: true });
 
@@ -264,7 +266,7 @@ export class FileSystemService {
 
   async create(request: FileCreateRequest): Promise<{ ok: boolean; affectedPaths: string[] }> {
     const runtime = this.workspaces.requireWorkspace(request.workspaceId);
-    const normalized = normalizePathRel(request.pathRel);
+    const normalized = normalizeWorkspaceUserPath(request.pathRel);
     const absolutePath = resolveWorkspacePath(runtime.info.rootPath, normalized);
     if (request.kind === "directory") {
       await mkdir(absolutePath, { recursive: true });
@@ -278,8 +280,8 @@ export class FileSystemService {
 
   async rename(request: FileRenameRequest): Promise<{ ok: boolean; affectedPaths: string[]; referenceUpdate?: { updated: number } }> {
     const runtime = this.workspaces.requireWorkspace(request.workspaceId);
-    const source = normalizePathRel(request.sourcePathRel);
-    const target = normalizePathRel(request.targetPathRel);
+    const source = normalizeWorkspaceUserPath(request.sourcePathRel);
+    const target = normalizeWorkspaceUserPath(request.targetPathRel);
     const sourcePath = resolveWorkspacePath(runtime.info.rootPath, source);
     const targetPath = resolveWorkspacePath(runtime.info.rootPath, target);
     await mkdir(path.dirname(targetPath), { recursive: true });
@@ -295,7 +297,7 @@ export class FileSystemService {
 
   async trash(request: FileTrashRequest): Promise<{ ok: boolean; affectedPaths: string[] }> {
     const runtime = this.workspaces.requireWorkspace(request.workspaceId);
-    const normalized = normalizePathRel(request.pathRel);
+    const normalized = normalizeWorkspaceUserPath(request.pathRel);
     const absolutePath = resolveWorkspacePath(runtime.info.rootPath, normalized);
     try {
       await shell.trashItem(absolutePath);
@@ -329,7 +331,7 @@ export class FileSystemService {
 
   private resolveResourcePath(request: FileResourceActionRequest): string {
     const runtime = this.workspaces.requireWorkspace(request.workspaceId);
-    const normalized = normalizePathRel(request.pathRel);
+    const normalized = normalizeWorkspaceUserPath(request.pathRel);
     return resolveWorkspacePath(runtime.info.rootPath, normalized);
   }
 

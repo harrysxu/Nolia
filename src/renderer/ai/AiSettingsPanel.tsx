@@ -30,10 +30,10 @@ interface AiSettingsPanelProps {
   onListModels: (provider: AiProviderProfile, apiKey?: string) => Promise<AiModelDescriptor[]>;
   workspaceId?: string;
   semanticStatus?: AiSemanticIndexStatus;
-  onRefreshSemanticStatus?: () => Promise<void>;
+  onRefreshSemanticStatus?: (settings?: AiEmbeddingSettings, apiKey?: string) => Promise<void>;
   onTestEmbedding?: (settings: AiEmbeddingSettings, apiKey?: string) => Promise<AiProviderTestResult>;
-  onUpdateSemanticIndex?: () => Promise<AiSemanticIndexStatus | undefined>;
-  onResetSemanticIndex?: () => Promise<AiSemanticIndexStatus | undefined>;
+  onUpdateSemanticIndex?: (settings: AiEmbeddingSettings, apiKey?: string) => Promise<AiSemanticIndexStatus | undefined>;
+  onResetSemanticIndex?: (settings: AiEmbeddingSettings, apiKey?: string) => Promise<AiSemanticIndexStatus | undefined>;
 }
 
 type ModelDialogMode = "create" | "edit";
@@ -67,9 +67,12 @@ export function AiSettingsPanel({
   const [embeddingApiKeyVisible, setEmbeddingApiKeyVisible] = useState(false);
   const [busy, setBusy] = useState(false);
   const [semanticBusy, setSemanticBusy] = useState<"test" | "update" | "reset" | undefined>();
+  const [localSemanticStatus, setLocalSemanticStatus] = useState<AiSemanticIndexStatus | undefined>();
   const refreshSemanticStatusRef = useRef(onRefreshSemanticStatus);
 
   const embedding = useMemo(() => normalizeAiEmbeddingSettings(settings.embedding, DEFAULT_AI_EMBEDDING_SETTINGS), [settings.embedding]);
+  const displayedSemanticStatus = localSemanticStatus ?? semanticStatus;
+  const semanticUpdating = Boolean(displayedSemanticStatus?.progress);
   const activeEnabledProvider = useMemo(() => settings.providers.find((provider) => provider.id === settings.defaultProviderId && !provider.disabled), [settings.defaultProviderId, settings.providers]);
   const defaultProviderId = activeEnabledProvider?.id ?? settings.providers.find((provider) => !provider.disabled)?.id ?? settings.defaultProviderId;
 
@@ -97,6 +100,10 @@ export function AiSettingsPanel({
   useEffect(() => {
     void refreshSemanticStatusRef.current?.();
   }, [workspaceId, embedding.enabled, embedding.providerId, embedding.model, embedding.baseUrl, embedding.apiMode]);
+
+  useEffect(() => {
+    setLocalSemanticStatus(undefined);
+  }, [semanticStatus]);
 
   const updateProviders = (providers: Array<AiProviderProfile | AiProviderProfilePublic>, preferredDefaultId = defaultProviderId) => {
     const cleanProviders = providers.map(toProviderSettings);
@@ -262,8 +269,9 @@ export function AiSettingsPanel({
     }
     void runSemanticBusy(setSemanticBusy, "test", async () => {
       await saveEmbeddingSecretIfNeeded();
-      setEmbeddingResult(await onTestEmbedding(embedding, draftSemanticApiKeyForRequest(embeddingApiKeyDraft)));
-      await onRefreshSemanticStatus?.();
+      const apiKey = draftSemanticApiKeyForRequest(embeddingApiKeyDraft);
+      setEmbeddingResult(await onTestEmbedding(embedding, apiKey));
+      await onRefreshSemanticStatus?.(embedding, apiKey);
     });
   };
 
@@ -274,8 +282,9 @@ export function AiSettingsPanel({
     void runSemanticBusy(setSemanticBusy, "update", async () => {
       await saveEmbeddingSecretIfNeeded();
       setEmbeddingResult(undefined);
-      await onUpdateSemanticIndex();
-      await onRefreshSemanticStatus?.();
+      const apiKey = draftSemanticApiKeyForRequest(embeddingApiKeyDraft);
+      const status = await onUpdateSemanticIndex(embedding, apiKey);
+      setLocalSemanticStatus(status);
     });
   };
 
@@ -286,10 +295,22 @@ export function AiSettingsPanel({
     void runSemanticBusy(setSemanticBusy, "reset", async () => {
       await saveEmbeddingSecretIfNeeded();
       setEmbeddingResult(undefined);
-      await onResetSemanticIndex();
-      await onRefreshSemanticStatus?.();
+      const apiKey = draftSemanticApiKeyForRequest(embeddingApiKeyDraft);
+      const status = await onResetSemanticIndex(embedding, apiKey);
+      setLocalSemanticStatus(status);
     });
   };
+
+  useEffect(() => {
+    if (!displayedSemanticStatus?.progress || !onRefreshSemanticStatus) {
+      return undefined;
+    }
+    const apiKey = draftSemanticApiKeyForRequest(embeddingApiKeyDraft);
+    const timer = window.setInterval(() => {
+      void onRefreshSemanticStatus(embedding, apiKey);
+    }, 1000);
+    return () => window.clearInterval(timer);
+  }, [displayedSemanticStatus?.progress, embedding, embeddingApiKeyDraft, onRefreshSemanticStatus]);
 
   return (
     <div className="settings-tab-content ai-settings-panel">
@@ -329,6 +350,7 @@ export function AiSettingsPanel({
                 <div>
                   <strong>{modelDisplayName(provider)}</strong>
                   <span>
+                    {provider.model}
                     {provider.apiMode === "responses" ? ` · ${tr("Responses 格式")}` : provider.apiMode === "chat-completions" ? ` · ${tr("Chat Completions 格式")}` : ""}
                   </span>
                 </div>
@@ -363,10 +385,10 @@ export function AiSettingsPanel({
             <p>{tr("手动配置 embedding 模型后创建索引；AI 回答前仍会读取当前文件内容做校验。")}</p>
           </div>
           <div className="ai-title-actions">
-            <button type="button" className="secondary-button" disabled={!workspaceId || semanticBusy === "update" || semanticBusy === "reset"} onClick={updateSemanticIndex}>
-              <RefreshCw size={14} /> {tr("更新语义索引")}
+            <button type="button" className="secondary-button" disabled={!workspaceId || semanticBusy === "update" || semanticBusy === "reset" || semanticUpdating} onClick={updateSemanticIndex}>
+              <RefreshCw size={14} /> {tr("创建/更新语义索引")}
             </button>
-            <button type="button" className="secondary-button" disabled={!workspaceId || semanticBusy === "update" || semanticBusy === "reset"} onClick={resetSemanticIndex}>
+            <button type="button" className="secondary-button" disabled={!workspaceId || semanticBusy === "update" || semanticBusy === "reset" || semanticUpdating} onClick={resetSemanticIndex}>
               <RotateCcw size={14} /> {tr("清空并重建")}
             </button>
           </div>
@@ -394,8 +416,8 @@ export function AiSettingsPanel({
           </label>
           <label className="setting-row">
             <span>{tr("索引状态")}</span>
-            <span className={`ai-semantic-status is-${semanticStatus?.state ?? "not_created"}`}>
-              <Search size={14} /> {semanticStatusLabel(semanticStatus, tr)}
+            <span className={`ai-semantic-status is-${displayedSemanticStatus?.state ?? "not_created"}`}>
+              <Search size={14} /> {semanticStatusLabel(displayedSemanticStatus, tr)}
             </span>
           </label>
           {embedding.providerId === "openai-compatible" ? (
@@ -454,10 +476,10 @@ export function AiSettingsPanel({
         </div>
 
         <div className="ai-semantic-summary">
-          <span>{tr("文件：{indexed}/{total}", { indexed: semanticStatus?.indexedFiles ?? 0, total: semanticStatus?.totalFiles ?? 0 })}</span>
-          <span>{tr("分块：{count}", { count: semanticStatus?.chunkCount ?? 0 })}</span>
-          <span>{tr("过期：{count}", { count: semanticStatus?.staleFiles ?? 0 })}</span>
-          {semanticStatus?.progress ? <span>{tr("进度：{current}/{total}", { current: semanticStatus.progress.current, total: semanticStatus.progress.total })}</span> : null}
+          <span>{tr("文件：{indexed}/{total}", { indexed: displayedSemanticStatus?.indexedFiles ?? 0, total: displayedSemanticStatus?.totalFiles ?? 0 })}</span>
+          <span>{tr("分块：{count}", { count: displayedSemanticStatus?.chunkCount ?? 0 })}</span>
+          <span>{tr("过期：{count}", { count: displayedSemanticStatus?.staleFiles ?? 0 })}</span>
+          {displayedSemanticStatus?.progress ? <span>{tr("进度：{current}/{total}", { current: displayedSemanticStatus.progress.current, total: displayedSemanticStatus.progress.total })}</span> : null}
         </div>
 
         <div className="ai-model-dialog-tools">
@@ -465,11 +487,11 @@ export function AiSettingsPanel({
             <TestTube2 size={14} /> {tr("测试 embedding")}
           </button>
           <button type="button" className="secondary-button" disabled={!onRefreshSemanticStatus || semanticBusy !== undefined} onClick={() => void onRefreshSemanticStatus?.()}>
-            <RefreshCw size={14} /> {tr("刷新状态")}
+            <RefreshCw size={14} /> {tr("检查索引状态")}
           </button>
         </div>
         {embeddingResult ? <div className={`plugin-empty-state ${embeddingResult.ok ? "is-ok" : "is-warning"}`} role="status">{embeddingResult.message}</div> : null}
-        {semanticStatus?.error ? <div className="plugin-empty-state is-warning" role="status">{semanticStatus.error}</div> : null}
+        {displayedSemanticStatus?.error ? <div className="plugin-empty-state is-warning" role="status">{displayedSemanticStatus.error}</div> : null}
       </section>
 
       <section className="ai-settings-section ai-security-section">
@@ -690,14 +712,19 @@ function ModelDialog({
           <label className="setting-row ai-model-field-span">
             <span><RequiredMark /> {tr("模型 ID")}</span>
             {modelOptions.length ? (
-              <select value={draft.model} onChange={(event) => onUpdate({ model: event.target.value, name: event.target.value })}>
+              <select value={draft.model} onChange={(event) => onUpdate({ model: event.target.value })}>
                 <option value="">{tr("选择模型")}</option>
                 {modelOptions.map((model) => <option key={model.id} value={model.id}>{model.label ?? model.id}</option>)}
                 {draft.model && !modelOptions.some((model) => model.id === draft.model) ? <option value={draft.model}>{draft.model}</option> : null}
               </select>
             ) : (
-              <input value={draft.model} onChange={(event) => onUpdate({ model: event.target.value, name: event.target.value })} placeholder={draft.providerId === "ollama" ? "llama3.2" : "gpt-4.1"} />
+              <input value={draft.model} onChange={(event) => onUpdate({ model: event.target.value })} placeholder={draft.providerId === "ollama" ? "llama3.2" : "gpt-4.1"} />
             )}
+          </label>
+
+          <label className="setting-row ai-model-field-span">
+            <span>{tr("模型别名")}</span>
+            <input value={draft.alias ?? ""} onChange={(event) => onUpdate({ alias: event.target.value })} maxLength={32} placeholder={draft.model || tr("未设置时显示模型 ID")} />
           </label>
 
           {draft.providerId === "openai-compatible" ? (
@@ -742,14 +769,6 @@ function ModelDialog({
             <p className="ai-context-note ai-model-field-span">{tr("本地 Ollama 不需要 API key，Nolia 只会请求你的本机服务。")}</p>
           )}
 
-          <details className="ai-advanced-config ai-model-field-span">
-            <summary>{tr("高级配置")}</summary>
-            <label className="setting-row">
-              <span>{tr("模型展示名称")}</span>
-              <input value={draft.name} onChange={(event) => onUpdate({ name: event.target.value })} maxLength={32} placeholder={draft.model || tr("模型展示名称")} />
-            </label>
-          </details>
-
           <div className="ai-model-dialog-tools ai-model-field-span">
             <button type="button" className="secondary-button" disabled={busy} onClick={onRefreshModels}>
               <RefreshCw size={14} /> {tr("刷新模型")}
@@ -784,6 +803,7 @@ function toDraft(provider: AiProviderProfile | AiProviderProfilePublic, apiKeyDr
   return {
     id: provider.id,
     name: provider.name,
+    alias: provider.alias,
     providerId: provider.providerId,
     model: provider.model,
     baseUrl: provider.baseUrl,
@@ -805,7 +825,7 @@ function normalizeDraftPatch(draft: ModelDraft, patch: Partial<ModelDraft>): Mod
     ...patch,
     providerId,
     model,
-    name: patch.name ?? (patch.model ? patch.model : providerChanged ? createAiProviderProfile(providerId).name : draft.name),
+    name: patch.name ?? (providerChanged ? createAiProviderProfile(providerId).name : draft.name),
     baseUrl,
     apiMode,
     apiKeyDraft: providerId === "ollama" ? "" : patch.apiKeyDraft ?? (providerChanged ? "" : draft.apiKeyDraft),
@@ -815,10 +835,12 @@ function normalizeDraftPatch(draft: ModelDraft, patch: Partial<ModelDraft>): Mod
 
 function normalizeProviderForSave(draft: ModelDraft): AiProviderProfile {
   const model = draft.model.trim();
-  const name = draft.name.trim() || model || createAiProviderProfile(draft.providerId).name;
+  const name = draft.name.trim() || createAiProviderProfile(draft.providerId).name;
+  const alias = draft.alias?.trim();
   return {
     id: draft.id,
     name,
+    alias: alias || undefined,
     providerId: draft.providerId,
     model,
     baseUrl: draft.baseUrl.trim() || (draft.providerId === "ollama" ? "http://localhost:11434" : ""),
@@ -836,6 +858,7 @@ function toProviderSettings(provider: AiProviderProfile | AiProviderProfilePubli
   return {
     id: provider.id,
     name: provider.name,
+    alias: provider.alias,
     providerId: provider.providerId,
     model: provider.model,
     baseUrl: provider.baseUrl,
@@ -867,11 +890,8 @@ function normalizeConversationHistoryInput(value: string): number {
 }
 
 function modelDisplayName(provider: AiProviderProfile): string {
-  const name = provider.name.trim();
+  const name = provider.alias?.trim();
   const model = provider.model.trim();
-  if (model && (name === "OpenAI-compatible" || name === "Local Ollama" || !name)) {
-    return model;
-  }
   return name || model || "Untitled model";
 }
 

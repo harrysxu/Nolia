@@ -28,7 +28,7 @@ test("full workspace smoke covers startup, file workflow, search, settings, and 
 
   await page.getByRole("button", { name: "创建工作区" }).click();
   await expect(page.getByRole("navigation", { name: "工作区导航" })).toBeVisible();
-  await expect(page.locator(".breadcrumb strong")).toHaveText("alpha.md");
+  await expect(page.locator(".statusbar")).toContainText("alpha.md");
   await expect(page.locator(".source-editor .cm-content")).toContainText("中文搜索内容");
   await page.locator(".app-nav").getByRole("button", { name: "目录" }).click();
   await page.locator(".right-panel").getByRole("button", { name: "Deep Section" }).click();
@@ -40,7 +40,7 @@ test("full workspace smoke covers startup, file workflow, search, settings, and 
   await page.getByRole("menuitem", { name: "新建笔记" }).click();
   await page.getByRole("dialog", { name: "新建笔记" }).locator("input").fill("Release Smoke");
   await page.getByRole("dialog", { name: "新建笔记" }).getByRole("button", { name: "创建" }).click();
-  await expect(page.locator(".breadcrumb strong")).toHaveText("Release-Smoke.md");
+  await expect(page.locator(".statusbar")).toContainText("Release-Smoke.md");
   await expect
     .poll(() => page.evaluate(() => (window as typeof window & { __noliaMock: { createdPaths: string[] } }).__noliaMock.createdPaths))
     .toContain("Release-Smoke.md");
@@ -58,7 +58,7 @@ test("full workspace smoke covers startup, file workflow, search, settings, and 
   await page.getByRole("menuitem", { name: "重命名" }).click();
   await page.getByRole("dialog", { name: "重命名笔记" }).locator("input").fill("Renamed Smoke");
   await page.getByRole("dialog", { name: "重命名笔记" }).getByRole("button", { name: "保存" }).click();
-  await expect(page.locator(".breadcrumb strong")).toHaveText("Renamed-Smoke.md");
+  await expect(page.locator(".statusbar")).toContainText("Renamed-Smoke.md");
   await expect
     .poll(() => page.evaluate(() => (window as typeof window & { __noliaMock: { renamedPaths: Array<{ targetPathRel: string }> } }).__noliaMock.renamedPaths))
     .toContainEqual(expect.objectContaining({ targetPathRel: "Renamed-Smoke.md" }));
@@ -75,7 +75,7 @@ test("full workspace smoke covers startup, file workflow, search, settings, and 
   await expect(page.getByPlaceholder("搜索文件或资源")).toHaveValue("");
   await page.getByPlaceholder("搜索文件或资源").fill("");
   await page.getByRole("button", { name: "target.md", exact: true }).click();
-  await expect(page.locator(".breadcrumb strong")).toHaveText("target.md");
+  await expect(page.locator(".statusbar")).toContainText("target.md");
   await page.getByRole("button", { name: "命令面板" }).click();
   await page.getByPlaceholder("输入命令").fill("反向链接");
   await page.keyboard.press("Enter");

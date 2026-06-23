@@ -2,6 +2,7 @@ import { ArrowRight, CircleAlert, Clock3, FilePlus2, FolderOpen } from "lucide-r
 import type { RecentWorkspace, ResolvedLocale } from "../../shared/types";
 import { formatDate } from "../../shared/i18n";
 import { useRendererI18n } from "../app/i18n";
+import noliaIconUrl from "../../../build/icon.svg";
 
 interface WelcomeScreenProps {
   recentWorkspaces: RecentWorkspace[];
@@ -14,14 +15,37 @@ interface WelcomeScreenProps {
 
 export function WelcomeScreen({ recentWorkspaces, openingWorkspaceId, errorMessage, onOpenWorkspace, onCreateWorkspace, onOpenRecent }: WelcomeScreenProps) {
   const { locale, tr } = useRendererI18n();
+  const availableCount = recentWorkspaces.filter((workspace) => workspace.exists).length;
+  const unavailableCount = recentWorkspaces.length - availableCount;
   return (
     <div className="welcome-screen">
       <main className="welcome-content" aria-label="Nolia">
         <section className="welcome-intro">
-          <div className="welcome-eyebrow">{tr("本地 Markdown 工作台")}</div>
-          <div className="welcome-hero">
-            <h1>Nolia</h1>
-            <p>{tr("选择一个工作区继续整理文档。")}</p>
+          <div className="welcome-brand-lockup">
+            <img className="welcome-logo" src={noliaIconUrl} alt="" aria-hidden="true" />
+            <div>
+              <div className="welcome-eyebrow">{tr("本地 Markdown 工作台")}</div>
+              <div className="welcome-hero">
+                <h1>Nolia</h1>
+                <p>{tr("打开一个工作区，继续写作、整理和检索。")}</p>
+              </div>
+            </div>
+          </div>
+          <div className="welcome-summary">
+            <div className="welcome-snapshot" aria-label={tr("启动状态")}>
+              <span>
+                <strong>{recentWorkspaces.length}</strong>
+                <em>{tr("最近记录")}</em>
+              </span>
+              <span>
+                <strong>{availableCount}</strong>
+                <em>{tr("可打开")}</em>
+              </span>
+              <span className={unavailableCount ? "is-warning" : ""}>
+                <strong>{unavailableCount}</strong>
+                <em>{tr("需定位")}</em>
+              </span>
+            </div>
           </div>
           <div className="welcome-actions" aria-label={tr("工作区操作")}>
             <button type="button" className="primary-button" onClick={onOpenWorkspace}>

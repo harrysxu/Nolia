@@ -20,7 +20,7 @@ import type {
   AiToolApproval,
   AiWriteTransaction
 } from "../../shared/ai";
-import { isMarkdownPath, normalizePathRel } from "../utils/filePaths";
+import { isMarkdownPath, normalizeWorkspaceUserPath } from "../utils/filePaths";
 import { sha256Text } from "../utils/hash";
 import { AiService } from "./aiService";
 import type { AiRuntimeServices } from "./types";
@@ -158,7 +158,15 @@ export class AiTaskService {
       return task;
     }
     for (const operation of [...transaction.operations].reverse()) {
+      if (operation.movedPath && operation.targetPathRel) {
+        await this.services.files.rename({ workspaceId: transaction.workspaceId, sourcePathRel: operation.targetPathRel, targetPathRel: operation.pathRel });
+        continue;
+      }
       if (operation.createdFile) {
+        await this.services.files.trash({ workspaceId: transaction.workspaceId, pathRel: operation.pathRel });
+        continue;
+      }
+      if (operation.createdDirectory) {
         await this.services.files.trash({ workspaceId: transaction.workspaceId, pathRel: operation.pathRel });
         continue;
       }
@@ -188,6 +196,10 @@ export class AiTaskService {
 
   async recordEvent(event: AiRunEvent): Promise<void> {
     if (isTaskServiceEvent(event)) {
+      return;
+    }
+    if (!this.activeTaskIdsByRun.has(event.runId)) {
+      this.bufferPendingRunEvent(event);
       return;
     }
     const task = await this.taskForRun(event.runId);
@@ -269,6 +281,19 @@ export class AiTaskService {
     const operations = [];
     for (const operation of proposal.operations) {
       const pathRel = operationTargetPath(operation, proposal.pathRel);
+      if (operation.type === "createDirectory") {
+        if (!pathRel) {
+          throw new Error("AI workspace operation path is required.");
+        }
+        await this.services.files.create({ workspaceId: proposal.workspaceId, pathRel, kind: "directory" });
+        operations.push({ pathRel, beforeSnapshotId: undefined, beforeHash: "new", afterHash: "directory", createdDirectory: true });
+        continue;
+      }
+      if (operation.type === "movePath") {
+        await this.services.files.rename({ workspaceId: proposal.workspaceId, sourcePathRel: operation.sourcePathRel, targetPathRel: operation.targetPathRel });
+        operations.push({ pathRel: operation.sourcePathRel, targetPathRel: operation.targetPathRel, beforeHash: "move", afterHash: "move", movedPath: true });
+        continue;
+      }
       if (!pathRel || !isMarkdownPath(pathRel)) {
         throw new Error("AI 工作区操作只能修改 Markdown 文件。");
       }
@@ -438,7 +463,7 @@ function applyPatchOperation(current: string, operation: AiPatchOperation): stri
 
 function operationTargetPath(operation: AiPatchOperation, fallback: string): string {
   const pathRel = "pathRel" in operation && operation.pathRel ? operation.pathRel : fallback;
-  return normalizePathRel(pathRel);
+  return normalizeWorkspaceUserPath(pathRel);
 }
 
 function dedupeSources(sources: AiTaskSnapshot["sources"]): AiTaskSnapshot["sources"] {

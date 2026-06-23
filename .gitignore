@@ -1,26 +1,55 @@
+# Dependencies
 /node_modules/
+/.pnpm-store/
+
+# Build, package, and test output
 /dist/
 /release/
 /release-arch-compare/
 /output/
-.DS_Store
-.vite
 /coverage/
 /playwright-report/
 /test-results/
-*.log
+/.tmp/
+/.vite/
 tsup.config.bundled_*.mjs
 /index-*.js
+
+# Logs
+*.log
+/logs/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+dev-debug.log
 
 # Local environment and credentials
 .env
 .env.*
-!.env.example
 *.p12
+*.p8
 *.cer
+*.key
 *.certSigningRequest
 *.mobileprovision
 *.provisionprofile
 
+# Local tool state
+/.agents/
+/.codex/
+/.serena/
+/.taskmaster/
+
 # Private local notes that must not be published
-docs/private/
+/docs/private/
+
+# Editor and OS files
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+*.suo
+*.ntvs*
+*.njsproj
+*.sln
+*.sw?

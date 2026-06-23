@@ -216,6 +216,7 @@ test("enabled local plugin can edit and save a matched workspace file", async ({
       const testWindow = window as typeof window & {
         __savedPluginEditorContent?: string;
         __savedPluginEditorBaseHash?: string;
+        __savedPluginEditorCalls?: Array<{ content: string; baseHash: string }>;
       };
       const workspace: WorkspaceInfo = {
         workspaceId: "ws_plugin_editor",
@@ -277,6 +278,7 @@ test("enabled local plugin can edit and save a matched workspace file", async ({
           writeAtomic: async ({ content, baseHash }: { content: string; baseHash: string }) => {
             testWindow.__savedPluginEditorContent = content;
             testWindow.__savedPluginEditorBaseHash = baseHash;
+            testWindow.__savedPluginEditorCalls = [...(testWindow.__savedPluginEditorCalls ?? []), { content, baseHash }];
             return { status: "saved" as const, sha256: "json-saved", mtimeMs: Date.now() };
           },
           create: async () => ({ ok: true, affectedPaths: [] }),
@@ -321,7 +323,8 @@ test("enabled local plugin can edit and save a matched workspace file", async ({
   await page.getByRole("button", { name: "插件保存" }).click();
 
   await expect.poll(() => page.evaluate(() => (window as typeof window & { __savedPluginEditorContent?: string }).__savedPluginEditorContent)).toBe("{\n  \"title\": \"updated\"\n}");
-  await expect.poll(() => page.evaluate(() => (window as typeof window & { __savedPluginEditorBaseHash?: string }).__savedPluginEditorBaseHash)).toBe("json-base");
+  const editorSaveCalls = await page.evaluate(() => (window as typeof window & { __savedPluginEditorCalls?: Array<{ content: string; baseHash: string }> }).__savedPluginEditorCalls ?? []);
+  expect(editorSaveCalls.map((call) => call.baseHash)).toEqual(["json-base"]);
   await expect(page.locator(".statusbar")).toContainText("已保存");
 });
 
@@ -348,6 +351,7 @@ test("json editor plugin formats, validates, sorts, minifies, and autosaves JSON
       const testWindow = window as typeof window & {
         __savedJsonEditorContent?: string;
         __savedJsonEditorBaseHash?: string;
+        __savedJsonEditorCalls?: Array<{ content: string; baseHash: string }>;
       };
       const workspace: WorkspaceInfo = {
         workspaceId: "ws_json_editor_plugin",
@@ -409,6 +413,7 @@ test("json editor plugin formats, validates, sorts, minifies, and autosaves JSON
           writeAtomic: async ({ content, baseHash }: { content: string; baseHash: string }) => {
             testWindow.__savedJsonEditorContent = content;
             testWindow.__savedJsonEditorBaseHash = baseHash;
+            testWindow.__savedJsonEditorCalls = [...(testWindow.__savedJsonEditorCalls ?? []), { content, baseHash }];
             return { status: "saved" as const, sha256: "json-plugin-saved", mtimeMs: Date.now() };
           },
           create: async () => ({ ok: true, affectedPaths: [] }),
@@ -469,7 +474,10 @@ test("json editor plugin formats, validates, sorts, minifies, and autosaves JSON
 
   await textarea.fill("{\"ok\":true}");
   await expect.poll(() => page.evaluate(() => (window as typeof window & { __savedJsonEditorContent?: string }).__savedJsonEditorContent)).toBe("{\"ok\":true}");
-  await expect.poll(() => page.evaluate(() => (window as typeof window & { __savedJsonEditorBaseHash?: string }).__savedJsonEditorBaseHash)).toBe("json-plugin-base");
+  const jsonSaveCalls = await page.evaluate(() => (window as typeof window & { __savedJsonEditorCalls?: Array<{ content: string; baseHash: string }> }).__savedJsonEditorCalls ?? []);
+  expect(jsonSaveCalls[0]?.baseHash).toBe("json-plugin-base");
+  expect(jsonSaveCalls.slice(1).every((call) => call.baseHash === "json-plugin-saved")).toBe(true);
+  expect(jsonSaveCalls.at(-1)?.content).toBe("{\"ok\":true}");
   await expect(page.locator(".statusbar")).toContainText("已保存");
 });
 
@@ -527,6 +535,7 @@ test("enabled local plugin can edit and save a binary workspace file", async ({ 
       const testWindow = window as typeof window & {
         __savedBinaryBytes?: number[];
         __savedBinaryBaseHash?: string;
+        __savedBinaryCalls?: Array<{ bytes: number[]; baseHash: string }>;
       };
       const workspace: WorkspaceInfo = {
         workspaceId: "ws_binary_plugin",
@@ -588,6 +597,7 @@ test("enabled local plugin can edit and save a binary workspace file", async ({ 
             const bytes = data instanceof ArrayBuffer ? new Uint8Array(data) : new Uint8Array(data.buffer, data.byteOffset, data.byteLength);
             testWindow.__savedBinaryBytes = [...bytes];
             testWindow.__savedBinaryBaseHash = baseHash;
+            testWindow.__savedBinaryCalls = [...(testWindow.__savedBinaryCalls ?? []), { bytes: [...bytes], baseHash }];
             return { status: "saved" as const, sha256: "bin-saved", mtimeMs: Date.now() };
           },
           create: async () => ({ ok: true, affectedPaths: [] }),
@@ -627,7 +637,8 @@ test("enabled local plugin can edit and save a binary workspace file", async ({ 
   await page.getByRole("button", { name: "保存二进制" }).click();
 
   await expect.poll(() => page.evaluate(() => (window as typeof window & { __savedBinaryBytes?: number[] }).__savedBinaryBytes)).toEqual([7, 8, 9]);
-  await expect.poll(() => page.evaluate(() => (window as typeof window & { __savedBinaryBaseHash?: string }).__savedBinaryBaseHash)).toBe("bin-base");
+  const binarySaveCalls = await page.evaluate(() => (window as typeof window & { __savedBinaryCalls?: Array<{ bytes: number[]; baseHash: string }> }).__savedBinaryCalls ?? []);
+  expect(binarySaveCalls.map((call) => call.baseHash)).toEqual(["bin-base"]);
   await expect(page.locator(".statusbar")).toContainText("已保存");
 });
 

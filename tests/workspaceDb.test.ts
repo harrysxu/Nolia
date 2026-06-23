@@ -1,4 +1,4 @@
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdtemp, readdir, rm, stat, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { describe, expect, it } from "vitest";
@@ -8,6 +8,107 @@ import { DEFAULT_AI_EMBEDDING_SETTINGS } from "../src/shared/ai";
 import { WorkspaceDb } from "../src/main/services/workspaceDb";
 
 describe("workspace db", () => {
+  it("does not rewrite an existing database on open", async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), "nolia-db-"));
+    const dbPath = path.join(root, "workspace.sqlite");
+    const created = await WorkspaceDb.open(dbPath);
+    try {
+      created.upsertFile({
+        pathRel: "alpha.md",
+        name: "alpha.md",
+        ext: ".md",
+        kind: "markdown",
+        size: 1,
+        mtimeMs: 1,
+        sha256: "alpha"
+      });
+      await created.save();
+    } finally {
+      created.close();
+    }
+
+    const before = await stat(dbPath);
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    const reopened = await WorkspaceDb.open(dbPath);
+    try {
+      expect((await stat(dbPath)).mtimeMs).toBe(before.mtimeMs);
+    } finally {
+      reopened.close();
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("flushes delayed recent-file writes explicitly", async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), "nolia-db-"));
+    const dbPath = path.join(root, "workspace.sqlite");
+    const db = await WorkspaceDb.open(dbPath);
+    try {
+      db.upsertFile({
+        pathRel: "alpha.md",
+        name: "alpha.md",
+        ext: ".md",
+        kind: "markdown",
+        size: 1,
+        mtimeMs: 1,
+        sha256: "alpha"
+      });
+      await db.save();
+      db.touchRecentFile("alpha.md");
+      db.scheduleSave(60_000);
+      await db.flush();
+    } finally {
+      db.close();
+    }
+
+    const reopened = await WorkspaceDb.open(dbPath);
+    try {
+      expect(reopened.listRecentFiles(5)[0]).toMatchObject({ pathRel: "alpha.md" });
+    } finally {
+      reopened.close();
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("detects unchanged indexed files", async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), "nolia-db-"));
+    const db = await WorkspaceDb.open(path.join(root, "workspace.sqlite"));
+    try {
+      const entry = {
+        pathRel: "alpha.md",
+        name: "alpha.md",
+        ext: ".md",
+        kind: "markdown" as const,
+        size: 12,
+        mtimeMs: 123,
+        sha256: "alpha"
+      };
+      expect(db.shouldIndexFile(entry)).toBe(true);
+      db.upsertFile(entry);
+      expect(db.shouldIndexFile(entry)).toBe(false);
+      expect(db.shouldIndexFile({ ...entry, sha256: "beta" })).toBe(true);
+      expect(db.shouldIndexFile({ ...entry, mtimeMs: 124 })).toBe(true);
+    } finally {
+      db.close();
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("backs up a corrupted database and recreates a clean index", async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), "nolia-db-"));
+    const dbPath = path.join(root, "workspace.sqlite");
+    await writeFile(dbPath, "not a sqlite database", "utf8");
+
+    const db = await WorkspaceDb.open(dbPath);
+    try {
+      expect(db.listTags()).toEqual([]);
+      const entries = await readdir(root);
+      expect(entries.some((entry) => entry.startsWith("workspace.sqlite.corrupt-"))).toBe(true);
+    } finally {
+      db.close();
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
   it("indexes documents for search, tags, and backlinks", async () => {
     const root = await mkdtemp(path.join(os.tmpdir(), "nolia-db-"));
     const db = await WorkspaceDb.open(path.join(root, "workspace.sqlite"));
@@ -133,6 +234,11 @@ Local first design notes.
 
       expect(db.semanticIndexStatus(settings).state).toBe("ready");
       expect(db.semanticSearch([1, 0], settings, 3)[0]).toMatchObject({ pathRel: "semantic.md", mode: "semantic" });
+      expect(db.semanticIndexStatus({ ...settings, model: "other-embed" })).toMatchObject({
+        state: "stale",
+        indexedFiles: 0,
+        chunkCount: 0
+      });
 
       db.upsertDocument(
         {

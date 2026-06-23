@@ -2,7 +2,7 @@ import { z } from "zod";
 
 import type { AiTool } from "../types";
 import { excerpt } from "../context/contextBudget";
-import { isMarkdownPath, normalizePathRel } from "../../utils/filePaths";
+import { isAlwaysIgnoredWorkspacePath, isMarkdownPath, normalizePathRel } from "../../utils/filePaths";
 
 const InputSchema = z.object({ pathRel: z.string().min(1) }).strict();
 type Input = z.infer<typeof InputSchema>;
@@ -25,6 +25,9 @@ export const readNoteTool: AiTool<Input> = {
     }
     if (!isMarkdownPath(pathRel)) {
       throw new Error("readNote only supports Markdown files");
+    }
+    if (isAlwaysIgnoredWorkspacePath(pathRel)) {
+      throw new Error("readNote cannot read ignored workspace paths");
     }
     const file = await context.services.files.readFile({ workspaceId: context.workspaceId, pathRel });
     return {

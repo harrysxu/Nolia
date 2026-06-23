@@ -1,4 +1,4 @@
-import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { describe, expect, it } from "vitest";
@@ -91,6 +91,100 @@ describe("AI task service", () => {
       const undone = await tasks.undoWrite({ taskId: started.taskId, transactionId: applied!.writes[0].id });
       expect(undone?.writes[0].undoneAt).toBeTypeOf("number");
       expect(await readFile(path.join(workspaceRoot, "note.md"), "utf8")).toBe("# Note\n\nOriginal.");
+      expect(emitted.map((event) => event.type)).toContain("approval-required");
+      expect(emitted.map((event) => event.type)).toContain("task-updated");
+    } finally {
+      await workspaces?.closeActiveWorkspace();
+      await rm(userData, { recursive: true, force: true });
+      await rm(home, { recursive: true, force: true });
+      await rm(workspaceRoot, { recursive: true, force: true });
+    }
+  });
+
+  it("applies and undoes folder creation and move workspace proposals", async () => {
+    const userData = await makeTempDir();
+    const home = await makeTempDir();
+    const workspaceRoot = await makeTempDir();
+    let workspaces: WorkspaceService | undefined;
+    try {
+      await mkdir(path.join(workspaceRoot, "docs"), { recursive: true });
+      await writeFile(path.join(workspaceRoot, "docs", "guide.md"), "# Guide\n\nOriginal.");
+
+      const settings = new SettingsService(userData);
+      await settings.init();
+      await settings.setSetting("ai", {
+        enabled: true,
+        providers: [
+          {
+            id: "openai-compatible",
+            name: "OpenAI-compatible",
+            providerId: "openai-compatible",
+            model: "gpt-4.1",
+            baseUrl: "https://api.example.test/v1",
+            apiMode: "chat-completions"
+          }
+        ],
+        defaultProviderId: "openai-compatible",
+        allowWorkspaceRead: true,
+        allowWorkspaceOperations: true
+      });
+      const diagnostics = new DiagnosticsService(home);
+      await diagnostics.init();
+      workspaces = new WorkspaceService(settings, diagnostics);
+      const workspace = await workspaces.createWorkspace({ path: workspaceRoot });
+      expect(workspace).toBeDefined();
+
+      const files = new FileSystemService(workspaces, new HistoryService());
+      const runtimeServices = { workspaces, files, settings, diagnostics };
+      const ai = {
+        startRun: () => ({ runId: "run-folder-move" }),
+        cancelRun: () => ({ ok: true })
+      };
+      const emitted: AiRunEvent[] = [];
+      const tasks = new AiTaskService(ai as never, runtimeServices, (event) => emitted.push(event));
+
+      const started = await tasks.start(taskRequest(workspace!.workspaceId));
+      await tasks.recordEvent({
+        type: "patch-proposal",
+        runId: started.runId,
+        proposal: {
+          id: "proposal-folder-move",
+          runId: started.runId,
+          workspaceId: workspace!.workspaceId,
+          pathRel: "archive",
+          title: "Archive guide",
+          summary: "Create archive and move guide",
+          sourceSnapshotHash: "new",
+          baseHash: "new",
+          operations: [
+            { type: "createDirectory", pathRel: "archive" },
+            { type: "movePath", sourcePathRel: "docs/guide.md", targetPathRel: "archive/guide.md" }
+          ]
+        }
+      });
+
+      const waiting = await tasks.read({ taskId: started.taskId });
+      expect(waiting?.status).toBe("waiting_approval");
+      const approvalId = waiting?.pendingApprovalId;
+      expect(approvalId).toBeTruthy();
+
+      const applied = await tasks.approveProposal({ taskId: started.taskId, approvalId: approvalId! });
+
+      expect(applied?.status).toBe("completed");
+      expect(await pathExists(path.join(workspaceRoot, "archive"))).toBe(true);
+      expect(await readFile(path.join(workspaceRoot, "archive", "guide.md"), "utf8")).toBe("# Guide\n\nOriginal.");
+      expect(await pathExists(path.join(workspaceRoot, "docs", "guide.md"))).toBe(false);
+      expect(applied?.writes[0].operations).toMatchObject([
+        { pathRel: "archive", createdDirectory: true },
+        { pathRel: "docs/guide.md", targetPathRel: "archive/guide.md", movedPath: true }
+      ]);
+
+      const undone = await tasks.undoWrite({ taskId: started.taskId, transactionId: applied!.writes[0].id });
+
+      expect(undone?.writes[0].undoneAt).toBeTypeOf("number");
+      expect(await readFile(path.join(workspaceRoot, "docs", "guide.md"), "utf8")).toBe("# Guide\n\nOriginal.");
+      expect(await pathExists(path.join(workspaceRoot, "archive", "guide.md"))).toBe(false);
+      expect(await pathExists(path.join(workspaceRoot, "archive"))).toBe(false);
       expect(emitted.map((event) => event.type)).toContain("approval-required");
       expect(emitted.map((event) => event.type)).toContain("task-updated");
     } finally {
@@ -201,4 +295,13 @@ async function makeTempDir(): Promise<string> {
   const root = await mkdtemp(path.join(os.tmpdir(), "nolia-ai-task-"));
   await mkdir(root, { recursive: true });
   return root;
+}
+
+async function pathExists(filePath: string): Promise<boolean> {
+  try {
+    await stat(filePath);
+    return true;
+  } catch {
+    return false;
+  }
 }

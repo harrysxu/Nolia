@@ -12,7 +12,8 @@ interface SemanticIndexRunOptions {
 
 const CHUNK_TARGET_CHARS = 1_400;
 const CHUNK_OVERLAP_CHARS = 180;
-const EMBEDDING_BATCH_SIZE = 12;
+const EMBEDDING_BATCH_SIZE = 4;
+const SEMANTIC_INDEX_SAVE_INTERVAL = 10;
 
 export class SemanticIndexService {
   constructor(private readonly embeddings = new AiEmbeddingService()) {}
@@ -32,17 +33,27 @@ export class SemanticIndexService {
 
     const documents = db.listSemanticIndexableDocuments();
     let processed = 0;
+    let changedSinceSave = 0;
     const emit = (phase: NonNullable<AiSemanticIndexStatus["progress"]>["phase"], pathRel?: string) => {
       const status = db.semanticIndexStatus(settings, {
         phase,
         current: processed,
         total: documents.length,
         pathRel
-      });
+      }, undefined, { fast: true });
       options.onProgress?.(status);
       return status;
     };
 
+    db.setSemanticIndexMetadata({
+      enabled: true,
+      providerId: settings.providerId,
+      model: settings.model,
+      baseUrl: settings.baseUrl,
+      apiMode: settings.apiMode,
+      updatedAt: db.getSemanticIndexMetadata()?.updatedAt
+    });
+    db.scheduleSave();
     emit("scanning");
     try {
       for (const document of documents) {
@@ -54,11 +65,15 @@ export class SemanticIndexService {
         }
         const chunkTexts = chunkDocument(document.plainText || document.title || document.pathRel);
         const chunkEmbeddings: number[][] = [];
-        for (let index = 0; index < chunkTexts.length; index += EMBEDDING_BATCH_SIZE) {
-          throwIfAborted(options.signal);
-          emit("embedding", document.pathRel);
-          const batch = chunkTexts.slice(index, index + EMBEDDING_BATCH_SIZE);
-          chunkEmbeddings.push(...(await this.embeddings.embedMany(settings, batch, options.signal)));
+        try {
+          for (let index = 0; index < chunkTexts.length; index += EMBEDDING_BATCH_SIZE) {
+            throwIfAborted(options.signal);
+            emit("embedding", document.pathRel);
+            const batch = chunkTexts.slice(index, index + EMBEDDING_BATCH_SIZE);
+            chunkEmbeddings.push(...(await this.embeddings.embedMany(settings, batch, options.signal)));
+          }
+        } catch (error) {
+          throw withSemanticIndexContext(error, document.pathRel, "embedding");
         }
         const now = Date.now();
         const chunks: SemanticChunkRecord[] = chunkTexts.map((content, index) => ({
@@ -76,7 +91,12 @@ export class SemanticIndexService {
         })).filter((chunk) => chunk.embedding.length > 0);
         db.replaceSemanticChunks(document.pathRel, chunks);
         processed += 1;
+        changedSinceSave += 1;
         emit("saving", document.pathRel);
+        if (changedSinceSave >= SEMANTIC_INDEX_SAVE_INTERVAL) {
+          changedSinceSave = 0;
+          await db.save();
+        }
       }
       db.setSemanticIndexMetadata({
         enabled: true,
@@ -157,4 +177,10 @@ function throwIfAborted(signal?: AbortSignal): void {
   if (signal?.aborted) {
     throw signal.reason instanceof Error ? signal.reason : new Error("Semantic indexing was cancelled");
   }
+}
+
+function withSemanticIndexContext(error: unknown, pathRel: string, phase: NonNullable<AiSemanticIndexStatus["progress"]>["phase"]): AiProviderError {
+  const message = error instanceof Error ? error.message : String(error);
+  const code = error instanceof AiProviderError ? error.code : "provider_bad_request";
+  return new AiProviderError(`索引 ${pathRel} 时在 ${phase} 阶段失败：${message}`, code);
 }

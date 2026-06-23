@@ -7,12 +7,14 @@ import { readNoteTool } from "./readNote";
 import { proposePatchTool } from "./proposePatch";
 import { proposeWorkspacePatchTool } from "./proposeWorkspacePatch";
 import { listTagsTool } from "./listTags";
-import { listWorkspaceFilesTool, readManyWorkspaceFilesTool, readWorkspaceFileTool, recentWorkspaceFilesTool, workspaceBacklinksTool, workspaceOutlineTool } from "./workspaceFiles";
+import { findWorkspacePathsTool, inspectWorkspacePathTool, listWorkspaceFilesTool, readManyWorkspaceFilesTool, readWorkspaceFileTool, recentWorkspaceFilesTool, workspaceBacklinksTool, workspaceOutlineTool } from "./workspaceFiles";
 
 const tools = [
   getCurrentNoteContextTool,
   searchNotesTool,
   readNoteTool,
+  inspectWorkspacePathTool,
+  findWorkspacePathsTool,
   listWorkspaceFilesTool,
   recentWorkspaceFilesTool,
   readWorkspaceFileTool,
@@ -69,8 +71,8 @@ export class AiToolRegistry {
     if (tool.permissions.includes("workspace-read") && !context.allowedScopes.allowWorkspaceRead) {
       throw new Error("Whole-workspace reading is disabled");
     }
-    if (tool.permissions.includes("proposal") && (!context.clientContext.activeDocument || !context.workspaceId)) {
-      throw new Error("Patch proposals require an active note");
+    if (tool.permissions.includes("proposal") && (!context.clientContext.activeDocument || !context.workspaceId || !context.allowedScopes.allowDocumentPatch)) {
+      throw new Error("Patch proposals require an active note and explicit document patch permission");
     }
     if (tool.permissions.includes("workspace-proposal") && (!context.allowedScopes.allowWorkspaceRead || !context.allowedScopes.allowWorkspaceOperations)) {
       throw new Error("Workspace operation proposals require whole-workspace read and operation proposal permissions");
@@ -81,11 +83,11 @@ export class AiToolRegistry {
   }
 }
 
-function toolAllowedForScopes(tool: AiTool, scopes: AiAllowedScopes, hasActiveDocument: boolean, hasWorkspace: boolean): boolean {
+export function toolAllowedForScopes(tool: AiTool, scopes: AiAllowedScopes, hasActiveDocument: boolean, hasWorkspace: boolean): boolean {
   if (tool.permissions.includes("current-note") && !hasActiveDocument) {
     return false;
   }
-  if (tool.permissions.includes("proposal") && (!hasActiveDocument || !hasWorkspace)) {
+  if (tool.permissions.includes("proposal") && (!hasActiveDocument || !hasWorkspace || !scopes.allowDocumentPatch)) {
     return false;
   }
   if ((tool.permissions.includes("tags") || tool.permissions.includes("workspace-search") || tool.permissions.includes("read-note") || tool.permissions.includes("workspace-read") || tool.permissions.includes("workspace-proposal")) && !hasWorkspace) {
@@ -137,8 +139,22 @@ function summarizeToolResult(toolName: string, result: unknown): AiToolResultEnv
   if (toolName === "listWorkspaceFiles" && isWorkspaceFileList(result)) {
     return {
       result,
-      summary: `Listed ${result.items.length} workspace file(s).`,
+      summary: `Listed ${result.items.length} workspace item(s).`,
       sourceRefs: result.items.slice(0, 8).map((item) => ({ kind: "workspace-file", pathRel: item.pathRel, title: item.title }))
+    };
+  }
+  if (toolName === "findWorkspacePaths" && isWorkspaceFileList(result)) {
+    return {
+      result,
+      summary: `Found ${result.items.length} workspace path(s).`,
+      sourceRefs: result.items.slice(0, 8).map((item) => ({ kind: "workspace-file", pathRel: item.pathRel, title: item.title }))
+    };
+  }
+  if (toolName === "inspectWorkspacePath" && isWorkspacePathInspect(result)) {
+    return {
+      result,
+      summary: result.exists ? `Inspected workspace path ${result.pathRel}.` : `Workspace path ${result.pathRel || "<root>"} was not found.`,
+      sourceRefs: result.exists ? [{ kind: "workspace-file", pathRel: result.pathRel, title: result.title ?? result.pathRel }] : undefined
     };
   }
   if (toolName === "getCurrentNoteContext" && isCurrentNoteResult(result)) {
@@ -164,6 +180,10 @@ function isSearchResult(value: unknown): value is { mode?: string; fallbackReaso
 
 function isWorkspaceFileList(value: unknown): value is { items: Array<{ pathRel: string; title: string }> } {
   return isSearchResult(value);
+}
+
+function isWorkspacePathInspect(value: unknown): value is { pathRel: string; exists: boolean; title?: string } {
+  return Boolean(value && typeof value === "object" && typeof (value as { pathRel?: unknown }).pathRel === "string" && typeof (value as { exists?: unknown }).exists === "boolean");
 }
 
 function isReadNoteResult(value: unknown): value is { pathRel: string; title: string; contentExcerpt: string } {

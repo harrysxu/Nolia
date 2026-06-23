@@ -1,4 +1,4 @@
-import { expect, test } from "@playwright/test";
+import { expect, test, type Page } from "@playwright/test";
 
 import { installMockNolia } from "./helpers/mockNolia";
 import type { AppSettings } from "../../src/shared/types";
@@ -49,7 +49,7 @@ test("AI sidebar opens settings and streams a mock response", async ({ page }) =
 
   await page.getByRole("button", { name: "Nolia AI" }).click();
   await expect(page.locator(".ai-sidebar")).toBeVisible();
-  await expect(page.locator(".ai-sidebar")).toContainText("AI 未启用");
+  await expect(page.locator(".ai-composer-note")).toContainText("AI 已禁用");
 
   await page.getByRole("button", { name: "打开 AI 设置" }).click();
   const settingsDialog = page.getByRole("dialog", { name: "设置" });
@@ -231,6 +231,184 @@ test("AI translation chat does not create a patch proposal", async ({ page }) =>
       })
     )
     .toEqual({ instruction: "翻译成中文", patchFallback: false });
+  await expect
+    .poll(() =>
+      page.evaluate(() => {
+        const run = (window as typeof window & { __noliaMock: { aiRuns: Array<{ options?: { allowDocumentPatch?: boolean; allowWorkspaceOperations?: boolean } }> } }).__noliaMock.aiRuns.at(-1);
+        return {
+          allowDocumentPatch: run?.options?.allowDocumentPatch ?? false,
+          allowWorkspaceOperations: run?.options?.allowWorkspaceOperations ?? false
+        };
+      })
+    )
+    .toEqual({ allowDocumentPatch: false, allowWorkspaceOperations: false });
+});
+
+test("AI chat honors explicit no-write requests without enabling patch permissions", async ({ page }) => {
+  await page.setViewportSize({ width: 900, height: 760 });
+  await installMockNolia(page, {
+    settings: {
+      editorMode: "source",
+      ai: openAiSettings({ allowWorkspaceSearch: true, allowReadSearchResults: true, allowWorkspaceRead: true, allowWorkspaceOperations: true })
+    },
+    files: {
+      "ai-current.md": [
+        "# AI Chat Current Note",
+        "",
+        "## Acceptance",
+        "",
+        "- Chat should answer from current note when permission is enabled.",
+        "- Write proposals must require explicit confirmation."
+      ].join("\n")
+    }
+  });
+
+  await page.goto("/");
+  await expect(page.getByRole("navigation", { name: "工作区导航" })).toBeVisible();
+  await page.getByRole("button", { name: "Nolia AI" }).click();
+  await page.locator(".ai-composer textarea").fill("请用一句话回答：当前笔记的两个验收点是什么？不要修改文件。");
+  await page.getByRole("button", { name: "发送" }).click();
+
+  await expect(page.locator(".ai-message.is-assistant")).toContainText("Mock response:");
+  await expect(page.locator(".ai-patch-preview")).toBeHidden();
+  await expect
+    .poll(() =>
+      page.evaluate(() => {
+        const run = (window as typeof window & { __noliaMock: { aiRuns: Array<{ instruction: string; options?: { allowDocumentPatch?: boolean; allowWorkspaceOperations?: boolean; patchFallback?: boolean } }> } }).__noliaMock.aiRuns.at(-1);
+        return {
+          instruction: run?.instruction,
+          allowDocumentPatch: run?.options?.allowDocumentPatch ?? false,
+          allowWorkspaceOperations: run?.options?.allowWorkspaceOperations ?? false,
+          patchFallback: run?.options?.patchFallback ?? false
+        };
+      })
+    )
+    .toEqual({
+      instruction: "请用一句话回答：当前笔记的两个验收点是什么？不要修改文件。",
+      allowDocumentPatch: false,
+      allowWorkspaceOperations: false,
+      patchFallback: false
+    });
+});
+
+test("AI unsupported external connector and media requests stay as chat without write permissions", async ({ page }) => {
+  await page.setViewportSize({ width: 900, height: 760 });
+  await installMockNolia(page, {
+    settings: {
+      editorMode: "source",
+      ai: openAiSettings({ allowWorkspaceSearch: true, allowReadSearchResults: true, allowWorkspaceRead: true, allowWorkspaceOperations: true })
+    },
+    files: {
+      "ai-current.md": "# External Requests\n\nThis note must stay unchanged."
+    }
+  });
+
+  await page.goto("/");
+  await expect(page.getByRole("navigation", { name: "工作区导航" })).toBeVisible();
+  await page.getByRole("button", { name: "Nolia AI" }).click();
+  await page.locator(".ai-composer textarea").fill("请连接我的日历和邮箱，生成一张配图并转写会议录音。不要修改笔记。");
+  await page.locator(".ai-composer button[type='submit']").click();
+
+  await expect(page.locator(".ai-message.is-assistant").last()).toContainText("Mock response:");
+  await expect(page.locator(".ai-patch-preview")).toBeHidden();
+  await expect(page.locator(".source-editor .cm-content")).toContainText("This note must stay unchanged.");
+  await expect
+    .poll(() =>
+      page.evaluate(() => {
+        const mock = (window as typeof window & {
+          __noliaMock: {
+            aiRuns: Array<{ options?: { allowDocumentPatch?: boolean; allowWorkspaceOperations?: boolean; patchFallback?: boolean } }>;
+            savedText: Record<string, string>;
+            createdPaths: string[];
+            renamedPaths: Array<{ sourcePathRel: string; targetPathRel: string }>;
+            trashedPaths: string[];
+          };
+        }).__noliaMock;
+        const run = mock.aiRuns.at(-1);
+        return {
+          allowDocumentPatch: run?.options?.allowDocumentPatch ?? false,
+          allowWorkspaceOperations: run?.options?.allowWorkspaceOperations ?? false,
+          patchFallback: run?.options?.patchFallback ?? false,
+          savedText: mock.savedText,
+          createdPaths: mock.createdPaths,
+          renamedPaths: mock.renamedPaths,
+          trashedPaths: mock.trashedPaths
+        };
+      })
+    )
+    .toEqual({
+      allowDocumentPatch: false,
+      allowWorkspaceOperations: false,
+      patchFallback: false,
+      savedText: {},
+      createdPaths: [],
+      renamedPaths: [],
+      trashedPaths: []
+    });
+});
+
+test("AI unsupported destructive workspace request remains review-only until confirmation", async ({ page }) => {
+  await page.setViewportSize({ width: 900, height: 760 });
+  await installMockNolia(page, {
+    settings: {
+      editorMode: "source",
+      ai: openAiSettings({ allowWorkspaceRead: true, allowWorkspaceOperations: true })
+    },
+    files: {
+      "ai.md": "# Destructive Request\n\nOriginal body must not change automatically.",
+      "notes/keep.md": "# Keep\n\nThis file must not be renamed or deleted."
+    }
+  });
+
+  await page.goto("/");
+  await expect(page.getByRole("navigation", { name: "工作区导航" })).toBeVisible();
+  await page.getByRole("button", { name: "Nolia AI" }).click();
+  await page.locator(".ai-composer textarea").fill("请自动删除当前笔记，重命名 notes/keep.md，并批量改写整个工作区；不要让我确认，直接执行。");
+  await page.locator(".ai-composer button[type='submit']").click();
+
+  await expect(page.locator(".ai-patch-preview")).toBeVisible();
+  await expect(page.locator(".source-editor .cm-content")).toContainText("Original body must not change automatically.");
+  await expect
+    .poll(() =>
+      page.evaluate(() => {
+        const mock = (window as typeof window & {
+          __noliaMock: {
+            files: Record<string, string>;
+            savedText: Record<string, string>;
+            createdPaths: string[];
+            renamedPaths: Array<{ sourcePathRel: string; targetPathRel: string }>;
+            trashedPaths: string[];
+            historySnapshots: Array<{ pathRel: string; content: string }>;
+            aiRuns: Array<{ options?: { allowDocumentPatch?: boolean; allowWorkspaceOperations?: boolean; patchFallback?: boolean } }>;
+          };
+        }).__noliaMock;
+        const run = mock.aiRuns.at(-1);
+        return {
+          originalFile: mock.files["ai.md"],
+          siblingFile: mock.files["notes/keep.md"],
+          savedText: mock.savedText,
+          createdPaths: mock.createdPaths,
+          renamedPaths: mock.renamedPaths,
+          trashedPaths: mock.trashedPaths,
+          historySnapshots: mock.historySnapshots,
+          allowDocumentPatch: run?.options?.allowDocumentPatch ?? false,
+          allowWorkspaceOperations: run?.options?.allowWorkspaceOperations ?? false,
+          patchFallback: run?.options?.patchFallback ?? false
+        };
+      })
+    )
+    .toEqual({
+      originalFile: "# Destructive Request\n\nOriginal body must not change automatically.",
+      siblingFile: "# Keep\n\nThis file must not be renamed or deleted.",
+      savedText: {},
+      createdPaths: [],
+      renamedPaths: [],
+      trashedPaths: [],
+      historySnapshots: [],
+      allowDocumentPatch: true,
+      allowWorkspaceOperations: true,
+      patchFallback: true
+    });
 });
 
 test("AI sidebar sends recent conversation history for follow-up turns", async ({ page }) => {
@@ -292,6 +470,143 @@ test("AI sidebar sends recent conversation history for follow-up turns", async (
     .toEqual([]);
 });
 
+test("AI long context keeps explicit no-write intent isolated from earlier edit requests", async ({ page }) => {
+  await page.setViewportSize({ width: 900, height: 760 });
+  await installMockNolia(page, {
+    settings: {
+      editorMode: "source",
+      ai: openAiSettings({ conversationHistoryTurns: 50, allowWorkspaceRead: true, allowWorkspaceOperations: true })
+    },
+    files: {
+      "ai.md": "# Long Context No Write\n\nThis file should stay unchanged.",
+      "notes/roadmap.md": "# Roadmap\n\nExisting roadmap body."
+    }
+  });
+
+  await page.goto("/");
+  await expect(page.getByRole("navigation", { name: "工作区导航" })).toBeVisible();
+  await page.getByRole("button", { name: "Nolia AI" }).click();
+
+  for (let index = 1; index <= 12; index += 1) {
+    await page.locator(".ai-composer textarea").fill(`第 ${index} 轮：只讨论未来如何修改整个工作区和多文件边界，不要修改任何文件。`);
+    await page.getByRole("button", { name: "发送" }).click();
+    await expect(page.locator(".ai-message.is-assistant").last()).toContainText(`第 ${index} 轮`);
+  }
+
+  await page.locator(".ai-composer textarea").fill("最后请只回答当前笔记的主题，不要修改、不要写入、不要生成提案。");
+  await page.getByRole("button", { name: "发送" }).click();
+  await expect(page.locator(".ai-message.is-assistant").last()).toContainText("Mock response:");
+  await expect(page.locator(".ai-patch-preview")).toBeHidden();
+  await expect(page.locator(".source-editor .cm-content")).toContainText("This file should stay unchanged.");
+  await expect
+    .poll(() =>
+      page.evaluate(() => {
+        const mock = (window as typeof window & {
+          __noliaMock: {
+            aiRuns: Array<{
+              instruction: string;
+              conversation?: Array<{ role: string; content: string }>;
+              options?: { allowDocumentPatch?: boolean; allowWorkspaceOperations?: boolean; patchFallback?: boolean };
+            }>;
+            files: Record<string, string>;
+            savedText: Record<string, string>;
+            createdPaths: string[];
+            historySnapshots: Array<{ pathRel: string; content: string }>;
+          };
+        }).__noliaMock;
+        const run = mock.aiRuns.at(-1);
+        return {
+          instruction: run?.instruction,
+          conversationLength: run?.conversation?.length ?? 0,
+          conversationIncludesEarlierWorkspaceEdit: Boolean(run?.conversation?.some((item) => item.content.includes("修改整个工作区"))),
+          allowDocumentPatch: run?.options?.allowDocumentPatch ?? false,
+          allowWorkspaceOperations: run?.options?.allowWorkspaceOperations ?? false,
+          patchFallback: run?.options?.patchFallback ?? false,
+          currentFile: mock.files["ai.md"],
+          savedText: mock.savedText,
+          createdPaths: mock.createdPaths,
+          historySnapshots: mock.historySnapshots
+        };
+      })
+    )
+    .toEqual({
+      instruction: "最后请只回答当前笔记的主题，不要修改、不要写入、不要生成提案。",
+      conversationLength: 24,
+      conversationIncludesEarlierWorkspaceEdit: true,
+      allowDocumentPatch: false,
+      allowWorkspaceOperations: false,
+      patchFallback: false,
+      currentFile: "# Long Context No Write\n\nThis file should stay unchanged.",
+      savedText: {},
+      createdPaths: [],
+      historySnapshots: []
+    });
+});
+
+test("AI long context still recognizes a final twenty-operation workspace edit request", async ({ page }) => {
+  await page.setViewportSize({ width: 900, height: 760 });
+  await installMockNolia(page, {
+    settings: {
+      editorMode: "source",
+      ai: openAiSettings({ conversationHistoryTurns: 50, allowWorkspaceRead: true, allowWorkspaceOperations: true })
+    },
+    files: {
+      "ai.md": "# Long Context Batch\n\nOriginal workspace body.",
+      "notes/roadmap.md": "# Roadmap\n\nExisting roadmap body."
+    }
+  });
+
+  await page.goto("/");
+  await expect(page.getByRole("navigation", { name: "工作区导航" })).toBeVisible();
+  await page.getByRole("button", { name: "Nolia AI" }).click();
+
+  for (let index = 1; index <= 10; index += 1) {
+    await page.locator(".ai-composer textarea").fill(`第 ${index} 轮：只解释概念，不要修改任何文件。`);
+    await page.getByRole("button", { name: "发送" }).click();
+    await expect(page.locator(".ai-message.is-assistant").last()).toContainText(`第 ${index} 轮`);
+  }
+
+  await page.locator(".ai-composer textarea").fill("现在请生成复杂 20 个工作区操作提案，批量修改工作区中的多文件。");
+  await page.getByRole("button", { name: "发送" }).click();
+
+  const proposal = page.locator(".ai-patch-preview");
+  await expect(proposal).toContainText("Mock complex 20 workspace operations");
+  await proposal.getByText("影响范围", { exact: true }).click();
+  await expect(proposal).toContainText("共 20 个操作");
+  await expect(proposal.locator(".ai-workspace-operation")).toHaveCount(20);
+  await expect
+    .poll(() =>
+      page.evaluate(() => {
+        const run = (window as typeof window & {
+          __noliaMock: {
+            aiRuns: Array<{
+              instruction: string;
+              conversation?: Array<{ role: string; content: string }>;
+              options?: { allowDocumentPatch?: boolean; allowWorkspaceOperations?: boolean; patchFallback?: boolean };
+            }>;
+          };
+        }).__noliaMock.aiRuns.at(-1);
+        const finalRequest = "现在请生成复杂 20 个工作区操作提案，批量修改工作区中的多文件。";
+        return {
+          instructionIncludesFinalRequest: Boolean(run?.instruction.includes(finalRequest)),
+          conversationLength: run?.conversation?.length ?? 0,
+          conversationIncludesNoWrite: Boolean(run?.conversation?.some((item) => item.content.includes("不要修改任何文件"))),
+          allowDocumentPatch: run?.options?.allowDocumentPatch ?? false,
+          allowWorkspaceOperations: run?.options?.allowWorkspaceOperations ?? false,
+          patchFallback: run?.options?.patchFallback ?? false
+        };
+      })
+    )
+    .toEqual({
+      instructionIncludesFinalRequest: true,
+      conversationLength: 20,
+      conversationIncludesNoWrite: true,
+      allowDocumentPatch: true,
+      allowWorkspaceOperations: true,
+      patchFallback: true
+    });
+});
+
 test("AI workspace overview requests are handled by agent tools instead of keyword-injected context", async ({ page }) => {
   await page.setViewportSize({ width: 1320, height: 860 });
   await installMockNolia(page, {
@@ -333,6 +648,34 @@ test("AI workspace overview requests are handled by agent tools instead of keywo
       })
     )
     .toBe(true);
+});
+
+test("AI tool calls are grouped in a collapsed details block", async ({ page }) => {
+  await page.setViewportSize({ width: 1320, height: 860 });
+  await installMockNolia(page, {
+    settings: {
+      editorMode: "source",
+      ai: openAiSettings({ allowWorkspaceRead: true })
+    },
+    files: {
+      "ai.md": "# AI Tools\n\nTool events should stay compact."
+    }
+  });
+
+  await page.goto("/");
+  await expect(page.getByRole("navigation", { name: "工作区导航" })).toBeVisible();
+  await page.getByRole("button", { name: "Nolia AI" }).click();
+  await page.locator(".ai-composer textarea").fill("请模拟工具调用");
+  await page.getByRole("button", { name: "发送" }).click();
+
+  const toolEvents = page.locator(".ai-tool-events");
+  await expect(toolEvents.getByText("工具调用")).toBeVisible();
+  await expect(toolEvents).toContainText("2");
+  await expect(page.locator(".ai-message.is-event")).toHaveCount(0);
+  await expect(toolEvents.locator(".ai-tool-event").first()).toBeHidden();
+  await toolEvents.locator("summary").click();
+  await expect(toolEvents.locator(".ai-tool-event").first()).toBeVisible();
+  await expect(toolEvents).toContainText("workspace_read_many_files completed.");
 });
 
 test("AI cancellation clears the running state and keeps the composer usable", async ({ page }) => {
@@ -437,8 +780,7 @@ test("AI settings handles model table, edit dialog, API key state, and model swi
       )
     )
     .toBe("test-key");
-  await editDialog.getByText("高级配置").click();
-  await editDialog.getByLabel("模型展示名称").fill("gpt-4.1 tuned");
+  await editDialog.getByLabel("模型别名").fill("gpt-4.1 tuned");
   await editDialog.getByRole("button", { name: "确认" }).click();
   await expect(settingsDialog.getByRole("table", { name: "模型列表" })).toContainText("gpt-4.1 tuned");
 
@@ -509,9 +851,16 @@ test("AI settings configures semantic index manually", async ({ page }) => {
   await settingsDialog.getByLabel("Embedding 模型").fill("mock-embed");
   await settingsDialog.getByRole("button", { name: "测试 embedding" }).click();
   await expect(settingsDialog.locator(".plugin-empty-state.is-ok")).toContainText("Mock embedding connected");
-  await settingsDialog.getByRole("button", { name: "更新语义索引" }).click();
+  await settingsDialog.getByRole("button", { name: "创建/更新语义索引" }).click();
   await expect(settingsDialog.locator(".ai-semantic-status")).toContainText("可用");
   await expect(settingsDialog.locator(".ai-semantic-summary")).toContainText("分块");
+  await expect
+    .poll(() =>
+      page.evaluate(() =>
+        (window as typeof window & { __noliaMock: { semanticIndexRequests: Array<{ settings?: { model?: string } }> } }).__noliaMock.semanticIndexRequests.at(-1)?.settings?.model
+      )
+    )
+    .toBe("mock-embed");
 });
 
 test("AI settings opens with legacy public settings that do not include embedding", async ({ page }) => {
@@ -551,6 +900,7 @@ test("AI sidebar model selector updates the default provider", async ({ page }) 
           {
             id: "openai-compatible",
             name: "OpenAI-compatible",
+            alias: "Fast GPT",
             providerId: "openai-compatible",
             model: "gpt-4.1",
             baseUrl: "https://api.example.test/v1",
@@ -586,9 +936,9 @@ test("AI sidebar model selector updates the default provider", async ({ page }) 
 
   const modelSelect = page.locator(".ai-composer-model-row").getByLabel("模型");
   await expect(modelSelect).toBeVisible();
-  await expect(modelSelect.locator("option")).toContainText(["选择模型", "gpt-4.1 · OpenAI-compatible", "qwen3.5:latest · Ollama"]);
+  await expect(modelSelect.locator("option")).toContainText(["选择模型", "Fast GPT", "qwen3.5:latest"]);
   await modelSelect.selectOption("ollama-local");
-  await expect(page.locator(".ai-sidebar-header")).toContainText("qwen3.5:latest");
+  await expect(page.locator(".ai-sidebar-header")).not.toContainText("qwen3.5:latest");
   await expect
     .poll(() =>
       page.evaluate(() => {
@@ -599,7 +949,7 @@ test("AI sidebar model selector updates the default provider", async ({ page }) 
     )
     .toBe("ollama-local");
   await modelSelect.selectOption("openai-compatible");
-  await expect(page.locator(".ai-sidebar-header")).toContainText("gpt-4.1");
+  await expect(page.locator(".ai-sidebar-header")).not.toContainText("gpt-4.1");
   await expect
     .poll(() =>
       page.evaluate(() => {
@@ -672,7 +1022,7 @@ test("AI selection actions require selected text and send selected context", asy
 
   await expect(page.locator(".ai-sidebar")).toBeVisible();
   await expect(page.locator(".ai-message.is-user").last()).toContainText("润色选中文本");
-  await expect(page.locator(".ai-context-bar")).toContainText("已选择 15 字符");
+  await expect(page.locator(".ai-composer-note")).toContainText("已选择 15 字符");
   await expect(page.locator(".ai-message.is-assistant")).toContainText("Mock response");
   await expect
     .poll(() =>
@@ -709,6 +1059,18 @@ test("AI patch proposal actions require explicit confirmation and support replac
   await page.locator(".ai-composer textarea").fill("请生成提案");
   await page.getByRole("button", { name: "发送" }).click();
   await expect(page.locator(".ai-patch-preview")).toContainText("Mock patch proposal");
+  await expect
+    .poll(() =>
+      page.evaluate(() => {
+        const run = (window as typeof window & { __noliaMock: { aiRuns: Array<{ options?: { allowDocumentPatch?: boolean; allowWorkspaceOperations?: boolean; patchFallback?: boolean } }> } }).__noliaMock.aiRuns.at(-1);
+        return {
+          allowDocumentPatch: run?.options?.allowDocumentPatch ?? false,
+          allowWorkspaceOperations: run?.options?.allowWorkspaceOperations ?? false,
+          patchFallback: run?.options?.patchFallback ?? false
+        };
+      })
+    )
+    .toEqual({ allowDocumentPatch: true, allowWorkspaceOperations: false, patchFallback: true });
   await page.locator(".ai-patch-preview").getByText("影响范围", { exact: true }).click();
   await expect(page.locator(".ai-patch-preview")).toContainText("目标：ai.md");
   await expect(page.locator(".ai-patch-preview")).toContainText("操作：替换全文");
@@ -748,6 +1110,35 @@ test("AI patch proposal actions require explicit confirmation and support replac
     .toContain("AI Patch Applied");
 });
 
+test("AI approval proposals can be discarded without surfacing an error", async ({ page }) => {
+  await page.setViewportSize({ width: 1320, height: 860 });
+  await installMockNolia(page, {
+    settings: {
+      editorMode: "source",
+      ai: openAiSettings({ allowWorkspaceRead: true, allowWorkspaceOperations: true })
+    },
+    files: {
+      "ai.md": "# Approval\n\nOriginal body."
+    }
+  });
+
+  await page.goto("/");
+  await expect(page.getByRole("navigation", { name: "工作区导航" })).toBeVisible();
+  await page.getByRole("button", { name: "Nolia AI" }).click();
+  await page.locator(".ai-composer textarea").fill("请生成待确认工作区操作");
+  await page.getByRole("button", { name: "发送" }).click();
+
+  await expect(page.locator(".ai-patch-preview")).toContainText("Mock approval workspace operations");
+  await page.getByRole("button", { name: "放弃" }).click();
+  await expect(page.locator(".ai-patch-preview")).toBeHidden();
+  await expect(page.locator(".ai-message.is-error")).toHaveCount(0);
+  await expect
+    .poll(() =>
+      page.evaluate(() => (window as typeof window & { __noliaMock: { rejectedApprovals: unknown[] } }).__noliaMock.rejectedApprovals.length)
+    )
+    .toBe(1);
+});
+
 test("AI workspace operation proposals require confirmation and create history snapshots", async ({ page }) => {
   await page.setViewportSize({ width: 1320, height: 860 });
   await installMockNolia(page, {
@@ -768,12 +1159,36 @@ test("AI workspace operation proposals require confirmation and create history s
 
   const proposal = page.locator(".ai-patch-preview");
   await expect(proposal).toContainText("Mock workspace operations");
+  await expect(proposal).toContainText("工作区操作提案");
+  await expect(proposal).toContainText("待确认操作");
+  await expect(proposal).not.toContainText("新增内容");
+  await expect(proposal.locator(".ai-workspace-summary .ai-workspace-operation")).toHaveCount(2);
+  await expect
+    .poll(() =>
+      page.evaluate(() => {
+        const run = (window as typeof window & { __noliaMock: { aiRuns: Array<{ options?: { allowDocumentPatch?: boolean; allowWorkspaceOperations?: boolean; patchFallback?: boolean } }> } }).__noliaMock.aiRuns.at(-1);
+        return {
+          allowDocumentPatch: run?.options?.allowDocumentPatch ?? false,
+          allowWorkspaceOperations: run?.options?.allowWorkspaceOperations ?? false,
+          patchFallback: run?.options?.patchFallback ?? false
+        };
+      })
+    )
+    .toEqual({ allowDocumentPatch: false, allowWorkspaceOperations: true, patchFallback: false });
   await proposal.getByText("影响范围", { exact: true }).click();
   await expect(proposal).toContainText("共 2 个操作");
   await expect(proposal).toContainText("ai.md");
   await expect(proposal).toContainText("ai-created.md");
   await expect(page.locator(".source-editor .cm-content")).toContainText("Original workspace body.");
   await expect.poll(() => page.evaluate(() => (window as typeof window & { __noliaMock: { files: Record<string, string> } }).__noliaMock.files["ai-created.md"])).toBeUndefined();
+  await proposal.getByRole("button", { name: "复制操作清单" }).click();
+  await expect
+    .poll(() =>
+      page.evaluate(() =>
+        (window as typeof window & { __noliaMock: { clipboardWrites: Array<{ text?: string }> } }).__noliaMock.clipboardWrites.map((item) => item.text ?? "").at(-1)
+      )
+    )
+    .toContain("ai-created.md");
 
   await proposal.getByRole("button", { name: "确认应用工作区操作" }).click();
   await expect(page.locator(".ai-patch-preview")).toBeHidden();
@@ -790,6 +1205,182 @@ test("AI workspace operation proposals require confirmation and create history s
       expect.objectContaining({ pathRel: "ai.md", content: "# Workspace Source\n\nOriginal workspace body." }),
       expect.objectContaining({ pathRel: "ai-created.md", content: "# AI Created\n\nNew workspace note." })
     ]));
+});
+
+test("AI chat multi-step document creation after reopen uses workspace operations instead of previous reply save", async ({ page }) => {
+  await page.setViewportSize({ width: 1320, height: 860 });
+  await installMockNolia(page, {
+    settings: {
+      editorMode: "source",
+      ai: openAiSettings({ allowWorkspaceRead: true, allowWorkspaceOperations: true })
+    },
+    files: {
+      "home.md": "# Reopened Workspace\n\nFresh chat session."
+    }
+  });
+
+  await page.goto("/");
+  await expect(page.getByRole("navigation", { name: "工作区导航" })).toBeVisible();
+  await page.getByRole("button", { name: "Nolia AI" }).click();
+  await page.locator(".ai-composer textarea").fill("帮我完成一个关于AI未来发展的文档，然后创建一个目录，将这份文档保存进去");
+  await page.getByRole("button", { name: "发送" }).click();
+
+  await expect(page.locator(".ai-message.is-error", { hasText: "没有找到可保存的上一条 AI 回复" })).toHaveCount(0);
+  const proposal = page.locator(".ai-patch-preview");
+  await expect(proposal).toContainText("Mock AI future document workspace operations");
+  await expect(proposal).toContainText("工作区操作提案");
+  await expect(proposal).toContainText("AI未来发展/AI未来发展.md");
+  await expect(proposal.locator(".ai-workspace-summary .ai-workspace-operation")).toHaveCount(2);
+  await expect
+    .poll(() =>
+      page.evaluate(() => {
+        const run = (window as typeof window & {
+          __noliaMock: {
+            aiRuns: Array<{
+              instruction: string;
+              options?: {
+                requireCurrentNote?: boolean;
+                allowDocumentPatch?: boolean;
+                allowWorkspaceOperations?: boolean;
+                patchFallback?: boolean;
+              };
+            }>;
+          };
+        }).__noliaMock.aiRuns.at(-1);
+        return {
+          instruction: run?.instruction ?? "",
+          requireCurrentNote: run?.options?.requireCurrentNote ?? false,
+          allowDocumentPatch: run?.options?.allowDocumentPatch ?? false,
+          allowWorkspaceOperations: run?.options?.allowWorkspaceOperations ?? false,
+          patchFallback: run?.options?.patchFallback ?? false
+        };
+      })
+    )
+    .toEqual({
+      instruction: expect.stringContaining("必须调用 proposeWorkspacePatch，提出 createDirectory 和 createFile 操作"),
+      requireCurrentNote: false,
+      allowDocumentPatch: false,
+      allowWorkspaceOperations: true,
+      patchFallback: false
+    });
+});
+
+test("AI workspace proposal supports twenty mixed operations and keeps controls reachable", async ({ page }) => {
+  await page.setViewportSize({ width: 390, height: 820 });
+  await installMockNolia(page, {
+    settings: {
+      editorMode: "source",
+      ai: openAiSettings({ allowWorkspaceRead: true, allowWorkspaceOperations: true })
+    },
+    files: {
+      "ai.md": "# Workspace Source\n\nOriginal workspace body for a complex batch.",
+      "notes/roadmap.md": "# Roadmap\n\nExisting roadmap body."
+    }
+  });
+
+  await page.goto("/");
+  await expect(page.getByRole("navigation", { name: "工作区导航" })).toBeVisible();
+  await page.getByRole("button", { name: "Nolia AI" }).click();
+  await page.locator(".ai-composer textarea").fill("请生成复杂 20 个工作区操作提案，包含替换、追加和创建文件。");
+  await page.getByRole("button", { name: "发送" }).click();
+
+  const proposal = page.locator(".ai-patch-preview");
+  await expect(proposal).toContainText("Mock complex 20 workspace operations");
+  await expect(proposal).toContainText("工作区操作提案");
+  await expect(proposal).toContainText("待确认操作");
+  await expect(proposal).toContainText("Existing note updated by a twenty-operation batch");
+  await expect(proposal.locator(".ai-workspace-summary .ai-workspace-operation")).toHaveCount(20);
+  await proposal.getByText("影响范围", { exact: true }).click();
+  await expect(proposal).toContainText("共 20 个操作");
+  await expect(proposal.locator(".ai-workspace-summary .ai-workspace-operation")).toHaveCount(20);
+  await expect(proposal.locator(".ai-patch-details .ai-workspace-operation-detail")).toHaveCount(20);
+  await expect(proposal).toContainText("notes/roadmap.md");
+  await expect(proposal).toContainText("ai-batch/note-18.md");
+  await expect(page.locator(".source-editor .cm-content")).toContainText("Original workspace body for a complex batch.");
+  await expect.poll(() => page.evaluate(() => (window as typeof window & { __noliaMock: { files: Record<string, string> } }).__noliaMock.files["ai-batch/note-18.md"])).toBeUndefined();
+
+  const layout = await proposal.evaluate((element) => {
+    const sidebar = document.querySelector(".ai-sidebar")?.getBoundingClientRect();
+    const card = element.getBoundingClientRect();
+    const diff = element.querySelector(".ai-patch-diff")?.getBoundingClientRect();
+    const details = element.querySelector(".ai-patch-details")?.getBoundingClientRect();
+    const list = element.querySelector(".ai-workspace-summary .ai-workspace-operation-list") as HTMLElement | null;
+    const actions = element.querySelector(".ai-patch-actions")?.getBoundingClientRect();
+    const operationOverflows = [...element.querySelectorAll(".ai-workspace-operation")].some((node) => {
+      const rect = node.getBoundingClientRect();
+      return rect.left < card.left - 1 || rect.right > card.right + 1;
+    });
+    const horizontalOverflow = [...element.querySelectorAll("*")].some((node) => {
+      const rect = node.getBoundingClientRect();
+      return rect.right > card.right + 1 || rect.left < card.left - 1;
+    });
+    return {
+      actionsVisible: Boolean(actions && sidebar && actions.bottom <= sidebar.bottom + 1 && actions.right <= sidebar.right + 1),
+      cardInsideSidebar: Boolean(sidebar && card.left >= sidebar.left - 1 && card.right <= sidebar.right + 1),
+      diffAboveActions: Boolean(diff && actions && diff.bottom <= actions.top + 1),
+      detailsAboveActions: Boolean(details && actions && details.bottom <= actions.top + 1),
+      listScrollable: Boolean(list && list.scrollHeight > list.clientHeight),
+      operationOverflows,
+      horizontalOverflow
+    };
+  });
+  expect(layout).toEqual({
+    actionsVisible: true,
+    cardInsideSidebar: true,
+    diffAboveActions: true,
+    detailsAboveActions: true,
+    listScrollable: true,
+    operationOverflows: false,
+    horizontalOverflow: false
+  });
+
+  await proposal.getByRole("button", { name: "确认应用工作区操作" }).click();
+  await expect(page.locator(".ai-patch-preview")).toBeHidden();
+  await expect(page.locator(".source-editor .cm-content")).toContainText("AI Workspace Applied");
+  await expect(page.locator(".right-panel.history")).toHaveAttribute("aria-hidden", "false");
+  await expect
+    .poll(() =>
+      page.evaluate(() => {
+        const mock = (window as typeof window & {
+          __noliaMock: {
+            files: Record<string, string>;
+            savedText: Record<string, string>;
+            createdPaths: string[];
+            historySnapshots: Array<{ pathRel: string; content: string }>;
+          };
+        }).__noliaMock;
+        const createdBatchPaths = mock.createdPaths.filter((pathRel) => pathRel.startsWith("ai-batch/")).sort();
+        return {
+          ai: mock.files["ai.md"],
+          roadmap: mock.files["notes/roadmap.md"],
+          firstCreated: mock.files["ai-batch/note-01.md"],
+          lastCreated: mock.files["ai-batch/note-18.md"],
+          savedText: mock.savedText,
+          createdBatchCount: createdBatchPaths.length,
+          createdBatchPaths,
+          snapshotCount: mock.historySnapshots.length,
+          snapshots: mock.historySnapshots
+        };
+      })
+    )
+    .toEqual({
+      ai: "# AI Workspace Applied\n\nExisting note updated by a twenty-operation batch.",
+      roadmap: expect.stringContaining("AI Batch Update"),
+      firstCreated: expect.stringContaining("AI Batch Note 1"),
+      lastCreated: expect.stringContaining("AI Batch Note 18"),
+      savedText: {
+        "ai.md": "# AI Workspace Applied\n\nExisting note updated by a twenty-operation batch.",
+        "notes/roadmap.md": expect.stringContaining("AI Batch Update")
+      },
+      createdBatchCount: 18,
+      createdBatchPaths: Array.from({ length: 18 }, (_, index) => `ai-batch/note-${String(index + 1).padStart(2, "0")}.md`),
+      snapshotCount: 20,
+      snapshots: expect.arrayContaining([
+        expect.objectContaining({ pathRel: "ai.md", content: "# Workspace Source\n\nOriginal workspace body for a complex batch." }),
+        expect.objectContaining({ pathRel: "notes/roadmap.md", content: "# Roadmap\n\nExisting roadmap body." }),
+        expect.objectContaining({ pathRel: "ai-batch/note-18.md", content: expect.stringContaining("AI Batch Note 18") })
+      ])
+    });
 });
 
 test("AI long table patch proposal keeps content inside the card", async ({ page }) => {
@@ -895,6 +1486,7 @@ test("history panel can restore the pre-AI version", async ({ page }) => {
   await page.getByRole("button", { name: "历史版本" }).click();
   await expect(page.locator(".right-panel.history")).toBeVisible();
   await expect(page.locator(".history-item")).toContainText("手动版本");
+  await expect.poll(() => historyListBottomGap(page)).toBeLessThanOrEqual(14);
   await page.locator(".history-item").first().click();
   await expect(page.locator(".history-compare")).toContainText("历史版本与当前版本对比");
   await expect(page.locator(".history-diff-line.is-removed").filter({ hasText: "Original version for history restore." })).toBeVisible();
@@ -913,6 +1505,19 @@ test("history panel can restore the pre-AI version", async ({ page }) => {
       expect.objectContaining({ pathRel: "ai.md", reason: "autosave", content: "# AI Patch Applied\n\nMock patch proposal body." })
     ]);
 });
+
+async function historyListBottomGap(page: Page) {
+  return page.locator(".history-panel").evaluate((panel) => {
+    const list = panel.querySelector(".history-list");
+    if (!(list instanceof HTMLElement)) {
+      return Number.POSITIVE_INFINITY;
+    }
+    const panelRect = panel.getBoundingClientRect();
+    const listRect = list.getBoundingClientRect();
+    const paddingBottom = Number.parseFloat(getComputedStyle(panel).paddingBottom) || 0;
+    return Math.round(panelRect.bottom - paddingBottom - listRect.bottom);
+  });
+}
 
 test("AI can write the previous assistant response into a new document without re-asking the model", async ({ page }) => {
   await page.setViewportSize({ width: 1320, height: 860 });
@@ -966,6 +1571,40 @@ test("AI can write the previous assistant response into a new document without r
       createdPaths: expect.arrayContaining([expect.stringMatching(/\.md$/)]),
       historySnapshots: expect.arrayContaining([expect.objectContaining({ content: "Mock response: 总结一下目录系统" })])
     });
+});
+
+test("AI new document creation failures stay visible on the proposal", async ({ page }) => {
+  await page.setViewportSize({ width: 1320, height: 860 });
+  await installMockNolia(page, {
+    settings: {
+      editorMode: "source",
+      ai: openAiSettings()
+    },
+    files: {
+      "ai.md": "# Summary Source\n\nOriginal body for generated summary."
+    },
+    failCreatePaths: ["ai-AI-生成.md"]
+  });
+
+  await page.goto("/");
+  await expect(page.getByRole("navigation", { name: "工作区导航" })).toBeVisible();
+  await page.getByRole("button", { name: "Nolia AI" }).click();
+
+  await page.locator(".ai-composer textarea").fill("总结一下目录系统");
+  await page.getByRole("button", { name: "发送" }).click();
+  await expect(page.locator(".ai-message.is-assistant")).toContainText("Mock response: 总结一下目录系统");
+
+  await page.locator(".ai-composer textarea").fill("将内容写入到新的文档中");
+  await page.getByRole("button", { name: "发送" }).click();
+  const proposal = page.locator(".ai-patch-preview");
+  await expect(proposal).toContainText("将上一条 AI 回复写入新文档");
+
+  await proposal.getByRole("button", { name: "新建文档", exact: true }).click();
+  await expect(proposal).toContainText("创建 AI 文档失败");
+  await expect(proposal.getByRole("button", { name: "新建文档", exact: true })).toBeEnabled();
+  await expect
+    .poll(() => page.evaluate(() => (window as typeof window & { __noliaMock: { createdPaths: string[] } }).__noliaMock.createdPaths))
+    .toEqual([]);
 });
 
 test("AI keeps the generated document proposal fully visible after long markdown replies", async ({ page }) => {
@@ -1111,6 +1750,33 @@ test("AI runs without terminal events show a timeout error and release the compo
   await expect(page.locator(".ai-message.is-assistant").last()).toContainText("Mock response: 超时后继续对话");
 });
 
+test("AI runs with continuing progress do not hit the idle watchdog", async ({ page }) => {
+  await page.setViewportSize({ width: 1320, height: 860 });
+  await installMockNolia(page, {
+    settings: {
+      editorMode: "source",
+      ai: openAiSettings()
+    },
+    files: {
+      "ai.md": "# AI Progress Timeout\n\nThe provider can keep streaming before a terminal event."
+    }
+  });
+
+  await page.goto("/");
+  await expect(page.getByRole("navigation", { name: "工作区导航" })).toBeVisible();
+  await page.getByRole("button", { name: "Nolia AI" }).click();
+  await page.locator(".ai-composer textarea").fill("模拟持续进展无终止事件");
+  await page.getByRole("button", { name: "发送" }).click();
+
+  await expect(page.locator(".ai-message.is-assistant")).toContainText("进展1", { timeout: 2_000 });
+  await page.waitForTimeout(1_200);
+  await expect(page.locator(".ai-error-card")).toHaveCount(0);
+  await expect(page.getByRole("button", { name: "停止" })).toBeVisible();
+  await expect(page.locator(".ai-message.is-error")).toContainText("AI 请求运行时间过长", { timeout: 4_000 });
+  await expect(page.getByRole("button", { name: "停止" })).toBeHidden();
+  await expect(page.getByRole("button", { name: "发送" })).toBeVisible();
+});
+
 test("AI startRun hangs are surfaced instead of leaving the sidebar stuck", async ({ page }) => {
   await page.setViewportSize({ width: 1320, height: 860 });
   await installMockNolia(page, {
@@ -1198,7 +1864,7 @@ test("AI critical controls stay reachable by role and avoid horizontal overflow"
   await expect(page.getByRole("region", { name: "Nolia AI" })).toBeVisible();
   await expect(page.getByRole("button", { name: "AI 设置" })).toBeVisible();
   await expect(page.getByRole("button", { name: "关闭 AI" })).toBeVisible();
-  await expect(page.locator(".ai-context-bar")).toContainText("当前笔记");
+  await expect(page.locator(".ai-composer-note")).toContainText("当前笔记");
   await expect(page.locator(".ai-composer textarea")).toBeEditable();
 
   await page.getByRole("button", { name: "AI 设置" }).click();

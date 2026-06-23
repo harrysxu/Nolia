@@ -87,6 +87,7 @@ export interface AiAllowedScopes {
   allowWorkspaceSearch: boolean;
   allowReadSearchResults: boolean;
   allowWorkspaceRead: boolean;
+  allowDocumentPatch: boolean;
   allowWorkspaceOperations: boolean;
 }
 

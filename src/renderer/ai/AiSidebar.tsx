@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type FormEvent } from "react";
-import { AlertTriangle, Copy, RefreshCw, Send, Settings, Sparkles, Square, X } from "lucide-react";
+import { AlertTriangle, Copy, RefreshCw, Send, Settings, Sparkles, Square, Wrench, X } from "lucide-react";
 
 import type { AiErrorCode, AiPatchOperation, AiPatchProposal, AiProviderProfile, AiSettingsPublic, AiSourceRef } from "../../shared/ai";
 import { renderMarkdownToHtml } from "../../shared/markdown";
@@ -13,6 +13,10 @@ export interface AiMessageView {
   errorCode?: AiErrorCode;
   retryable?: boolean;
 }
+
+type AiMessageRenderItem =
+  | { kind: "message"; message: AiMessageView }
+  | { kind: "events"; id: string; messages: AiMessageView[] };
 
 interface AiSidebarProps {
   open: boolean;
@@ -94,7 +98,7 @@ export function AiSidebar({
     }
     return settings.providers.filter((provider) => !provider.disabled && provider.model.trim()).map((provider) => ({
       value: provider.id,
-      label: `${modelDisplayName(provider)} · ${providerLabel(provider.providerId)}`
+      label: modelDisplayName(provider)
     }));
   }, [settings]);
   const selectedModelOption = activeProvider?.model.trim() && modelOptions.some((option) => option.value === activeProvider.id) ? activeProvider.id : "";
@@ -102,6 +106,7 @@ export function AiSidebar({
   const canRunRetry = enabled && !running && canRetry;
   const lastUserMessageIndex = findLastMessageIndex(messages, "user");
   const hasAssistantAfterLastUser = messages.slice(lastUserMessageIndex + 1).some((message) => message.role === "assistant");
+  const renderItems = useMemo(() => groupAiMessagesForRender(messages), [messages]);
   const composerNote = enabled
     ? contextSummary.length
       ? tr("将使用：{items}", { items: contextSummary.join(" · ") })
@@ -169,7 +174,6 @@ export function AiSidebar({
       <header className="ai-sidebar-header">
         <div>
           <strong><Sparkles size={16} /> {tr("Nolia AI")}</strong>
-          <span>{enabled && settings ? `${providerLabel(settings.providerId)} · ${settings.model || tr("未选择模型")}` : tr("AI 未启用")}</span>
         </div>
         <div className="ai-header-actions">
           <button type="button" className="icon-button" title={tr("AI 设置")} aria-label={tr("AI 设置")} onClick={onOpenSettings}>
@@ -180,9 +184,6 @@ export function AiSidebar({
           </button>
         </div>
       </header>
-      <div className="ai-context-bar">
-        {contextSummary.length ? contextSummary.map((item) => <span key={item}>{item}</span>) : <span>{tr("无当前上下文")}</span>}
-      </div>
       <div ref={messageListRef} className="ai-message-list">
         {!enabled && !hasConversation ? (
           <div className="ai-empty-state">
@@ -198,22 +199,24 @@ export function AiSidebar({
             <button type="button" className="secondary-button" onClick={onOpenSettings}>{tr("打开 AI 设置")}</button>
           </section>
         ) : null}
-        {messages.map((message) => (
-          message.role === "error" ? (
+        {renderItems.map((item) => (
+          item.kind === "events" ? (
+            <AiToolEventGroup key={item.id} messages={item.messages} />
+          ) : item.message.role === "error" ? (
             <AiErrorMessage
-              key={message.id}
-              message={message}
+              key={item.message.id}
+              message={item.message}
               enabled={enabled}
               running={running}
-              canRetry={canRunRetry && message.retryable !== false}
+              canRetry={canRunRetry && item.message.retryable !== false}
               hasPatchProposal={Boolean(patchProposal)}
               onOpenSettings={onOpenSettings}
               onRetry={onRetry}
               onCopy={onCopy}
             />
           ) : (
-            <article key={message.id} className={`ai-message is-${message.role}`}>
-              {message.role === "assistant" ? <AiMarkdownContent text={message.text} renderDiagrams={!running} /> : <pre>{message.text}</pre>}
+            <article key={item.message.id} className={`ai-message is-${item.message.role}`}>
+              {item.message.role === "assistant" ? <AiMarkdownContent text={item.message.text} renderDiagrams={!running} /> : <pre>{item.message.text}</pre>}
             </article>
           )
         ))}
@@ -253,35 +256,6 @@ export function AiSidebar({
         ) : null}
       </div>
       <form className="ai-composer" onSubmit={submit}>
-        {settings ? (
-          <div className="ai-composer-model-row">
-            <label>
-              <span>{tr("模型")}</span>
-              {modelOptions.length ? (
-                <select
-                  value={selectedModelOption}
-                  onChange={(event) => {
-                    if (event.target.value) {
-                      onUpdateDefaultProvider({ defaultProviderId: event.target.value });
-                    }
-                  }}
-                  disabled={!enabled || running}
-                >
-                  <option value="">{tr("选择模型")}</option>
-                  {modelOptions.map((option) => <option key={option.value} value={option.value}>{option.label}</option>)}
-                </select>
-              ) : (
-                <input
-                  value={activeProvider?.model ?? ""}
-                  placeholder={tr("输入模型名称")}
-                  disabled={!enabled || running}
-                  onChange={(event) => onUpdateDefaultProvider({ model: event.target.value })}
-                />
-              )}
-            </label>
-            <button type="button" className="secondary-button" onClick={onOpenSettings}>{tr("管理")}</button>
-          </div>
-        ) : null}
         <textarea
           value={draft}
           onChange={(event) => setDraft(event.target.value)}
@@ -295,6 +269,35 @@ export function AiSidebar({
             }
           }}
         />
+        {settings ? (
+          <div className="ai-composer-model-row">
+            <label>
+              {modelOptions.length ? (
+                <select
+                  aria-label={tr("模型")}
+                  value={selectedModelOption}
+                  onChange={(event) => {
+                    if (event.target.value) {
+                      onUpdateDefaultProvider({ defaultProviderId: event.target.value });
+                    }
+                  }}
+                  disabled={!enabled || running}
+                >
+                  <option value="">{tr("选择模型")}</option>
+                  {modelOptions.map((option) => <option key={option.value} value={option.value}>{option.label}</option>)}
+                </select>
+              ) : (
+                <input
+                  aria-label={tr("模型")}
+                  value={activeProvider?.model ?? ""}
+                  placeholder={tr("输入模型名称")}
+                  disabled={!enabled || running}
+                  onChange={(event) => onUpdateDefaultProvider({ model: event.target.value })}
+                />
+              )}
+            </label>
+          </div>
+        ) : null}
         <p className="ai-composer-note">{composerNote}</p>
         <div className="ai-composer-actions">
           <button type="button" className="secondary-button" disabled={!assistantText} onClick={() => onCopy(assistantText)}>
@@ -359,6 +362,26 @@ function AiErrorMessage({
   );
 }
 
+function AiToolEventGroup({ messages }: { messages: AiMessageView[] }) {
+  const { tr } = useRendererI18n();
+  return (
+    <details className="ai-tool-events">
+      <summary>
+        <Wrench size={14} />
+        <strong>{tr("工具调用")}</strong>
+        <span>{messages.length}</span>
+      </summary>
+      <div className="ai-tool-event-list">
+        {messages.map((message) => (
+          <article key={message.id} className="ai-tool-event">
+            <pre>{message.text}</pre>
+          </article>
+        ))}
+      </div>
+    </details>
+  );
+}
+
 function AiPatchPreview({
   proposal,
   applyMode,
@@ -377,26 +400,58 @@ function AiPatchPreview({
   onRetry: () => void;
 }) {
   const { tr } = useRendererI18n();
+  const [pendingAction, setPendingAction] = useState<"apply" | "new-document" | "discard" | undefined>();
+  const [actionError, setActionError] = useState<string | undefined>();
   const text = proposal.operations.map((operation) => ("afterText" in operation ? operation.afterText : "")).join("\n\n");
   const firstOperation = proposal.operations[0];
   const workspaceProposal = isWorkspacePatchProposal(proposal);
+  const copyText = workspaceProposal ? workspaceOperationSummary(proposal.operations, proposal.pathRel, tr) : text;
   const action = workspaceProposal ? { label: tr("确认应用工作区操作"), mode: "replace" as const, enabled: proposal.operations.length > 0 } : patchPrimaryAction(firstOperation, applyMode, tr);
   const showBeforeAfter = firstOperation?.type === "replaceDocument" || firstOperation?.type === "replaceRange";
   const beforeText = showBeforeAfter ? firstOperation.beforeText : "";
   const canCreateNewDocument = !workspaceProposal && applyMode !== "new-document" && firstOperation?.type === "replaceDocument" && Boolean(text.trim());
+  const busy = Boolean(pendingAction);
+  const runAction = async (actionName: "apply" | "new-document" | "discard", actionRunner: () => void | Promise<void>) => {
+    if (pendingAction) {
+      return;
+    }
+    setPendingAction(actionName);
+    setActionError(undefined);
+    try {
+      await actionRunner();
+    } catch (error) {
+      setActionError(error instanceof Error ? error.message : String(error));
+    } finally {
+      setPendingAction(undefined);
+    }
+  };
+  const primaryActionName = action.mode === "new-document" ? "new-document" : "apply";
+  const primaryLabel = pendingAction === primaryActionName ? primaryActionName === "new-document" ? tr("正在新建文档...") : tr("正在应用...") : action.label;
+  const newDocumentLabel = pendingAction === "new-document" ? tr("正在新建文档...") : tr("新建文档");
+  const discardLabel = pendingAction === "discard" ? tr("正在放弃...") : tr("放弃");
   return (
     <section className="ai-patch-preview">
       <header className="ai-patch-header">
-        <strong>{tr("建议修改")}</strong>
+        <strong>{workspaceProposal ? tr("工作区操作提案") : tr("建议修改")}</strong>
         <span>{proposal.summary}</span>
       </header>
       <div className="ai-patch-diff" aria-label={tr("影响范围")}>
-        <section className="ai-diff-block is-after">
-          <strong>{showBeforeAfter ? tr("建议") : tr("新增内容")}</strong>
-          <div className="ai-diff-content is-after">
-            <AiMarkdownContent text={text || tr("无内容")} renderDiagrams />
-          </div>
-        </section>
+        {workspaceProposal ? (
+          <section className="ai-workspace-summary" aria-label={tr("工作区操作清单")}>
+            <div className="ai-workspace-summary-header">
+              <strong>{tr("待确认操作")}</strong>
+              <span>{tr("共 {count} 个操作", { count: proposal.operations.length })}</span>
+            </div>
+            <WorkspaceOperationList operations={proposal.operations} fallbackPath={proposal.pathRel} />
+          </section>
+        ) : (
+          <section className="ai-diff-block is-after">
+            <strong>{showBeforeAfter ? tr("建议") : tr("新增内容")}</strong>
+            <div className="ai-diff-content is-after">
+              <AiMarkdownContent text={text || tr("无内容")} renderDiagrams />
+            </div>
+          </section>
+        )}
         {firstOperation ? (
           <details className="ai-patch-details">
             <summary>{tr("影响范围")}</summary>
@@ -405,14 +460,7 @@ function AiPatchPreview({
               {!workspaceProposal ? <span>{tr("操作：{operation}", { operation: operationLabel(firstOperation, tr) })}</span> : null}
             </div>
             {workspaceProposal ? (
-              <div className="ai-workspace-operation-list" role="list">
-                {proposal.operations.map((operation, index) => (
-                  <div key={`${operationLabel(operation, tr)}:${operationPath(operation, proposal.pathRel)}:${index}`} className="ai-workspace-operation" role="listitem">
-                    <strong>{operationLabel(operation, tr)}</strong>
-                    <span>{operationPath(operation, proposal.pathRel)}</span>
-                  </div>
-                ))}
-              </div>
+              <WorkspaceOperationList operations={proposal.operations} fallbackPath={proposal.pathRel} variant="details" />
             ) : null}
             {showBeforeAfter ? (
               <section className="ai-diff-block is-before">
@@ -423,14 +471,39 @@ function AiPatchPreview({
           </details>
         ) : null}
       </div>
+      {actionError ? (
+        <div className="ai-patch-action-error" role="alert">
+          <AlertTriangle size={14} />
+          <span>{actionError}</span>
+        </div>
+      ) : null}
       <div className="ai-patch-actions">
-        <button type="button" className="primary-button" disabled={!action.enabled} onClick={() => void onApply(proposal, action.mode)}>{action.label}</button>
-        {canCreateNewDocument ? <button type="button" className="secondary-button" onClick={() => void onApply(proposal, "new-document")}>{tr("新建文档")}</button> : null}
-        <button type="button" className="secondary-button" onClick={() => onCopy(text)}>{tr("复制结果")}</button>
-        <button type="button" className="secondary-button" disabled={!canRetry} onClick={onRetry}>{tr("重新生成")}</button>
-        <button type="button" className="secondary-button is-subtle" onClick={onDiscard}>{tr("放弃")}</button>
+        <button type="button" className="primary-button" disabled={!action.enabled || busy} onClick={() => void runAction(primaryActionName, () => onApply(proposal, action.mode))}>{primaryLabel}</button>
+        {canCreateNewDocument ? <button type="button" className="secondary-button" disabled={busy} onClick={() => void runAction("new-document", () => onApply(proposal, "new-document"))}>{newDocumentLabel}</button> : null}
+        <button type="button" className="secondary-button" disabled={busy} onClick={() => onCopy(copyText)}>{workspaceProposal ? tr("复制操作清单") : tr("复制结果")}</button>
+        <button type="button" className="secondary-button" disabled={!canRetry || busy} onClick={onRetry}>{tr("重新生成")}</button>
+        <button type="button" className="secondary-button is-subtle" disabled={busy} onClick={() => void runAction("discard", onDiscard)}>{discardLabel}</button>
       </div>
     </section>
+  );
+}
+
+function WorkspaceOperationList({ operations, fallbackPath, variant = "summary" }: { operations: AiPatchOperation[]; fallbackPath: string; variant?: "summary" | "details" }) {
+  const { tr } = useRendererI18n();
+  const compact = variant === "details";
+  const itemClassName = variant === "details" ? "ai-workspace-operation-detail" : "ai-workspace-operation";
+  return (
+    <div className={`ai-workspace-operation-list${compact ? " is-compact" : ""}`} role="list">
+      {operations.map((operation, index) => (
+        <div key={`${operationLabel(operation, tr)}:${operationPath(operation, fallbackPath)}:${index}`} className={itemClassName} role="listitem">
+          <div>
+            <strong>{operationLabel(operation, tr)}</strong>
+            <span>{operationPath(operation, fallbackPath)}</span>
+          </div>
+          <p>{operationPreview(operation, tr)}</p>
+        </div>
+      ))}
+    </div>
   );
 }
 
@@ -474,6 +547,12 @@ function patchPrimaryAction(
 ): { label: string; mode: "replace" | "insert" | "append" | "new-document"; enabled: boolean } {
   if (applyMode === "new-document") {
     return { label: tr("新建文档"), mode: "new-document", enabled: Boolean(operation) };
+  }
+  if (operation?.type === "createDirectory") {
+    return { label: tr("创建文件夹"), mode: "replace", enabled: true };
+  }
+  if (operation?.type === "movePath") {
+    return { label: tr("移动或重命名"), mode: "replace", enabled: true };
   }
   switch (operation?.type) {
     case "replaceDocument":
@@ -524,6 +603,12 @@ function sourceTitle(source: AiSourceRef, tr: ReturnType<typeof useRendererI18n>
 }
 
 function operationLabel(operation: AiPatchOperation, tr: ReturnType<typeof useRendererI18n>["tr"]): string {
+  if (operation.type === "createDirectory") {
+    return tr("创建文件夹");
+  }
+  if (operation.type === "movePath") {
+    return tr("移动或重命名");
+  }
   switch (operation.type) {
     case "replaceDocument":
       return tr("替换全文");
@@ -541,11 +626,34 @@ function operationLabel(operation: AiPatchOperation, tr: ReturnType<typeof useRe
 }
 
 function isWorkspacePatchProposal(proposal: AiPatchProposal): boolean {
-  return proposal.operations.some((operation) => operation.type === "createFile" || Boolean(operationPath(operation, "")));
+  return proposal.operations.some((operation) => operation.type === "createFile" || operation.type === "createDirectory" || operation.type === "movePath" || Boolean(operationPath(operation, "")));
 }
 
 function operationPath(operation: AiPatchOperation, fallbackPath: string): string {
+  if (operation.type === "movePath") {
+    return `${operation.sourcePathRel} -> ${operation.targetPathRel}`;
+  }
   return "pathRel" in operation && operation.pathRel ? operation.pathRel : fallbackPath;
+}
+
+function operationPreview(operation: AiPatchOperation, tr: ReturnType<typeof useRendererI18n>["tr"]): string {
+  if (operation.type === "createDirectory") {
+    return tr("创建文件夹：{path}", { path: operation.pathRel });
+  }
+  if (operation.type === "movePath") {
+    return tr("从 {source} 移动到 {target}", { source: operation.sourcePathRel, target: operation.targetPathRel });
+  }
+  if ("afterText" in operation && operation.afterText.trim()) {
+    return compactText(operation.afterText, 120);
+  }
+  if ("beforeText" in operation && operation.beforeText.trim()) {
+    return compactText(operation.beforeText, 120);
+  }
+  return tr("无内容");
+}
+
+function workspaceOperationSummary(operations: AiPatchOperation[], fallbackPath: string, tr: ReturnType<typeof useRendererI18n>["tr"]): string {
+  return operations.map((operation, index) => `${index + 1}. ${operationLabel(operation, tr)} - ${operationPath(operation, fallbackPath)}\n${operationPreview(operation, tr)}`).join("\n\n");
 }
 
 function compactText(value: string, maxLength: number): string {
@@ -554,6 +662,32 @@ function compactText(value: string, maxLength: number): string {
     return normalized;
   }
   return `${normalized.slice(0, Math.max(0, maxLength - 1))}…`;
+}
+
+function groupAiMessagesForRender(messages: AiMessageView[]): AiMessageRenderItem[] {
+  const items: AiMessageRenderItem[] = [];
+  let pendingEvents: AiMessageView[] = [];
+  const flushEvents = () => {
+    if (!pendingEvents.length) {
+      return;
+    }
+    items.push({
+      kind: "events",
+      id: `events:${pendingEvents[0].id}`,
+      messages: pendingEvents
+    });
+    pendingEvents = [];
+  };
+  for (const message of messages) {
+    if (message.role === "event") {
+      pendingEvents.push(message);
+      continue;
+    }
+    flushEvents();
+    items.push({ kind: "message", message });
+  }
+  flushEvents();
+  return items;
 }
 
 function looksLikeMarkdown(value: string): boolean {
@@ -572,12 +706,9 @@ function containsDiagramFence(value: string): boolean {
   return /(^|\n)```(?:mermaid|graph|flowchart|sequenceDiagram|classDiagram|stateDiagram|erDiagram|gantt|mindmap|timeline|journey|pie|quadrantChart)\b/i.test(value);
 }
 
-function modelDisplayName(provider: Pick<AiProviderProfile, "name" | "model">): string {
-  const name = provider.name.trim();
+function modelDisplayName(provider: Pick<AiProviderProfile, "alias" | "model">): string {
+  const name = provider.alias?.trim();
   const model = provider.model.trim();
-  if (model && (name === "OpenAI-compatible" || name === "Local Ollama" || !name)) {
-    return model;
-  }
   return name || model || "Untitled model";
 }
 
@@ -595,6 +726,3 @@ function isCurrentNoteSummaryRequest(value: string): boolean {
   return /(总结|概括|summary|summarize)/i.test(value) && /(当前|这篇|本文|笔记|note)/i.test(normalized);
 }
 
-function providerLabel(providerId: string): string {
-  return providerId === "ollama" ? "Ollama" : "OpenAI-compatible";
-}

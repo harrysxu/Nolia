@@ -76,6 +76,35 @@ describe("workspace service startup", () => {
     }
   });
 
+  it("opens initialized workspaces when workspace.json has a UTF-8 BOM", async () => {
+    const userData = await makeTempDir();
+    const home = await makeTempDir();
+    const workspaceRoot = await makeTempDir();
+    try {
+      const settings = new SettingsService(userData);
+      await settings.init();
+      const diagnostics = new DiagnosticsService(home);
+      await diagnostics.init();
+      const service = new WorkspaceService(settings, diagnostics);
+
+      const created = await service.createWorkspace({ path: workspaceRoot });
+      expect(created).toBeDefined();
+      await service.closeActiveWorkspace();
+
+      const configPath = path.join(workspaceRoot, ".nolia", "workspace.json");
+      const config = await readFile(configPath, "utf8");
+      await writeFile(configPath, `\uFEFF${config}`, "utf8");
+
+      const reopened = await service.openWorkspace({ path: workspaceRoot });
+      expect(reopened?.workspaceId).toBe(created?.workspaceId);
+      await service.closeActiveWorkspace();
+    } finally {
+      await rm(userData, { recursive: true, force: true });
+      await rm(home, { recursive: true, force: true });
+      await rm(workspaceRoot, { recursive: true, force: true });
+    }
+  });
+
   it("returns from workspace creation before the full index rebuild finishes", async () => {
     const userData = await makeTempDir();
     const home = await makeTempDir();

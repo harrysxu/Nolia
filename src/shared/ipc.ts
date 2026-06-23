@@ -232,6 +232,7 @@ export const AiProviderProfileSchema = z
   .object({
     id: z.string().min(1),
     name: z.string().min(1),
+    alias: z.string().optional(),
     providerId: AiProviderIdSchema,
     model: z.string(),
     baseUrl: z.string(),
@@ -305,7 +306,9 @@ export const AiEmbeddingTestRequestSchema = z
   .strict();
 
 export const AiSemanticIndexRequestSchema = z.object({
-  workspaceId: z.string().min(1)
+  workspaceId: z.string().min(1),
+  settings: AiEmbeddingSettingsSchema.partial().optional(),
+  apiKey: z.string().optional()
 });
 
 const AiTextRangeSchema = z.object({
@@ -375,9 +378,10 @@ export const AiRunStartRequestSchema = z.object({
       includeSelection: z.boolean().optional(),
       allowWorkspaceSearch: z.boolean().optional(),
       allowWorkspaceRead: z.boolean().optional(),
+      allowDocumentPatch: z.boolean().optional(),
       allowWorkspaceOperations: z.boolean().optional(),
       patchFallback: z.boolean().optional(),
-      maxToolRounds: z.number().int().positive().max(3).optional()
+      maxToolRounds: z.number().int().positive().max(30).optional()
     })
     .strict()
     .optional()

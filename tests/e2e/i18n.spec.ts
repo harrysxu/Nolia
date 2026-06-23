@@ -334,7 +334,7 @@ async function assertNoCoreChineseText(page: Page, options: { allowUserContent?:
 async function assertNoPageOverflow(page: Page) {
   const problems = await page.evaluate(() => {
     const bodyOverflow = document.body.scrollWidth > document.body.clientWidth + 1 ? `body horizontal overflow ${document.body.scrollWidth}/${document.body.clientWidth}` : "";
-    const clipped = [...document.querySelectorAll(".titlebar, .app-nav, .sidebar, .editor-zone, .right-panel, .statusbar, .settings-dialog")]
+    const clipped = [...document.querySelectorAll(".app-nav, .sidebar, .editor-zone, .right-panel, .statusbar, .settings-dialog")]
       .flatMap((element) => {
         if (!(element instanceof HTMLElement)) {
           return [];

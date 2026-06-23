@@ -11,7 +11,7 @@ test("outline panel is visible and jumps to a heading", async ({ page }, testInf
   });
 
   await page.goto("/");
-  await expect(page.locator(".breadcrumb strong")).toHaveText("outline.md");
+  await expect(page.locator(".statusbar")).toContainText("outline.md");
   const navOutlineButton = page.locator(".app-nav").getByRole("button", { name: "目录" });
   await expect(navOutlineButton).toBeVisible();
   await navOutlineButton.click();

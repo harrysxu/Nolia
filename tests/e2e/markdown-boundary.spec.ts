@@ -880,17 +880,17 @@ test("WYSIWYG opens Markdown link targets with modifier clicks", async ({ page }
   await expect.poll(() => page.evaluate(() => (window as Window & { __openedUrls?: string[] }).__openedUrls ?? [])).toContain("https://example.com/path?q=1");
 
   await editor.locator("a", { hasText: "target note" }).click({ modifiers: ["ControlOrMeta"] });
-  await expect(page.locator(".breadcrumb strong")).toHaveText("Target.md");
+  await expect(page.locator(".statusbar")).toContainText("Target.md");
 
   await openWorkspaceNote(page, "links.md");
   await page.getByRole("button", { name: "编辑", exact: true }).click();
   await page.locator(".markdown-inline-wikilink").click({ modifiers: ["ControlOrMeta"] });
-  await expect(page.locator(".breadcrumb strong")).toHaveText("Target.md");
+  await expect(page.locator(".statusbar")).toContainText("Target.md");
 
   await openWorkspaceNote(page, "links.md");
   await page.getByRole("button", { name: "编辑", exact: true }).click();
   await page.locator(".editable-image-node img").click({ modifiers: ["ControlOrMeta"] });
-  await expect(page.locator(".breadcrumb strong")).toHaveText("mock.png");
+  await expect(page.locator(".statusbar")).toContainText("mock.png");
   await expect(page.locator(".resource-preview img")).toHaveAttribute("src", "nolia-asset://workspace/ws_markdown_boundary/assets/mock.png");
 });
 
@@ -1384,7 +1384,7 @@ async function setupBoundaryWorkspace(page: Page, initialFiles: Record<string, s
 async function openWorkspaceNote(page: Page, name: string) {
   await page.getByRole("navigation", { name: "工作区导航" }).getByRole("button", { name: "笔记", exact: true }).click();
   await page.getByRole("button", { name, exact: true }).click();
-  await expect(page.locator(".breadcrumb strong")).toHaveText(name);
+  await expect(page.locator(".statusbar")).toContainText(name);
 }
 
 async function assertFullWysiwygRender(page: Page) {

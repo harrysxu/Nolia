@@ -95,6 +95,54 @@ describe("file system binary operations", () => {
       await rm(workspaceRoot, { recursive: true, force: true });
     }
   });
+
+  it("rejects renderer-exposed operations for internal workspace paths", async () => {
+    const userData = await makeTempDir();
+    const home = await makeTempDir();
+    const workspaceRoot = await makeTempDir();
+    let workspaces: WorkspaceService | undefined;
+    try {
+      await writeFile(path.join(workspaceRoot, "note.md"), "# Note\n");
+      await mkdir(path.join(workspaceRoot, ".git"), { recursive: true });
+      await mkdir(path.join(workspaceRoot, "node_modules", "pkg"), { recursive: true });
+      await writeFile(path.join(workspaceRoot, ".git", "config"), "[core]\n");
+      await writeFile(path.join(workspaceRoot, "node_modules", "pkg", "index.js"), "module.exports = {};\n");
+
+      const settings = new SettingsService(userData);
+      await settings.init();
+      const diagnostics = new DiagnosticsService(home);
+      await diagnostics.init();
+      workspaces = new WorkspaceService(settings, diagnostics);
+      const workspace = await workspaces.createWorkspace({ path: workspaceRoot });
+      expect(workspace).toBeDefined();
+
+      const files = new FileSystemService(workspaces, new HistoryService());
+      const workspaceId = workspace!.workspaceId;
+      const ignoredPathError = "Workspace path is ignored";
+
+      await expect(files.listTree({ workspaceId, root: ".git" })).rejects.toThrow(ignoredPathError);
+      await expect(files.readFile({ workspaceId, pathRel: ".nolia/workspace.json" })).rejects.toThrow(ignoredPathError);
+      await expect(files.readBinaryFile({ workspaceId, pathRel: "node_modules/pkg/index.js" })).rejects.toThrow(ignoredPathError);
+      await expect(files.listHistory({ workspaceId, pathRel: ".git/config" })).rejects.toThrow(ignoredPathError);
+      await expect(files.createHistorySnapshot({ workspaceId, pathRel: ".nolia/private.md", reason: "manual", content: "# Private" })).rejects.toThrow(ignoredPathError);
+      await expect(files.writeAtomic({ workspaceId, pathRel: ".nolia/private.md", content: "# Private", baseHash: "new" })).rejects.toThrow(ignoredPathError);
+      await expect(files.writeBinaryAtomic({ workspaceId, pathRel: ".git/asset.bin", data: new Uint8Array([1, 2, 3]).buffer, baseHash: "new" })).rejects.toThrow(ignoredPathError);
+      await expect(files.create({ workspaceId, pathRel: "node_modules/pkg/created.md", kind: "file", content: "# Created" })).rejects.toThrow(ignoredPathError);
+      await expect(files.rename({ workspaceId, sourcePathRel: ".git/config", targetPathRel: "config.md" })).rejects.toThrow(ignoredPathError);
+      await expect(files.rename({ workspaceId, sourcePathRel: "note.md", targetPathRel: ".nolia/note.md" })).rejects.toThrow(ignoredPathError);
+      await expect(files.trash({ workspaceId, pathRel: ".nolia/workspace.json" })).rejects.toThrow(ignoredPathError);
+      await expect(files.openExternal({ workspaceId, pathRel: ".git/config" })).rejects.toThrow(ignoredPathError);
+      expect(() => files.revealInFinder({ workspaceId, pathRel: "node_modules/pkg/index.js" })).toThrow(ignoredPathError);
+
+      await expect(readFile(path.join(workspaceRoot, ".nolia", "private.md"), "utf8")).rejects.toThrow();
+      await expect(readFile(path.join(workspaceRoot, "node_modules", "pkg", "created.md"), "utf8")).rejects.toThrow();
+    } finally {
+      await workspaces?.closeActiveWorkspace();
+      await rm(userData, { recursive: true, force: true });
+      await rm(home, { recursive: true, force: true });
+      await rm(workspaceRoot, { recursive: true, force: true });
+    }
+  });
 });
 
 async function makeTempDir(): Promise<string> {

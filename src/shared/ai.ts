@@ -10,6 +10,7 @@ export type AiProviderProfileId = string;
 
 export const MAX_CONVERSATION_HISTORY_TURNS = 50;
 export const MAX_CONVERSATION_HISTORY_MESSAGES = MAX_CONVERSATION_HISTORY_TURNS * 2;
+export const AI_WORKSPACE_PATCH_OPERATION_LIMIT = 20;
 export const AI_EMBEDDING_SECRET_ID = "embedding:openai-compatible";
 
 export type AiErrorCode =
@@ -48,6 +49,7 @@ export interface AiSettings {
 export interface AiProviderProfile {
   id: AiProviderProfileId;
   name: string;
+  alias?: string;
   providerId: AiProviderId;
   model: string;
   baseUrl: string;
@@ -138,6 +140,8 @@ export interface AiEmbeddingTestRequest {
 
 export interface AiSemanticIndexRequest {
   workspaceId: string;
+  settings?: Partial<AiEmbeddingSettings>;
+  apiKey?: string;
 }
 
 export type AiSemanticIndexState = "not_configured" | "not_created" | "ready" | "updating" | "stale" | "failed";
@@ -211,6 +215,7 @@ export interface AiRunStartRequest {
     includeSelection?: boolean;
     allowWorkspaceSearch?: boolean;
     allowWorkspaceRead?: boolean;
+    allowDocumentPatch?: boolean;
     allowWorkspaceOperations?: boolean;
     patchFallback?: boolean;
     maxToolRounds?: number;
@@ -285,6 +290,15 @@ export type AiPatchOperation =
       type: "createFile";
       pathRel: string;
       afterText: string;
+    }
+  | {
+      type: "createDirectory";
+      pathRel: string;
+    }
+  | {
+      type: "movePath";
+      sourcePathRel: string;
+      targetPathRel: string;
     };
 
 export type AiRunEvent =
@@ -349,10 +363,13 @@ export interface AiWriteTransaction {
   createdAt: number;
   operations: Array<{
     pathRel: string;
+    targetPathRel?: string;
     beforeSnapshotId?: number;
     beforeHash?: string;
     afterHash?: string;
     createdFile?: boolean;
+    createdDirectory?: boolean;
+    movedPath?: boolean;
   }>;
   undoneAt?: number;
 }
@@ -455,11 +472,15 @@ export function normalizeAiProviderProfile(value: unknown, fallback?: AiProvider
   const base = fallback ?? createAiProviderProfile(providerId);
   const apiMode: AiApiMode = providerId === "ollama" ? (raw.apiMode === "ollama-native" ? "ollama-native" : "chat-completions") : raw.apiMode === "responses" ? "responses" : "chat-completions";
   const defaultBaseUrl = providerId === "ollama" ? (apiMode === "ollama-native" ? "http://localhost:11434" : "http://localhost:11434/v1") : "";
+  const model = typeof raw.model === "string" ? raw.model : base.model;
+  const normalizedAlias = typeof raw.alias === "string" && raw.alias.trim() ? raw.alias.trim() : undefined;
+  const legacyNameAlias = legacyAliasFromName(raw.name, model, providerId);
   return {
     id: typeof raw.id === "string" && raw.id.trim() ? safeProviderProfileId(raw.id.trim()) : base.id,
     name: typeof raw.name === "string" && raw.name.trim() ? raw.name.trim() : base.name,
+    alias: normalizedAlias ?? legacyNameAlias ?? base.alias,
     providerId,
-    model: typeof raw.model === "string" ? raw.model : base.model,
+    model,
     baseUrl: typeof raw.baseUrl === "string" && raw.baseUrl.trim() ? raw.baseUrl.trim() : defaultBaseUrl,
     apiMode,
     disabled: typeof raw.disabled === "boolean" ? raw.disabled : Boolean(base.disabled)
@@ -613,4 +634,19 @@ function safeProviderProfileId(value: string): string {
     .replace(/[^a-z0-9_-]+/g, "-")
     .replace(/^-+|-+$/g, "")
     .slice(0, 48) || "provider";
+}
+
+function legacyAliasFromName(name: unknown, model: string, providerId: AiProviderId): string | undefined {
+  if (typeof name !== "string") {
+    return undefined;
+  }
+  const normalized = name.trim();
+  if (!normalized || normalized === model || normalized === "OpenAI-compatible" || normalized === "Local Ollama") {
+    return undefined;
+  }
+  if (/^OpenAI-compatible \d+$/.test(normalized) || /^Local Ollama \d+$/.test(normalized)) {
+    return undefined;
+  }
+  const defaultName = createAiProviderProfile(providerId).name;
+  return normalized === defaultName ? undefined : normalized;
 }

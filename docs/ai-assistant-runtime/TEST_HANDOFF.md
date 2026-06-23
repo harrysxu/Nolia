@@ -193,7 +193,7 @@ API key: 设置页输入并保存
 2. 开启 `启用语义检索`。
 3. 配置 embedding provider、base URL、model。
 4. 点击 `测试 embedding`。
-5. 点击 `更新语义索引`。
+5. 点击 `创建/更新语义索引`。
 6. 点击 `清空并重建`。
 
 预期：

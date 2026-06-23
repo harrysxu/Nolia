@@ -38,6 +38,7 @@ export interface MockWorkspaceOptions {
   searchItems?: SearchResultItem[];
   backlinks?: BacklinksResponse;
   plugins?: PluginDescriptor[];
+  failCreatePaths?: string[];
   createdAt?: number;
 }
 
@@ -46,6 +47,8 @@ export async function installMockNolia(page: Page, options: MockWorkspaceOptions
     type MockFileNode = { pathRel: string; name: string; kind: FileTreeNode["kind"]; size: number; mtimeMs: number; children?: MockFileNode[] };
     type MockWindow = typeof window & {
       __emitWorkspaceIndexed?: (event?: Partial<WorkspaceIndexedEvent>) => void;
+      __setMockFileContent?: (pathRel: string, content: string) => void;
+      __getMockFileContent?: (pathRel: string) => string | undefined;
       __noliaMock: {
         files: Record<string, string>;
         binaries: Record<string, MockBinaryFile>;
@@ -61,7 +64,9 @@ export async function installMockNolia(page: Page, options: MockWorkspaceOptions
         acceptedPlugins: string[];
         clipboardWrites: Array<{ text?: string; html?: string }>;
         historySnapshots: Array<{ id: number; pathRel: string; reason: string; content: string }>;
+        rejectedApprovals: Array<{ taskId: string; approvalId: string; reason?: string }>;
         aiProviderTests: AiProviderTestRequest[];
+        semanticIndexRequests: Array<{ settings?: Partial<AiEmbeddingSettings>; apiKey?: string }>;
         aiRuns: Array<{ runId: string; taskId?: string; via?: "task" | "run"; instruction: string; entryPoint?: string; actionId?: string; clientContext?: unknown; conversation?: unknown; options?: unknown }>;
       };
     };
@@ -104,6 +109,7 @@ export async function installMockNolia(page: Page, options: MockWorkspaceOptions
       return {
         id: typeof raw.id === "string" && raw.id.trim() ? safeProviderProfileId(raw.id.trim()) : base.id,
         name: typeof raw.name === "string" && raw.name.trim() ? raw.name.trim() : base.name,
+        alias: typeof raw.alias === "string" && raw.alias.trim() ? raw.alias.trim() : undefined,
         providerId,
         model: typeof raw.model === "string" ? raw.model : base.model,
         baseUrl: typeof raw.baseUrl === "string" && raw.baseUrl.trim() ? raw.baseUrl.trim() : providerId === "ollama" ? "http://localhost:11434" : "",
@@ -242,6 +248,7 @@ export async function installMockNolia(page: Page, options: MockWorkspaceOptions
     let semanticIndexReady = false;
     const files = new Map<string, string>(Object.entries(rawOptions.files ?? { "home.md": "# Home\n\nSelf test workspace." }));
     const binaries = new Map<string, MockBinaryFile>(Object.entries(rawOptions.binaries ?? {}));
+    const failCreatePaths = new Set(rawOptions.failCreatePaths ?? []);
     let snapshotCounter = 0;
     const snapshots: Array<{ id: number; pathRel: string; snapshotPath: string; sha256: string; reason: string; size: number; createdAt: number; content: string }> = [];
     let recentWorkspaces = [...(rawOptions.recentWorkspaces ?? [])];
@@ -267,7 +274,9 @@ export async function installMockNolia(page: Page, options: MockWorkspaceOptions
       acceptedPlugins: [],
       clipboardWrites: [],
       historySnapshots: [],
+      rejectedApprovals: [],
       aiProviderTests: [],
+      semanticIndexRequests: [],
       aiRuns: []
     };
     testWindow.__emitWorkspaceIndexed = (event = {}) => {
@@ -279,6 +288,11 @@ export async function installMockNolia(page: Page, options: MockWorkspaceOptions
       };
       workspaceIndexedListeners.forEach((listener) => listener(indexedEvent));
     };
+    testWindow.__setMockFileContent = (pathRel, content) => {
+      files.set(pathRel, content);
+      syncFiles();
+    };
+    testWindow.__getMockFileContent = (pathRel) => files.get(pathRel);
 
     const syncFiles = () => {
       testWindow.__noliaMock.files = Object.fromEntries(files);
@@ -376,6 +390,8 @@ export async function installMockNolia(page: Page, options: MockWorkspaceOptions
         }));
     };
     const hasPatchFallback = (value: unknown): boolean => Boolean(value && typeof value === "object" && (value as { patchFallback?: unknown }).patchFallback);
+    const allowsDocumentPatch = (value: unknown): boolean => Boolean(value && typeof value === "object" && ((value as { allowDocumentPatch?: unknown }).allowDocumentPatch || (value as { patchFallback?: unknown }).patchFallback));
+    const allowsWorkspaceOperations = (value: unknown): boolean => Boolean(value && typeof value === "object" && (value as { allowWorkspaceOperations?: unknown }).allowWorkspaceOperations);
     const createMockSnapshot = (pathRel: string, reason = "manual", content = files.get(pathRel) ?? "") => {
       const latestSnapshot = snapshots
         .filter((snapshot) => snapshot.pathRel === pathRel)
@@ -490,6 +506,9 @@ export async function installMockNolia(page: Page, options: MockWorkspaceOptions
           return { entry: snapshot ? snapshotEntry(snapshot) : undefined };
         },
         create: async ({ pathRel, content, kind }) => {
+          if (failCreatePaths.has(pathRel)) {
+            throw new Error(`Mock create failed for ${pathRel}`);
+          }
           if (kind === "file") {
             files.set(pathRel, content ?? "");
           }
@@ -641,25 +660,32 @@ export async function installMockNolia(page: Page, options: MockWorkspaceOptions
           message: "Mock embedding connected",
           localOnly: (settings?.providerId ?? mutableAiSettings.embedding.providerId) === "ollama"
         }),
-        semanticIndexStatus: async () => ({
-          state: semanticIndexReady ? "ready" : mutableAiSettings.embedding.enabled && mutableAiSettings.embedding.model ? "not_created" : "not_configured",
-          enabled: mutableAiSettings.embedding.enabled,
-          providerId: mutableAiSettings.embedding.providerId,
-          model: mutableAiSettings.embedding.model,
-          updatedAt: semanticIndexReady ? Date.now() : undefined,
-          totalFiles: files.size,
-          indexedFiles: semanticIndexReady ? files.size : 0,
-          staleFiles: 0,
-          chunkCount: semanticIndexReady ? files.size : 0
-        }),
-        updateSemanticIndex: async () => {
+        semanticIndexStatus: async (request) => {
+          const { settings } = request ?? {};
+          const requestSettings = { ...mutableAiSettings.embedding, ...(settings ?? {}) };
+          return {
+            state: semanticIndexReady ? "ready" : requestSettings.enabled && requestSettings.model ? "not_created" : "not_configured",
+            enabled: requestSettings.enabled,
+            providerId: requestSettings.providerId,
+            model: requestSettings.model,
+            updatedAt: semanticIndexReady ? Date.now() : undefined,
+            totalFiles: files.size,
+            indexedFiles: semanticIndexReady ? files.size : 0,
+            staleFiles: 0,
+            chunkCount: semanticIndexReady ? files.size : 0
+          };
+        },
+        updateSemanticIndex: async (request) => {
+          const { settings, apiKey } = request ?? {};
+          const requestSettings = { ...mutableAiSettings.embedding, ...(settings ?? {}) };
+          testWindow.__noliaMock.semanticIndexRequests.push({ settings, apiKey });
           semanticIndexReady = true;
           return {
             status: {
               state: "ready",
-              enabled: mutableAiSettings.embedding.enabled,
-              providerId: mutableAiSettings.embedding.providerId,
-              model: mutableAiSettings.embedding.model,
+              enabled: requestSettings.enabled,
+              providerId: requestSettings.providerId,
+              model: requestSettings.model,
               updatedAt: Date.now(),
               totalFiles: files.size,
               indexedFiles: files.size,
@@ -668,14 +694,17 @@ export async function installMockNolia(page: Page, options: MockWorkspaceOptions
             }
           };
         },
-        resetSemanticIndex: async () => {
+        resetSemanticIndex: async (request) => {
+          const { settings, apiKey } = request ?? {};
+          const requestSettings = { ...mutableAiSettings.embedding, ...(settings ?? {}) };
+          testWindow.__noliaMock.semanticIndexRequests.push({ settings, apiKey });
           semanticIndexReady = true;
           return {
             status: {
               state: "ready",
-              enabled: mutableAiSettings.embedding.enabled,
-              providerId: mutableAiSettings.embedding.providerId,
-              model: mutableAiSettings.embedding.model,
+              enabled: requestSettings.enabled,
+              providerId: requestSettings.providerId,
+              model: requestSettings.model,
               updatedAt: Date.now(),
               totalFiles: files.size,
               indexedFiles: files.size,
@@ -715,6 +744,37 @@ export async function installMockNolia(page: Page, options: MockWorkspaceOptions
           aiRunListeners.forEach((listener) => listener({ type: "cancelled", runId }));
           return { ok: true };
         },
+        approveProposal: async ({ taskId, approvalId }) => ({
+          id: taskId,
+          runId: `mock-ai-${aiRunCounter}`,
+          title: "Mock approval",
+          status: "completed" as const,
+          createdAt: Date.now(),
+          updatedAt: Date.now(),
+          instruction: "",
+          steps: [],
+          sources: [],
+          approvals: [{ id: approvalId, taskId, runId: `mock-ai-${aiRunCounter}`, toolName: "proposeWorkspacePatch", input: {}, status: "approved" as const, createdAt: Date.now() }],
+          proposals: [],
+          writes: []
+        }),
+        rejectProposal: async ({ taskId, approvalId, reason }) => {
+          testWindow.__noliaMock.rejectedApprovals.push({ taskId, approvalId, reason });
+          return {
+            id: taskId,
+            runId: `mock-ai-${aiRunCounter}`,
+            title: "Mock approval",
+            status: "completed" as const,
+            createdAt: Date.now(),
+            updatedAt: Date.now(),
+            instruction: "",
+            steps: [],
+            sources: [],
+            approvals: [{ id: approvalId, taskId, runId: `mock-ai-${aiRunCounter}`, toolName: "proposeWorkspacePatch", input: {}, status: "rejected" as const, createdAt: Date.now() }],
+            proposals: [],
+            writes: []
+          };
+        },
         onRunEvent: (listener) => {
           aiRunListeners.add(listener);
           return () => aiRunListeners.delete(listener);
@@ -730,6 +790,32 @@ export async function installMockNolia(page: Page, options: MockWorkspaceOptions
         }
       }
     };
+
+    const createTwentyWorkspaceOperations = () => [
+      {
+        type: "replaceDocument" as const,
+        pathRel: "ai.md",
+        beforeText: files.get("ai.md") ?? "",
+        afterText: "# AI Workspace Applied\n\nExisting note updated by a twenty-operation batch."
+      },
+      {
+        type: "append" as const,
+        pathRel: "notes/roadmap.md",
+        afterText: "\n\n## AI Batch Update\n\n- Added a product risk checklist.\n- Added a follow-up owner note."
+      },
+      ...Array.from({ length: 18 }, (_, index) => ({
+        type: "createFile" as const,
+        pathRel: `ai-batch/note-${String(index + 1).padStart(2, "0")}.md`,
+        afterText: [
+          `# AI Batch Note ${index + 1}`,
+          "",
+          `This file was created by operation ${index + 3} in a complex workspace proposal.`,
+          "",
+          "- Confirms multi-file create support.",
+          "- Keeps the operation preview text bounded."
+        ].join("\n")
+      }))
+    ];
 
     const runMockAi = async ({ runId, instruction, clientContext, conversation, options }: {
       runId: string;
@@ -761,11 +847,29 @@ export async function installMockNolia(page: Page, options: MockWorkspaceOptions
             }, 0);
             return { runId };
           }
+          if (instruction.includes("模拟持续进展无终止事件")) {
+            window.setTimeout(() => {
+              aiRunListeners.forEach((listener) => listener({ type: "run-started", runId }));
+            }, 0);
+            let progressCount = 0;
+            const progressTimer = window.setInterval(() => {
+              progressCount += 1;
+              aiRunListeners.forEach((listener) => listener({ type: "text-delta", runId, text: `进展${progressCount} ` }));
+              if (progressCount >= 10) {
+                window.clearInterval(progressTimer);
+              }
+            }, 500);
+            return { runId };
+          }
           window.setTimeout(() => {
             aiRunListeners.forEach((listener) => listener({ type: "run-started", runId }));
             if (instruction.includes("触发错误")) {
               aiRunListeners.forEach((listener) => listener({ type: "error", runId, code: "provider_bad_request", message: "Mock AI failure", retryable: true }));
               return;
+            }
+            if (instruction.includes("模拟工具调用")) {
+              aiRunListeners.forEach((listener) => listener({ type: "tool-call", runId, callId: `${runId}:tool-1`, toolName: "workspace_read_many_files", inputSummary: "读取多个工作区文件" }));
+              aiRunListeners.forEach((listener) => listener({ type: "tool-result", runId, callId: `${runId}:tool-1`, toolName: "workspace_read_many_files", resultSummary: "workspace_read_many_files completed." }));
             }
             if (instruction.includes("模拟空回复")) {
               aiRunListeners.forEach((listener) => listener({ type: "done", runId }));
@@ -795,7 +899,93 @@ export async function installMockNolia(page: Page, options: MockWorkspaceOptions
                 ? `Mock history: ${conversation.map((item) => typeof item === "object" && item && "content" in item ? String(item.content) : "").filter(Boolean).join(" / ")}`
                 : `Mock response: ${instruction}`;
             aiRunListeners.forEach((listener) => listener({ type: "text-delta", runId, text: responseText }));
-            if (instruction.includes("工作区操作提案")) {
+            if (instruction.includes("待确认工作区操作") && allowsWorkspaceOperations(options)) {
+              const taskId = `mock-task-${aiRunCounter}`;
+              const approvalId = `mock-approval-${aiRunCounter}`;
+              const proposalId = `mock-approved-proposal-${Date.now()}`;
+              aiRunListeners.forEach((listener) =>
+                listener({
+                  type: "approval-required",
+                  runId,
+                  approval: {
+                    id: approvalId,
+                    taskId,
+                    runId,
+                    toolName: "proposeWorkspacePatch",
+                    input: {},
+                    status: "pending",
+                    createdAt: Date.now(),
+                    proposalId
+                  },
+                  proposal: {
+                    id: proposalId,
+                    runId,
+                    taskId,
+                    approvalId,
+                    workspaceId: clientContext.workspaceId ?? workspace.workspaceId,
+                    pathRel: "ai.md",
+                    title: "Approval workspace proposal",
+                    summary: "Mock approval workspace operations",
+                    sourceSnapshotHash: clientContext.activeDocument?.baseHash ?? "",
+                    baseHash: clientContext.activeDocument?.baseHash ?? "",
+                    operations: [
+                      {
+                        type: "replaceDocument",
+                        pathRel: "ai.md",
+                        beforeText: files.get("ai.md") ?? "",
+                        afterText: "# AI Approval Applied\n\nExisting note updated."
+                      }
+                    ]
+                  }
+                })
+              );
+            } else if (instruction.includes("AI未来发展的文档") && instruction.includes("createDirectory") && instruction.includes("createFile") && allowsWorkspaceOperations(options)) {
+              aiRunListeners.forEach((listener) =>
+                listener({
+                  type: "patch-proposal",
+                  runId,
+                  proposal: {
+                    id: `mock-ai-future-document-proposal-${Date.now()}`,
+                    runId,
+                    workspaceId: clientContext.workspaceId ?? workspace.workspaceId,
+                    pathRel: "AI未来发展",
+                    title: "AI未来发展文档",
+                    summary: "Mock AI future document workspace operations",
+                    sourceSnapshotHash: "new",
+                    baseHash: "new",
+                    operations: [
+                      {
+                        type: "createDirectory",
+                        pathRel: "AI未来发展"
+                      },
+                      {
+                        type: "createFile",
+                        pathRel: "AI未来发展/AI未来发展.md",
+                        afterText: "# AI 未来发展\n\nAI 正在从单点工具走向可协作、可验证、可嵌入流程的智能基础设施。"
+                      }
+                    ]
+                  }
+                })
+              );
+            } else if ((instruction.includes("复杂 20 个工作区操作") || instruction.includes("复杂20个工作区操作")) && allowsWorkspaceOperations(options)) {
+              aiRunListeners.forEach((listener) =>
+                listener({
+                  type: "patch-proposal",
+                  runId,
+                  proposal: {
+                    id: `mock-workspace-proposal-20-${Date.now()}`,
+                    runId,
+                    workspaceId: clientContext.workspaceId ?? workspace.workspaceId,
+                    pathRel: "ai.md",
+                    title: "Complex workspace proposal",
+                    summary: "Mock complex 20 workspace operations",
+                    sourceSnapshotHash: clientContext.activeDocument?.baseHash ?? "",
+                    baseHash: clientContext.activeDocument?.baseHash ?? "",
+                    operations: createTwentyWorkspaceOperations()
+                  }
+                })
+              );
+            } else if (instruction.includes("工作区操作提案") && allowsWorkspaceOperations(options)) {
               aiRunListeners.forEach((listener) =>
                 listener({
                   type: "patch-proposal",
@@ -825,7 +1015,7 @@ export async function installMockNolia(page: Page, options: MockWorkspaceOptions
                   }
                 })
               );
-            } else if (instruction.includes("提案") && clientContext.activeDocument) {
+            } else if (instruction.includes("提案") && clientContext.activeDocument && allowsDocumentPatch(options)) {
               aiRunListeners.forEach((listener) =>
                 listener({
                   type: "patch-proposal",

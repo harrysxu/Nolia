@@ -2,6 +2,7 @@ import type { BrowserWindow } from "electron";
 
 import { IpcChannels } from "../../shared/channels";
 import type {
+  AiEmbeddingSettings,
   AiModelsListRequest,
   AiEmbeddingTestRequest,
   AiProviderTestRequest,
@@ -26,12 +27,57 @@ import { AiEmbeddingService } from "./embeddingService";
 import { AiProviderRegistry } from "./providerRegistry";
 import { AiProviderError, type AiAllowedScopes, type AiRuntimeServices } from "./types";
 
-const AI_RUN_TIMEOUT_MS = 90_000;
+const DEFAULT_AI_IDLE_TIMEOUT_MS = 120_000;
+const MIN_AI_IDLE_TIMEOUT_MS = 30_000;
+const MAX_AI_IDLE_TIMEOUT_MS = 10 * 60_000;
+const DEFAULT_AI_MAX_RUN_MS = 10 * 60_000;
+const MIN_AI_MAX_RUN_MS = 30_000;
+const MAX_AI_MAX_RUN_MS = 60 * 60_000;
+
+function resolveTimeoutMs(raw: string | undefined, fallback: number, min: number, max: number): number {
+  if (!raw) {
+    return fallback;
+  }
+  const parsed = Number(raw);
+  if (!Number.isFinite(parsed)) {
+    return fallback;
+  }
+  return Math.max(min, Math.min(max, Math.trunc(parsed)));
+}
+
+export function resolveAiIdleTimeoutMs(env: NodeJS.ProcessEnv = process.env): number {
+  const raw = env.NOLIA_AI_IDLE_TIMEOUT_MS?.trim() || env.NOLIA_AI_RUN_TIMEOUT_MS?.trim();
+  return resolveTimeoutMs(raw, DEFAULT_AI_IDLE_TIMEOUT_MS, MIN_AI_IDLE_TIMEOUT_MS, MAX_AI_IDLE_TIMEOUT_MS);
+}
+
+export function resolveAiRunTimeoutMs(env: NodeJS.ProcessEnv = process.env): number {
+  return resolveAiIdleTimeoutMs(env);
+}
+
+export function resolveAiMaxRunMs(env: NodeJS.ProcessEnv = process.env): number {
+  return resolveTimeoutMs(env.NOLIA_AI_MAX_RUN_MS?.trim(), DEFAULT_AI_MAX_RUN_MS, MIN_AI_MAX_RUN_MS, MAX_AI_MAX_RUN_MS);
+}
+
+function aiIdleTimeoutMessage(timeoutMs: number): string {
+  const timeoutSeconds = Math.round(timeoutMs / 1000);
+  return `AI 请求超过 ${timeoutSeconds} 秒没有新的输出或工具进展，已自动停止。请检查模型服务、网络或减少上下文后重试。`;
+}
+
+function aiMaxRunTimeoutMessage(timeoutMs: number): string {
+  const timeoutSeconds = Math.round(timeoutMs / 1000);
+  return `AI 请求运行超过 ${timeoutSeconds} 秒，已自动停止。请缩小任务范围或稍后重试。`;
+}
+
+function isAiRunActivityEvent(event: AiRunEvent): boolean {
+  return event.type !== "done" && event.type !== "cancelled" && event.type !== "error";
+}
 
 export class AiService {
   private readonly sessions = new AiSessionService();
   private readonly providers = new AiProviderRegistry();
   private readonly embeddings = new AiEmbeddingService();
+  private readonly semanticIndexRuns = new Map<string, Promise<AiSemanticIndexStatus | undefined>>();
+  private readonly semanticIndexProgress = new Map<string, AiSemanticIndexStatus>();
 
   constructor(
     private readonly settings: AiSettingsService,
@@ -90,7 +136,15 @@ export class AiService {
 
   semanticIndexStatus(request: AiSemanticIndexRequest): AiSemanticIndexStatus {
     const runtime = this.services.workspaces.requireWorkspace(request.workspaceId);
-    const settings = this.settings.resolvedEmbeddingSettings();
+    const settings = this.settings.resolvedEmbeddingSettings({
+      ...(request.settings ?? {}),
+      apiKey: request.apiKey
+    });
+    const runKey = semanticIndexRunKey(request.workspaceId, settings);
+    const progress = this.semanticIndexProgress.get(runKey);
+    if (progress) {
+      return progress;
+    }
     if (!this.services.semanticIndex) {
       return runtime.db.semanticIndexStatus(settings, undefined, "语义索引服务不可用。");
     }
@@ -99,12 +153,59 @@ export class AiService {
 
   async updateSemanticIndex(request: AiSemanticIndexRequest, reset = false): Promise<AiSemanticIndexResult> {
     const runtime = this.services.workspaces.requireWorkspace(request.workspaceId);
-    const settings = this.settings.resolvedEmbeddingSettings();
+    const settings = this.settings.resolvedEmbeddingSettings({
+      ...(request.settings ?? {}),
+      apiKey: request.apiKey
+    });
     if (!this.services.semanticIndex) {
       return { status: runtime.db.semanticIndexStatus(settings, undefined, "语义索引服务不可用。") };
     }
-    const status = await this.services.semanticIndex.update(runtime.db, settings, { reset });
+    const runKey = semanticIndexRunKey(request.workspaceId, settings);
+    if (!this.semanticIndexRuns.has(runKey)) {
+      const total = runtime.db.countSemanticIndexableDocuments();
+      const initialStatus = runtime.db.semanticIndexStatus(settings, {
+        phase: "scanning",
+        current: 0,
+        total
+      }, undefined, { fast: true });
+      this.semanticIndexProgress.set(runKey, initialStatus);
+      const run = this.startSemanticIndexRun(runKey, runtime.db, settings, reset);
+      this.semanticIndexRuns.set(runKey, run);
+    }
+    const status = this.semanticIndexProgress.get(runKey) ?? runtime.db.semanticIndexStatus(settings, undefined, undefined, { fast: true });
+    this.semanticIndexProgress.set(runKey, status);
     return { status };
+  }
+
+  private startSemanticIndexRun(runKey: string, db: ReturnType<AiRuntimeServices["workspaces"]["requireWorkspace"]>["db"], settings: ReturnType<AiSettingsService["resolvedEmbeddingSettings"]>, reset: boolean): Promise<AiSemanticIndexStatus | undefined> {
+    const run = new Promise<AiSemanticIndexStatus | undefined>((resolve) => {
+      setImmediate(() => {
+        void this.services.semanticIndex?.update(db, settings, {
+          reset,
+          onProgress: (status) => this.semanticIndexProgress.set(runKey, status)
+        }).then(
+          (status) => {
+            this.semanticIndexProgress.set(runKey, status);
+            resolve(status);
+          },
+          (error: unknown) => {
+            const message = error instanceof Error ? error.message : String(error);
+            const failedStatus = db.semanticIndexStatus(settings, undefined, message, { fast: true });
+            this.semanticIndexProgress.set(runKey, failedStatus);
+            this.services.diagnostics.warn("Semantic index update failed", {
+              providerId: settings.providerId,
+              model: settings.model,
+              error: message
+            });
+            resolve(failedStatus);
+          }
+        );
+      });
+    });
+    return run.finally(() => {
+      this.semanticIndexRuns.delete(runKey);
+      this.semanticIndexProgress.delete(runKey);
+    });
   }
 
   startRun(request: AiRunStartRequest): AiRunStartResponse {
@@ -120,18 +221,44 @@ export class AiService {
 
   private async run(runId: string, request: AiRunStartRequest, settings: ReturnType<AiSettingsService["resolvedSettings"]>, controller: AbortController): Promise<void> {
     const signal = controller.signal;
+    let idleTimer: ReturnType<typeof setTimeout> | undefined;
+    let maxRunTimer: ReturnType<typeof setTimeout> | undefined;
+    let timeoutMessage: string | undefined;
+    let timedOut = false;
+    const abortByTimeout = (message: string) => {
+      if (signal.aborted) {
+        return;
+      }
+      timedOut = true;
+      timeoutMessage = message;
+      controller.abort(new AiProviderError(message, "run_timeout"));
+    };
+    const idleTimeoutMs = resolveAiIdleTimeoutMs();
+    const idleTimeoutMessage = aiIdleTimeoutMessage(idleTimeoutMs);
+    const resetIdleTimer = () => {
+      if (idleTimer) {
+        clearTimeout(idleTimer);
+      }
+      idleTimer = setTimeout(() => {
+        abortByTimeout(idleTimeoutMessage);
+      }, idleTimeoutMs);
+    };
+    const maxRunMs = resolveAiMaxRunMs();
+    const maxRunTimeoutMessage = aiMaxRunTimeoutMessage(maxRunMs);
+    maxRunTimer = setTimeout(() => {
+      abortByTimeout(maxRunTimeoutMessage);
+    }, maxRunMs);
+    resetIdleTimer();
     const emit = (event: AiRunEvent) => {
+      if (isAiRunActivityEvent(event)) {
+        resetIdleTimer();
+      }
       if (this.emitRunEvent) {
         this.emitRunEvent(event);
         return;
       }
       this.getWindow()?.webContents.send(IpcChannels.aiRunEvent, event);
     };
-    let timedOut = false;
-    const timeout = setTimeout(() => {
-      timedOut = true;
-      controller.abort(new AiProviderError("AI 请求超过 90 秒未返回，已自动停止。请检查模型服务、网络或减少上下文后重试。", "run_timeout"));
-    }, AI_RUN_TIMEOUT_MS);
     try {
       if (!settings.enabled) {
         emit({ type: "error", runId, code: "ai_disabled", message: "AI is disabled", retryable: false });
@@ -195,11 +322,16 @@ export class AiService {
         type: "error",
         runId,
         code: abortedByTimeout ? "run_timeout" : error instanceof AiProviderError ? error.code : "unknown",
-        message: abortedByTimeout ? "AI 请求超过 90 秒未返回，已自动停止。请检查模型服务、网络或减少上下文后重试。" : error instanceof Error ? error.message : "AI run failed",
+        message: abortedByTimeout ? timeoutMessage ?? idleTimeoutMessage : error instanceof Error ? error.message : "AI run failed",
         retryable: true
       });
     } finally {
-      clearTimeout(timeout);
+      if (idleTimer) {
+        clearTimeout(idleTimer);
+      }
+      if (maxRunTimer) {
+        clearTimeout(maxRunTimer);
+      }
       this.sessions.complete(runId);
     }
   }
@@ -215,6 +347,11 @@ function allowedScopesFor(request: AiRunStartRequest, settings: ReturnType<AiSet
     allowWorkspaceSearch,
     allowReadSearchResults: Boolean(allowWorkspaceSearch && settings.allowReadSearchResults),
     allowWorkspaceRead,
-    allowWorkspaceOperations: Boolean(allowWorkspaceRead && (request.options?.allowWorkspaceOperations || settings.allowWorkspaceOperations) && settings.allowWorkspaceOperations)
+    allowDocumentPatch: Boolean(request.options?.allowDocumentPatch),
+    allowWorkspaceOperations: Boolean(allowWorkspaceRead && request.options?.allowWorkspaceOperations && settings.allowWorkspaceOperations)
   };
+}
+
+function semanticIndexRunKey(workspaceId: string, settings: AiEmbeddingSettings): string {
+  return [workspaceId, settings.providerId, settings.model, settings.baseUrl, settings.apiMode].join("\u0000");
 }

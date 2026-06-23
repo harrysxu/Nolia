@@ -1,7 +1,3 @@
-import { embedMany, type EmbeddingModel } from "ai";
-import { createOpenAI } from "@ai-sdk/openai";
-import { createOpenAICompatible } from "@ai-sdk/openai-compatible";
-
 import type { AiEmbeddingSettings, AiProviderTestResult } from "../../shared/ai";
 import { AiProviderError } from "./types";
 import { errorCodeForStatus, joinUrl, readErrorMessage } from "./providerUtils";
@@ -14,11 +10,18 @@ type OllamaEmbedResponse = {
   error?: string;
 };
 
+type OpenAiEmbeddingResponse = {
+  data?: Array<{
+    embedding?: number[];
+  }>;
+  embeddings?: number[][];
+  embedding?: number[];
+};
+
+const EMBEDDING_REQUEST_TIMEOUT_MS = 60_000;
+
 export class AiEmbeddingService {
   async test(settings: ResolvedAiEmbeddingSettings, signal?: AbortSignal): Promise<AiProviderTestResult> {
-    if (!settings.enabled) {
-      return { ok: false, providerId: settings.providerId, model: settings.model, localOnly: settings.providerId === "ollama", message: "Embedding is disabled", errorCode: "missing_model" };
-    }
     if (!settings.model.trim()) {
       return { ok: false, providerId: settings.providerId, localOnly: settings.providerId === "ollama", message: "Missing embedding model", errorCode: "missing_model" };
     }
@@ -49,6 +52,7 @@ export class AiEmbeddingService {
   }
 
   async embedMany(settings: ResolvedAiEmbeddingSettings, values: string[], signal?: AbortSignal): Promise<number[][]> {
+    throwIfAborted(signal);
     const cleanValues = values.map((value) => value.trim()).filter(Boolean);
     if (!settings.model.trim()) {
       throw new AiProviderError("Embedding 模型尚未配置。请先在 AI 设置中选择 embedding 模型。", "missing_model");
@@ -62,26 +66,50 @@ export class AiEmbeddingService {
     if (!settings.apiKey && !isLocalProvider(settings.baseUrl)) {
       throw new AiProviderError("Embedding Provider 缺少 API key。请在语义索引设置中填写并保存 API key。", "missing_api_key");
     }
+    return this.embedWithOpenAiCompatible(settings, cleanValues, signal);
+  }
+
+  private async embedWithOpenAiCompatible(settings: ResolvedAiEmbeddingSettings, values: string[], signal?: AbortSignal): Promise<number[][]> {
+    const timeout = withTimeoutSignal(signal);
     try {
-      const result = await embedMany({
-        model: createEmbeddingModel(settings),
-        values: cleanValues,
-        maxRetries: 0,
-        abortSignal: signal
+      const response = await fetch(joinUrl(settings.baseUrl, "/embeddings"), {
+        method: "POST",
+        headers: headers(settings),
+        body: JSON.stringify({ model: settings.model, input: values }),
+        signal: timeout.signal
       });
-      return result.embeddings;
+      if (!response.ok) {
+        throw new AiProviderError(await readErrorMessage(response), errorCodeForStatus(response.status));
+      }
+      const payload = (await response.json()) as OpenAiEmbeddingResponse;
+      if (Array.isArray(payload.data)) {
+        const vectors = payload.data.map((item) => item.embedding).filter(isEmbeddingVector);
+        if (vectors.length === values.length) {
+          return vectors;
+        }
+      }
+      if (Array.isArray(payload.embeddings) && payload.embeddings.every(isEmbeddingVector)) {
+        return payload.embeddings;
+      }
+      if (Array.isArray(payload.embedding) && isEmbeddingVector(payload.embedding) && values.length === 1) {
+        return [payload.embedding];
+      }
+      throw new AiProviderError("Embedding 服务没有返回有效向量。请确认模型支持 embedding，或换用专用 embedding 模型。", "provider_empty_response");
     } catch (error) {
-      throw normalizeEmbeddingError(error);
+      throw normalizeEmbeddingError(error, timeout.signal);
+    } finally {
+      timeout.cleanup();
     }
   }
 
   private async embedWithOllama(settings: ResolvedAiEmbeddingSettings, values: string[], signal?: AbortSignal): Promise<number[][]> {
+    const timeout = withTimeoutSignal(signal);
     try {
       const response = await fetch(joinUrl(settings.baseUrl, "/api/embed"), {
         method: "POST",
         headers: headers(settings),
         body: JSON.stringify({ model: settings.model, input: values }),
-        signal
+        signal: timeout.signal
       });
       if (!response.ok) {
         throw new AiProviderError(await readErrorMessage(response), errorCodeForStatus(response.status));
@@ -102,49 +130,69 @@ export class AiEmbeddingService {
         throw error;
       }
       return this.embedWithOllamaLegacy(settings, values, signal);
+    } finally {
+      timeout.cleanup();
     }
   }
 
   private async embedWithOllamaLegacy(settings: ResolvedAiEmbeddingSettings, values: string[], signal?: AbortSignal): Promise<number[][]> {
     const embeddings: number[][] = [];
     for (const value of values) {
-      const response = await fetch(joinUrl(settings.baseUrl, "/api/embeddings"), {
-        method: "POST",
-        headers: headers(settings),
-        body: JSON.stringify({ model: settings.model, prompt: value }),
-        signal
-      });
-      if (!response.ok) {
-        throw new AiProviderError(await readErrorMessage(response), errorCodeForStatus(response.status));
+      const timeout = withTimeoutSignal(signal);
+      try {
+        const response = await fetch(joinUrl(settings.baseUrl, "/api/embeddings"), {
+          method: "POST",
+          headers: headers(settings),
+          body: JSON.stringify({ model: settings.model, prompt: value }),
+          signal: timeout.signal
+        });
+        if (!response.ok) {
+          throw new AiProviderError(await readErrorMessage(response), errorCodeForStatus(response.status));
+        }
+        const payload = (await response.json()) as OllamaEmbedResponse;
+        if (payload.error) {
+          throw new AiProviderError(payload.error, "provider_bad_request");
+        }
+        if (!isEmbeddingVector(payload.embedding)) {
+          throw new AiProviderError("Ollama embedding 接口没有返回有效向量。请确认模型支持 embedding，或换用专用 embedding 模型。", "provider_empty_response");
+        }
+        embeddings.push(payload.embedding);
+      } catch (error) {
+        throw normalizeEmbeddingError(error, timeout.signal);
+      } finally {
+        timeout.cleanup();
       }
-      const payload = (await response.json()) as OllamaEmbedResponse;
-      if (payload.error) {
-        throw new AiProviderError(payload.error, "provider_bad_request");
-      }
-      if (!isEmbeddingVector(payload.embedding)) {
-        throw new AiProviderError("Ollama embedding 接口没有返回有效向量。请确认模型支持 embedding，或换用专用 embedding 模型。", "provider_empty_response");
-      }
-      embeddings.push(payload.embedding);
     }
     return embeddings;
   }
 }
 
-function createEmbeddingModel(settings: ResolvedAiEmbeddingSettings): EmbeddingModel {
-  const normalizedBaseUrl = settings.baseUrl.replace(/\/+$/, "");
-  if (!normalizedBaseUrl || normalizedBaseUrl === "https://api.openai.com" || normalizedBaseUrl === "https://api.openai.com/v1") {
-    const openai = createOpenAI({
-      apiKey: settings.apiKey,
-      baseURL: normalizedBaseUrl || undefined
-    });
-    return openai.embeddingModel(settings.model);
+function throwIfAborted(signal?: AbortSignal): void {
+  if (signal?.aborted) {
+    throw signal.reason instanceof Error ? signal.reason : new AiProviderError("Embedding 请求已取消。", "run_cancelled");
   }
-  const compatible = createOpenAICompatible({
-    name: "openai-compatible-embedding",
-    baseURL: normalizedBaseUrl,
-    apiKey: settings.apiKey
-  });
-  return compatible.embeddingModel(settings.model);
+}
+
+function withTimeoutSignal(parent?: AbortSignal): { signal: AbortSignal; cleanup: () => void } {
+  const controller = new AbortController();
+  const timeout = setTimeout(() => {
+    controller.abort(new AiProviderError("Embedding 请求超过 60 秒未返回。请检查 Provider 网络、模型服务或稍后重试。", "provider_unreachable"));
+  }, EMBEDDING_REQUEST_TIMEOUT_MS);
+  const abortFromParent = () => {
+    controller.abort(parent?.reason instanceof Error ? parent.reason : new AiProviderError("Embedding 请求已取消。", "run_cancelled"));
+  };
+  if (parent?.aborted) {
+    abortFromParent();
+  } else {
+    parent?.addEventListener("abort", abortFromParent, { once: true });
+  }
+  return {
+    signal: controller.signal,
+    cleanup: () => {
+      clearTimeout(timeout);
+      parent?.removeEventListener("abort", abortFromParent);
+    }
+  };
 }
 
 function headers(settings: ResolvedAiEmbeddingSettings): Record<string, string> {
@@ -168,9 +216,15 @@ function isLocalProvider(baseUrl: string): boolean {
   }
 }
 
-function normalizeEmbeddingError(error: unknown): AiProviderError {
+function normalizeEmbeddingError(error: unknown, signal?: AbortSignal): AiProviderError {
   if (error instanceof AiProviderError) {
     return error;
+  }
+  if (signal?.aborted && signal.reason instanceof AiProviderError) {
+    return signal.reason;
+  }
+  if (signal?.aborted && signal.reason instanceof Error) {
+    return new AiProviderError(signal.reason.message, "provider_unreachable");
   }
   const message = error instanceof Error ? error.message : String(error);
   if (/unauthorized|api key|401|403/i.test(message)) {
@@ -179,7 +233,7 @@ function normalizeEmbeddingError(error: unknown): AiProviderError {
   if (/rate limit|429/i.test(message)) {
     return new AiProviderError(message, "provider_rate_limited");
   }
-  if (/fetch|network|ECONN|ENOTFOUND|Failed to fetch/i.test(message)) {
+  if (/abort|timeout|fetch|network|ECONN|ENOTFOUND|Failed to fetch/i.test(message)) {
     return new AiProviderError(message, "provider_unreachable");
   }
   return new AiProviderError(message || "Embedding provider failed", "provider_bad_request");

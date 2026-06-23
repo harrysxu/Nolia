@@ -20,6 +20,17 @@ const settings: AppSettings = {
   plugins: {}
 };
 
+test("renderer shows a desktop runtime message when preload bridge is unavailable", async ({ page }) => {
+  const pageErrors: Error[] = [];
+  page.on("pageerror", (error) => pageErrors.push(error));
+
+  await page.goto("/");
+
+  await expect(page.getByRole("heading", { name: /请通过 Nolia 桌面应用打开|Open Nolia in the desktop app/ })).toBeVisible();
+  await expect(page.locator("#root")).toContainText(/Electron preload|桌面应用/);
+  expect(pageErrors).toEqual([]);
+});
+
 test("welcome screen renders with preload API mocked", async ({ page }) => {
   await page.addInitScript((mockSettings) => {
     window.nolia = {
@@ -105,7 +116,7 @@ test("welcome recent workspace cards open available workspaces and remove unavai
 
   await page.getByRole("button", { name: /Available Workspace/ }).click();
   await expect(page.getByText("文件与资源")).toBeVisible();
-  await expect(page.getByRole("banner").getByText("Available Workspace")).toBeVisible();
+  await expect(page.getByRole("navigation", { name: "工作区导航" })).toBeVisible();
   await expect(page.getByRole("button", { name: "home.md", exact: true })).toBeVisible();
 });
 
@@ -334,7 +345,7 @@ test("recent list keeps current order while active and refreshes on re-entry", a
   await expect(recentItems.nth(1).locator(".document-simple-name")).toHaveText("beta.md");
 
   await page.getByRole("button", { name: "beta.md", exact: true }).click();
-  await expect(page.locator(".breadcrumb strong")).toHaveText("beta.md");
+  await expect(page.locator(".statusbar")).toContainText("beta.md");
   await expect(recentItems.nth(0).locator(".document-simple-name")).toHaveText("alpha.md");
   await expect(recentItems.nth(1).locator(".document-simple-name")).toHaveText("beta.md");
 
@@ -769,7 +780,7 @@ test("workspace shell creates notes without native dialogs", async ({ page }) =>
   }, shellSettings);
 
   await page.goto("/");
-  await expect(page.getByRole("banner").getByText("E2E Workspace")).toBeVisible();
+  await expect(page.getByRole("navigation", { name: "工作区导航" })).toBeVisible();
   await expect(page.getByRole("navigation", { name: "工作区导航" }).getByRole("button")).toContainText(["最近", "笔记", "收藏", "搜索"]);
   await expect(page.getByText("文件与资源")).toBeVisible();
   await page.getByRole("button", { name: "最近", exact: true }).click();
@@ -882,10 +893,10 @@ test("workspace shell creates notes without native dialogs", async ({ page }) =>
   await expect(page.getByPlaceholder("搜索文件或资源")).toBeVisible();
 
   await page.getByRole("button", { name: "alpha.md", exact: true }).first().click();
-  await expect(page.locator(".breadcrumb strong")).toHaveText("alpha.md");
-  await expect(page.locator(".breadcrumb strong")).not.toHaveText("Alpha");
-  await expect(page.locator(".statusbar")).toContainText("全文");
-  await expect(page.locator(".statusbar")).toContainText("选中 0 字符");
+  await expect(page.locator(".statusbar")).toContainText("alpha.md");
+  await expect(page.locator(".statusbar")).not.toContainText("Alpha");
+  await expect(page.locator(".statusbar")).toContainText("字词");
+  await expect(page.locator(".statusbar")).not.toContainText("选中 0 字符");
   await expect(page.locator(".statusbar")).not.toContainText("/tmp/e2e-workspace");
   await expect(page.locator(".statusbar")).not.toContainText("已打开 alpha.md");
   await expect(page.getByRole("button", { name: "一级标题" })).toBeVisible();
@@ -1232,7 +1243,7 @@ test("immersive mode supports menu toggling and direct system Markdown files", a
   await page.goto("/");
   await page.getByRole("navigation", { name: "工作区导航" }).getByRole("button", { name: "笔记", exact: true }).click();
   await page.getByRole("button", { name: "alpha.md", exact: true }).click();
-  await expect(page.locator(".breadcrumb strong")).toHaveText("alpha.md");
+  await expect(page.locator(".statusbar")).toContainText("alpha.md");
 
   await page.evaluate(() => (window as Window & { __emitAppCommand?: (command: string) => void }).__emitAppCommand?.("view.immersive.toggle"));
   await expect(page.locator(".app-shell")).toHaveClass(/is-immersive/);
@@ -1280,7 +1291,7 @@ test("immersive mode supports menu toggling and direct system Markdown files", a
   await page.evaluate(() => (window as Window & { __emitAppCommand?: (command: string) => void }).__emitAppCommand?.("view.immersive.toggle"));
   await expect(page.locator(".app-shell")).not.toHaveClass(/is-immersive/);
   await expect(page.getByRole("navigation", { name: "工作区导航" })).toBeVisible();
-  await expect(page.locator(".breadcrumb strong")).toHaveText("alpha.md");
+  await expect(page.locator(".statusbar")).toContainText("alpha.md");
 });
 
 test("wysiwyg keeps Markdown list and code block editing behavior", async ({ page }) => {

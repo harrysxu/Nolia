@@ -1,6 +1,9 @@
+import { randomUUID } from "node:crypto";
 import { describe, expect, it, vi } from "vitest";
 
 import { AgentEngine } from "../src/main/ai/agentEngine";
+import { AiService } from "../src/main/ai/aiService";
+import { AiTaskService } from "../src/main/ai/aiTaskService";
 import { AiProviderError, type AiProvider, type AiResolvedSettings, type AiRuntimeServices } from "../src/main/ai/types";
 import { AiToolRegistry } from "../src/main/ai/tools/toolRegistry";
 import { normalizeAiSettings } from "../src/main/ai/aiSettingsService";
@@ -9,7 +12,7 @@ import { OpenAiCompatibleProvider } from "../src/main/ai/providers/openAiCompati
 import { OllamaProvider } from "../src/main/ai/providers/ollamaProvider";
 import { providerErrorCode as ollamaProviderErrorCode } from "../src/main/ai/providers/ollamaProvider";
 import { providerErrorCode as openAiProviderErrorCode } from "../src/main/ai/providers/openAiCompatibleProvider";
-import { DEFAULT_AI_EMBEDDING_SETTINGS } from "../src/shared/ai";
+import { AI_WORKSPACE_PATCH_OPERATION_LIMIT, DEFAULT_AI_EMBEDDING_SETTINGS, type AiPatchProposal, type AiTaskSnapshot } from "../src/shared/ai";
 
 describe("AI runtime", () => {
   it("normalizes provider defaults", () => {
@@ -38,9 +41,22 @@ describe("AI runtime", () => {
     });
   });
 
-  it("exposes proposal tools without requiring workspace search", () => {
+  it("exposes current-document proposal tools only with explicit document patch permission", () => {
     const registry = new AiToolRegistry();
 
+    const withoutPatchPermission = registry.providerTools(
+      {
+        includeCurrentNote: false,
+        includeSelection: true,
+        allowWorkspaceSearch: false,
+        allowReadSearchResults: false,
+        allowWorkspaceRead: false,
+        allowDocumentPatch: false,
+        allowWorkspaceOperations: false
+      },
+      true,
+      true
+    );
     const exposed = registry.providerTools(
       {
         includeCurrentNote: false,
@@ -48,12 +64,14 @@ describe("AI runtime", () => {
         allowWorkspaceSearch: false,
         allowReadSearchResults: false,
         allowWorkspaceRead: false,
+        allowDocumentPatch: true,
         allowWorkspaceOperations: false
       },
       true,
       true
     );
 
+    expect(withoutPatchPermission.map((tool) => tool.name)).not.toContain("proposePatch");
     expect(exposed.map((tool) => tool.name)).toContain("proposePatch");
     expect(exposed.map((tool) => tool.name)).not.toContain("searchNotes");
     expect(exposed.map((tool) => tool.name)).not.toContain("readNote");
@@ -69,6 +87,7 @@ describe("AI runtime", () => {
         allowWorkspaceSearch: false,
         allowReadSearchResults: true,
         allowWorkspaceRead: false,
+        allowDocumentPatch: false,
         allowWorkspaceOperations: false
       },
       true,
@@ -81,6 +100,7 @@ describe("AI runtime", () => {
         allowWorkspaceSearch: true,
         allowReadSearchResults: true,
         allowWorkspaceRead: false,
+        allowDocumentPatch: false,
         allowWorkspaceOperations: false
       },
       true,
@@ -102,6 +122,7 @@ describe("AI runtime", () => {
         allowWorkspaceSearch: false,
         allowReadSearchResults: false,
         allowWorkspaceRead: false,
+        allowDocumentPatch: false,
         allowWorkspaceOperations: false
       },
       true,
@@ -114,6 +135,7 @@ describe("AI runtime", () => {
         allowWorkspaceSearch: false,
         allowReadSearchResults: false,
         allowWorkspaceRead: true,
+        allowDocumentPatch: false,
         allowWorkspaceOperations: false
       },
       true,
@@ -135,6 +157,7 @@ describe("AI runtime", () => {
         allowWorkspaceSearch: false,
         allowReadSearchResults: false,
         allowWorkspaceRead: true,
+        allowDocumentPatch: false,
         allowWorkspaceOperations: true
       },
       true,
@@ -361,6 +384,7 @@ describe("AI runtime", () => {
             allowWorkspaceSearch: false,
             allowReadSearchResults: false,
             allowWorkspaceRead: false,
+            allowDocumentPatch: false,
             allowWorkspaceOperations: false
           },
           allowTools: true,
@@ -400,6 +424,7 @@ describe("AI runtime", () => {
         allowWorkspaceSearch: false,
         allowReadSearchResults: false,
         allowWorkspaceRead: false,
+        allowDocumentPatch: true,
         allowWorkspaceOperations: false
       },
       services: {
@@ -455,6 +480,7 @@ describe("AI runtime", () => {
           allowWorkspaceSearch: true,
           allowReadSearchResults: true,
           allowWorkspaceRead: false,
+          allowDocumentPatch: false,
           allowWorkspaceOperations: false
         },
         services: {
@@ -517,6 +543,7 @@ describe("AI runtime", () => {
             allowWorkspaceSearch: false,
             allowReadSearchResults: false,
             allowWorkspaceRead: false,
+            allowDocumentPatch: true,
             allowWorkspaceOperations: false
           },
           services: {
@@ -561,6 +588,7 @@ describe("AI runtime", () => {
           allowWorkspaceSearch: false,
           allowReadSearchResults: false,
           allowWorkspaceRead: true,
+          allowDocumentPatch: false,
           allowWorkspaceOperations: true
         },
         services: {
@@ -585,6 +613,80 @@ describe("AI runtime", () => {
     });
     expect(readFile).toHaveBeenCalledTimes(1);
     expect(writeAtomic).not.toHaveBeenCalled();
+  });
+
+  it("accepts twenty workspace patch operations and rejects larger batches", async () => {
+    const registry = new AiToolRegistry();
+    const existingContent: Record<string, string> = {
+      "existing.md": "# Existing\n\nOld body.",
+      "append.md": "# Append\n\nCurrent body."
+    };
+    const readFile = vi.fn(async ({ pathRel }: { pathRel: string }) => {
+      const content = existingContent[pathRel] ?? "";
+      return {
+        content,
+        sha256: `${pathRel}:hash`,
+        stat: { size: content.length, mtimeMs: 1, ctimeMs: 1, birthtimeMs: 1, isDirectory: false },
+        encoding: "utf-8" as const
+      };
+    });
+    const writeAtomic = vi.fn();
+    const context = {
+      runId: "run_workspace_patch_twenty",
+      workspaceId: "ws_patch",
+      clientContext: { workspaceId: "ws_patch" },
+      allowedScopes: {
+        includeCurrentNote: false,
+        includeSelection: false,
+        allowWorkspaceSearch: false,
+        allowReadSearchResults: false,
+        allowWorkspaceRead: true,
+        allowDocumentPatch: false,
+        allowWorkspaceOperations: true
+      },
+      services: {
+        files: { readFile, writeAtomic } as never,
+        workspaces: {} as never,
+        settings: {} as never,
+        diagnostics: {} as never
+      },
+      signal: new AbortController().signal,
+      searchResultPaths: new Set<string>()
+    };
+    const operations = [
+      { type: "replaceDocument" as const, pathRel: "existing.md", beforeText: existingContent["existing.md"], afterText: "# Existing\n\nUpdated body." },
+      { type: "append" as const, pathRel: "append.md", afterText: "\n\n## Added by AI\n\nBatch note." },
+      ...Array.from({ length: AI_WORKSPACE_PATCH_OPERATION_LIMIT - 2 }, (_, index) => ({
+        type: "createFile" as const,
+        pathRel: `batch/note-${String(index + 1).padStart(2, "0")}.md`,
+        afterText: `# Batch Note ${index + 1}\n\nCreated in a twenty-operation AI batch.`
+      }))
+    ];
+
+    const result = await registry.execute("proposeWorkspacePatch", { summary: "Twenty operation batch", operations }, context);
+
+    expect(result.proposal).toBeDefined();
+    const proposal = result.proposal!;
+    expect(proposal.operations).toHaveLength(AI_WORKSPACE_PATCH_OPERATION_LIMIT);
+    expect(proposal.operations[0]).toMatchObject({ type: "replaceDocument", pathRel: "existing.md", afterText: "# Existing\n\nUpdated body." });
+    expect(proposal.operations[1]).toMatchObject({ type: "append", pathRel: "append.md", afterText: "\n\n## Added by AI\n\nBatch note." });
+    expect(readFile).toHaveBeenCalledTimes(2);
+    expect(readFile.mock.calls.map(([request]) => request.pathRel)).toEqual(["existing.md", "append.md"]);
+    expect(writeAtomic).not.toHaveBeenCalled();
+
+    await expect(
+      registry.execute(
+        "proposeWorkspacePatch",
+        {
+          summary: "Too many operations",
+          operations: [
+            ...operations,
+            { type: "createFile" as const, pathRel: "batch/overflow.md", afterText: "# Overflow\n" }
+          ]
+        },
+        context
+      )
+    ).rejects.toThrow();
   });
 
   it("does not let readNote bypass search-result scope by reading the current note", async () => {
@@ -613,6 +715,7 @@ describe("AI runtime", () => {
             allowWorkspaceSearch: true,
             allowReadSearchResults: true,
             allowWorkspaceRead: false,
+            allowDocumentPatch: false,
             allowWorkspaceOperations: false
           },
           services: {
@@ -626,6 +729,381 @@ describe("AI runtime", () => {
         }
       )
     ).rejects.toThrow("readNote can only read notes found by search in this run");
+  });
+
+  it("does not let readNote read ignored paths even when a bad search result includes them", async () => {
+    const registry = new AiToolRegistry();
+    const readFile = vi.fn();
+
+    await expect(
+      registry.execute(
+        "readNote",
+        { pathRel: ".git/secret.md" },
+        {
+          runId: "run_ignored_search_result",
+          workspaceId: "ws_read",
+          clientContext: { workspaceId: "ws_read" },
+          allowedScopes: {
+            includeCurrentNote: false,
+            includeSelection: false,
+            allowWorkspaceSearch: true,
+            allowReadSearchResults: true,
+            allowWorkspaceRead: false,
+            allowDocumentPatch: false,
+            allowWorkspaceOperations: false
+          },
+          services: {
+            files: { readFile } as never,
+            workspaces: { requireWorkspace: vi.fn() } as never,
+            settings: {} as never,
+            diagnostics: {} as never
+          },
+          signal: new AbortController().signal,
+          searchResultPaths: new Set<string>([".git/secret.md"])
+        }
+      )
+    ).rejects.toThrow("readNote cannot read ignored workspace paths");
+    expect(readFile).not.toHaveBeenCalled();
+  });
+
+  it("limits whole-workspace reads to in-workspace readable text files", async () => {
+    const registry = new AiToolRegistry();
+    const readFile = vi.fn();
+    const context = {
+      runId: "run_workspace_read_boundaries",
+      workspaceId: "ws_read",
+      clientContext: { workspaceId: "ws_read" },
+      allowedScopes: {
+        includeCurrentNote: false,
+        includeSelection: false,
+        allowWorkspaceSearch: false,
+        allowReadSearchResults: false,
+        allowWorkspaceRead: true,
+        allowDocumentPatch: false,
+        allowWorkspaceOperations: false
+      },
+      services: {
+        files: { readFile } as never,
+        workspaces: {} as never,
+        settings: {} as never,
+        diagnostics: {} as never
+      },
+      signal: new AbortController().signal,
+      searchResultPaths: new Set<string>()
+    };
+
+    await expect(registry.execute("readWorkspaceFile", { pathRel: "../outside.md" }, context)).rejects.toThrow("Path escapes the workspace");
+    await expect(registry.execute("readWorkspaceFile", { pathRel: ".nolia/private.json" }, context)).rejects.toThrow("Workspace file is ignored and cannot be read by AI");
+    await expect(registry.execute("readWorkspaceFile", { pathRel: "assets/logo.png" }, context)).rejects.toThrow("AI whole-workspace reads only support text and Markdown files");
+    expect(readFile).not.toHaveBeenCalled();
+  });
+
+  it("lists workspace top-level entries before optional recursive entries", async () => {
+    const registry = new AiToolRegistry();
+    const listTree = vi.fn(async ({ root = "" }: { root?: string }) => {
+      if (root === "cc") {
+        return {
+          nodes: [
+            { pathRel: "cc/claude-code-docs", name: "claude-code-docs", kind: "directory", size: 0, mtimeMs: 1, children: [{ pathRel: "cc/claude-code-docs/README.md", name: "README.md", kind: "markdown", size: 10, mtimeMs: 1 }] },
+            { pathRel: "cc/.DS_Store", name: ".DS_Store", kind: "other", size: 10, mtimeMs: 1 }
+          ]
+        };
+      }
+      return {
+        nodes: [
+          {
+            pathRel: "_nolia_ai_test",
+            name: "_nolia_ai_test",
+            kind: "directory",
+            size: 0,
+            mtimeMs: 1,
+            children: Array.from({ length: 90 }, (_, index) => ({
+              pathRel: `_nolia_ai_test/deep-${index}.md`,
+              name: `deep-${index}.md`,
+              kind: "markdown",
+              size: 10,
+              mtimeMs: 1
+            }))
+          },
+          { pathRel: "A2UI", name: "A2UI", kind: "directory", size: 0, mtimeMs: 1, children: [{ pathRel: "A2UI/intro.md", name: "intro.md", kind: "markdown", size: 10, mtimeMs: 1 }] },
+          { pathRel: "cc", name: "cc", kind: "directory", size: 0, mtimeMs: 1, children: [{ pathRel: "cc/claude-code-docs", name: "claude-code-docs", kind: "directory", size: 0, mtimeMs: 1 }] },
+          { pathRel: ".git", name: ".git", kind: "directory", size: 0, mtimeMs: 1, children: [{ pathRel: ".git/config", name: "config", kind: "other", size: 10, mtimeMs: 1 }] },
+          { pathRel: "node_modules", name: "node_modules", kind: "directory", size: 0, mtimeMs: 1, children: [{ pathRel: "node_modules/pkg/index.js", name: "index.js", kind: "other", size: 10, mtimeMs: 1 }] },
+          { pathRel: "assets/logo.png", name: "logo.png", kind: "asset", size: 10, mtimeMs: 1 },
+          { pathRel: "data/report.json", name: "report.json", kind: "asset", size: 10, mtimeMs: 1 }
+        ]
+      };
+    });
+    const context = {
+      runId: "run_workspace_list_boundaries",
+      workspaceId: "ws_list",
+      clientContext: { workspaceId: "ws_list" },
+      allowedScopes: {
+        includeCurrentNote: false,
+        includeSelection: false,
+        allowWorkspaceSearch: false,
+        allowReadSearchResults: false,
+        allowWorkspaceRead: true,
+        allowDocumentPatch: false,
+        allowWorkspaceOperations: false
+      },
+      services: {
+        files: { listTree } as never,
+        workspaces: {} as never,
+        settings: {} as never,
+        diagnostics: {} as never
+      },
+      signal: new AbortController().signal,
+      searchResultPaths: new Set<string>()
+    };
+    const result = await registry.execute(
+      "listWorkspaceFiles",
+      { limit: 5 },
+      context
+    );
+
+    expect(result.result).toMatchObject({
+      items: expect.arrayContaining([
+        expect.objectContaining({ pathRel: "_nolia_ai_test" }),
+        expect.objectContaining({ pathRel: "A2UI" }),
+        expect.objectContaining({ pathRel: "cc" }),
+        expect.objectContaining({ pathRel: "data/report.json" })
+      ])
+    });
+    expect(JSON.stringify(result.result)).not.toContain("_nolia_ai_test/deep-0.md");
+    expect(JSON.stringify(result.result)).not.toContain(".git");
+    expect(JSON.stringify(result.result)).not.toContain("node_modules");
+    expect(JSON.stringify(result.result)).not.toContain("logo.png");
+
+    const ccResult = await registry.execute("listWorkspaceFiles", { root: "cc", limit: 10 }, context);
+
+    expect(listTree).toHaveBeenLastCalledWith({ workspaceId: "ws_list", root: "cc", sortBy: "name", showHidden: false });
+    expect(ccResult.result).toMatchObject({
+      items: [expect.objectContaining({ pathRel: "cc/claude-code-docs", kind: "directory" })]
+    });
+    expect(JSON.stringify(ccResult.result)).not.toContain(".DS_Store");
+  });
+
+  it("inspects and finds workspace paths without searching note bodies", async () => {
+    const registry = new AiToolRegistry();
+    const listTree = vi.fn(async ({ root = "" }: { root?: string }) => {
+      if (root === "cc") {
+        return {
+          nodes: [
+            { pathRel: "cc/claude-code-docs", name: "claude-code-docs", kind: "directory", size: 0, mtimeMs: 2, children: [{ pathRel: "cc/claude-code-docs/README.md", name: "README.md", kind: "markdown", size: 50, mtimeMs: 3 }] }
+          ]
+        };
+      }
+      return {
+        nodes: [
+          { pathRel: "cc", name: "cc", kind: "directory", size: 0, mtimeMs: 1, children: [{ pathRel: "cc/claude-code-docs", name: "claude-code-docs", kind: "directory", size: 0, mtimeMs: 2 }] },
+          { pathRel: "notes/readme.md", name: "readme.md", kind: "markdown", size: 10, mtimeMs: 1 }
+        ]
+      };
+    });
+    const context = {
+      runId: "run_path_tools",
+      workspaceId: "ws_paths",
+      clientContext: { workspaceId: "ws_paths" },
+      allowedScopes: {
+        includeCurrentNote: false,
+        includeSelection: false,
+        allowWorkspaceSearch: false,
+        allowReadSearchResults: false,
+        allowWorkspaceRead: true,
+        allowDocumentPatch: false,
+        allowWorkspaceOperations: false
+      },
+      services: {
+        files: { listTree } as never,
+        workspaces: {} as never,
+        settings: {} as never,
+        diagnostics: {} as never
+      },
+      signal: new AbortController().signal,
+      searchResultPaths: new Set<string>()
+    };
+
+    await expect(registry.execute("inspectWorkspacePath", { pathRel: "cc" }, context)).resolves.toMatchObject({
+      result: { pathRel: "cc", exists: true, kind: "directory", childCount: 1 }
+    });
+    await expect(registry.execute("inspectWorkspacePath", { pathRel: "missing" }, context)).resolves.toMatchObject({
+      result: { pathRel: "missing", exists: false, ignored: false }
+    });
+    await expect(registry.execute("findWorkspacePaths", { query: "claude", root: "cc", includeFiles: false }, context)).resolves.toMatchObject({
+      result: { items: [expect.objectContaining({ pathRel: "cc/claude-code-docs", kind: "directory" })] }
+    });
+  });
+
+  it("creates reviewable folder and move workspace proposals without writing files", async () => {
+    const registry = new AiToolRegistry();
+    const listTree = vi.fn(async ({ root = "" }: { root?: string }) => {
+      if (root === "docs") {
+        return {
+          nodes: [{ pathRel: "docs/guide.md", name: "guide.md", kind: "markdown", size: 10, mtimeMs: 1 }]
+        };
+      }
+      if (root === "archive") {
+        return { nodes: [] };
+      }
+      return {
+        nodes: [
+          { pathRel: "docs", name: "docs", kind: "directory", size: 0, mtimeMs: 1, children: [{ pathRel: "docs/guide.md", name: "guide.md", kind: "markdown", size: 10, mtimeMs: 1 }] }
+        ]
+      };
+    });
+    const create = vi.fn();
+    const rename = vi.fn();
+    const context = {
+      runId: "run_folder_move_proposal",
+      workspaceId: "ws_patch",
+      clientContext: { workspaceId: "ws_patch" },
+      allowedScopes: {
+        includeCurrentNote: false,
+        includeSelection: false,
+        allowWorkspaceSearch: false,
+        allowReadSearchResults: false,
+        allowWorkspaceRead: true,
+        allowDocumentPatch: false,
+        allowWorkspaceOperations: true
+      },
+      services: {
+        files: { listTree, create, rename } as never,
+        workspaces: {} as never,
+        settings: {} as never,
+        diagnostics: {} as never
+      },
+      signal: new AbortController().signal,
+      searchResultPaths: new Set<string>()
+    };
+
+    const result = await registry.execute(
+      "proposeWorkspacePatch",
+      {
+        summary: "Create archive and move guide",
+        operations: [
+          { type: "createDirectory", pathRel: "archive" },
+          { type: "movePath", sourcePathRel: "docs/guide.md", targetPathRel: "archive/guide.md" }
+        ]
+      },
+      context
+    );
+
+    expect(result.proposal).toMatchObject({
+      summary: "Create archive and move guide",
+      pathRel: "archive",
+      operations: [
+        { type: "createDirectory", pathRel: "archive" },
+        { type: "movePath", sourcePathRel: "docs/guide.md", targetPathRel: "archive/guide.md" }
+      ]
+    });
+    expect(create).not.toHaveBeenCalled();
+    expect(rename).not.toHaveBeenCalled();
+  });
+
+  it("keeps workspace proposals review-only and rejects unsupported targets", async () => {
+    const registry = new AiToolRegistry();
+    const readFile = vi.fn();
+    const writeAtomic = vi.fn();
+    const context = {
+      runId: "run_workspace_patch_boundaries",
+      workspaceId: "ws_patch",
+      clientContext: { workspaceId: "ws_patch" },
+      allowedScopes: {
+        includeCurrentNote: false,
+        includeSelection: false,
+        allowWorkspaceSearch: false,
+        allowReadSearchResults: false,
+        allowWorkspaceRead: true,
+        allowDocumentPatch: false,
+        allowWorkspaceOperations: true
+      },
+      services: {
+        files: { readFile, writeAtomic } as never,
+        workspaces: {} as never,
+        settings: {} as never,
+        diagnostics: {} as never
+      },
+      signal: new AbortController().signal,
+      searchResultPaths: new Set<string>()
+    };
+
+    await expect(
+      registry.execute("proposeWorkspacePatch", { summary: "Create binary", operations: [{ type: "createFile", pathRel: "assets/result.png", afterText: "not a png" }] }, context)
+    ).rejects.toThrow("Workspace patch file operations only support Markdown files");
+    await expect(
+      registry.execute("proposeWorkspacePatch", { summary: "Touch private data", operations: [{ type: "createFile", pathRel: ".nolia/private.md", afterText: "# Private" }] }, context)
+    ).rejects.toThrow("Workspace operation cannot target ignored paths");
+    await expect(
+      registry.execute("proposeWorkspacePatch", { summary: "Escape workspace", operations: [{ type: "createFile", pathRel: "../outside.md", afterText: "# Outside" }] }, context)
+    ).rejects.toThrow("Path escapes the workspace");
+    expect(readFile).not.toHaveBeenCalled();
+    expect(writeAtomic).not.toHaveBeenCalled();
+  });
+
+  it("rejects ignored paths again when applying an approved task proposal", async () => {
+    const taskId = "task_injected";
+    const approvalId = "approval_injected";
+    const workspaceId = "ws_patch";
+    const proposal: AiPatchProposal = {
+      id: "proposal_injected",
+      runId: "run_injected",
+      taskId,
+      approvalId,
+      workspaceId,
+      pathRel: ".nolia/private.md",
+      title: "private.md",
+      summary: "Injected internal write",
+      sourceSnapshotHash: "new",
+      baseHash: "new",
+      operations: [{ type: "createFile" as const, pathRel: ".nolia/private.md", afterText: "# Private" }]
+    };
+    const task: AiTaskSnapshot = {
+      id: taskId,
+      runId: "run_injected",
+      workspaceId,
+      title: "Injected task",
+      status: "waiting_approval" as const,
+      createdAt: Date.now(),
+      updatedAt: Date.now(),
+      instruction: "write internal file",
+      steps: [],
+      sources: [],
+      approvals: [
+        {
+          id: approvalId,
+          taskId,
+          runId: "run_injected",
+          toolName: "proposal",
+          input: proposal.operations,
+          status: "pending" as const,
+          createdAt: Date.now(),
+          proposalId: proposal.id
+        }
+      ],
+      proposals: [proposal],
+      writes: []
+    };
+    const saveTask = vi.fn();
+    const create = vi.fn();
+    const service = new AiTaskService(
+      { startRun: () => ({ runId: `run_${randomUUID()}` }), cancelRun: vi.fn() } as unknown as AiService,
+      {
+        files: { create } as never,
+        workspaces: { getActiveWorkspace: () => undefined, requireWorkspace: vi.fn() } as never,
+        settings: {} as never,
+        diagnostics: {} as never
+      },
+      vi.fn()
+    );
+    vi.spyOn(service as unknown as { readTask: (taskId: string) => Promise<AiTaskSnapshot | undefined> }, "readTask").mockResolvedValue(task);
+    vi.spyOn(service as unknown as { saveTask: (task: AiTaskSnapshot) => Promise<void> }, "saveTask").mockImplementation(saveTask);
+
+    await expect(service.approveProposal({ taskId, approvalId })).rejects.toThrow("Workspace path is ignored");
+    expect(create).not.toHaveBeenCalled();
+    expect(saveTask).not.toHaveBeenCalled();
+    expect(task.approvals[0].status).toBe("pending");
+    expect(task.proposals[0].status).toBeUndefined();
   });
 });
 

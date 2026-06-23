@@ -85,7 +85,7 @@ test("workspace, settings, search, and resource editor layouts stay readable acr
 
 async function assertWorkspaceLayout(page: Page) {
   const problems = await page.evaluate(() => {
-    const selectors = [".titlebar", ".app-nav", ".sidebar", ".editor-zone", ".right-panel", ".statusbar"];
+    const selectors = [".app-nav", ".sidebar", ".editor-zone", ".right-panel", ".statusbar"];
     const rects = selectors.flatMap((selector) => {
       const element = document.querySelector(selector);
       if (!(element instanceof HTMLElement)) {
@@ -120,7 +120,17 @@ async function assertWorkspaceLayout(page: Page) {
         }
       }
     }
-    return [...viewportProblems, ...overlapProblems, document.body.scrollWidth > document.body.clientWidth + 1 ? "body has horizontal overflow" : ""].filter(Boolean);
+    const chromeProblems: string[] = [];
+    if (document.querySelector(".titlebar")) {
+      chromeProblems.push("app shell should not render a duplicate titlebar");
+    }
+    for (const selector of [".app-nav", ".app-nav-main"]) {
+      const element = document.querySelector(selector);
+      if (element instanceof HTMLElement && element.scrollWidth > element.clientWidth + 1) {
+        chromeProblems.push(`${selector} has horizontal overflow`);
+      }
+    }
+    return [...viewportProblems, ...overlapProblems, ...chromeProblems, document.body.scrollWidth > document.body.clientWidth + 1 ? "body has horizontal overflow" : ""].filter(Boolean);
   });
   expect(problems).toEqual([]);
 }

@@ -1,13 +1,11 @@
-import { randomUUID } from "node:crypto";
-
 import { stepCountIs, streamText, tool, type LanguageModel, type ModelMessage, type TextStreamPart, type ToolSet } from "ai";
 
 import type { AiPatchProposal, AiRunEvent, AiUsage } from "../../shared/ai";
-import { sha256Text } from "../utils/hash";
+import { abortError, createFallbackProposal, summarizeToolInput } from "./agentRuntimeUtils";
 import { buildInitialMessages } from "./context/aiContextBuilder";
 import { AiProviderError, type AiProvider, type AiRunInput, type AiRuntimeServices } from "./types";
 import { createAiSdkLanguageModel } from "./aiSdkProvider";
-import { AiToolRegistry, allAiTools } from "./tools/toolRegistry";
+import { AiToolRegistry, allAiTools, toolAllowedForScopes } from "./tools/toolRegistry";
 
 export class AiSdkAgentEngine {
   constructor(
@@ -28,6 +26,9 @@ export class AiSdkAgentEngine {
     let generatedText = "";
     let sawUsefulOutput = false;
     let sawReasoningOnlyOutput = false;
+    let generatedTextAfterLastToolCall = false;
+    let lastStepHadToolResults = false;
+    let lastStepToolNames: string[] = [];
     yield { type: "run-started", runId: input.runId };
 
     const sdkTools = input.allowTools
@@ -56,6 +57,8 @@ export class AiSdkAgentEngine {
         stopWhen: stepCountIs(Math.max(1, Math.min(30, input.maxToolRounds))),
         abortSignal: input.signal,
         onStepFinish: (step) => {
+          lastStepHadToolResults = step.toolResults.length > 0;
+          lastStepToolNames = step.toolCalls.map((call) => call.toolName);
           const usage = usageFromSdk(step.usage);
           if (usage.totalTokens || usage.inputTokens || usage.outputTokens) {
             bufferedEvents.push({ type: "usage", runId: input.runId, usage });
@@ -65,6 +68,9 @@ export class AiSdkAgentEngine {
 
       for await (const part of result.fullStream) {
         for (const event of bufferedEvents.splice(0)) {
+          if (event.type === "tool-call") {
+            generatedTextAfterLastToolCall = false;
+          }
           yield event;
         }
         if (input.signal.aborted) {
@@ -74,8 +80,14 @@ export class AiSdkAgentEngine {
         if (part.type === "reasoning-delta") {
           sawReasoningOnlyOutput = true;
         }
+        if (part.type === "tool-call") {
+          generatedTextAfterLastToolCall = false;
+          lastStepHadToolResults = true;
+          lastStepToolNames = [String(part.toolName)];
+        }
         if (event?.type === "text-delta") {
           sawUsefulOutput = true;
+          generatedTextAfterLastToolCall = true;
           generatedText = `${generatedText}${event.text}`;
           yield event;
         } else if (event) {
@@ -84,6 +96,9 @@ export class AiSdkAgentEngine {
         }
       }
       for (const event of bufferedEvents.splice(0)) {
+        if (event.type === "tool-call") {
+          generatedTextAfterLastToolCall = false;
+        }
         yield event;
       }
       await result.finishReason;
@@ -95,7 +110,10 @@ export class AiSdkAgentEngine {
           "provider_empty_response"
         );
       }
-      if (input.patchFallback && !emittedProposalIds.size) {
+      if (lastStepHadToolResults && !generatedTextAfterLastToolCall && !emittedProposalIds.size) {
+        throw new AiProviderError(`模型连续调用工具 ${Math.max(1, Math.min(30, input.maxToolRounds))} 步后仍没有生成最终回答。\n最后调用的工具：${[...new Set(lastStepToolNames)].join(", ")}\n请减少问题范围，或在 AI 设置中提高多轮工具调用次数后重试。`, "tool_failed");
+      }
+      if (input.patchFallback && input.allowedScopes.allowDocumentPatch && !emittedProposalIds.size) {
         const proposal = createFallbackProposal(input, generatedText);
         if (proposal) {
           yield { type: "patch-proposal", runId: input.runId, proposal };
@@ -121,7 +139,7 @@ function createSdkTools(options: {
   onProposal: (proposal: AiPatchProposal) => void;
 }): ToolSet {
   const available = allAiTools().filter((item) =>
-    toolAllowedForSdk(item, options.input.allowedScopes, Boolean(options.input.clientContext.activeDocument), Boolean(options.input.clientContext.workspaceId))
+    toolAllowedForScopes(item, options.input.allowedScopes, Boolean(options.input.clientContext.activeDocument), Boolean(options.input.clientContext.workspaceId))
   );
   const result: ToolSet = {};
   for (const aiTool of available) {
@@ -135,7 +153,7 @@ function createSdkTools(options: {
           runId: options.input.runId,
           callId,
           toolName: aiTool.name,
-          inputSummary: summarizeInput(toolInput)
+          inputSummary: summarizeToolInput(toolInput)
         });
         let envelope: Awaited<ReturnType<AiToolRegistry["execute"]>>;
         try {
@@ -171,36 +189,6 @@ function createSdkTools(options: {
     });
   }
   return result;
-}
-
-function toolAllowedForSdk(
-  aiTool: ReturnType<typeof allAiTools>[number],
-  scopes: AiRunInput["allowedScopes"],
-  hasActiveDocument: boolean,
-  hasWorkspace: boolean
-): boolean {
-  if (aiTool.permissions.includes("current-note") && !hasActiveDocument) {
-    return false;
-  }
-  if (aiTool.permissions.includes("proposal") && (!hasActiveDocument || !hasWorkspace)) {
-    return false;
-  }
-  if ((aiTool.permissions.includes("tags") || aiTool.permissions.includes("workspace-search") || aiTool.permissions.includes("read-note") || aiTool.permissions.includes("workspace-read") || aiTool.permissions.includes("workspace-proposal")) && !hasWorkspace) {
-    return false;
-  }
-  if (aiTool.permissions.includes("workspace-search") && !scopes.allowWorkspaceSearch) {
-    return false;
-  }
-  if (aiTool.permissions.includes("read-note") && (!scopes.allowWorkspaceSearch || !scopes.allowReadSearchResults)) {
-    return false;
-  }
-  if (aiTool.permissions.includes("workspace-read") && !scopes.allowWorkspaceRead) {
-    return false;
-  }
-  if (aiTool.permissions.includes("workspace-proposal") && (!scopes.allowWorkspaceRead || !scopes.allowWorkspaceOperations)) {
-    return false;
-  }
-  return true;
 }
 
 function toModelMessages(messages: ReturnType<typeof buildInitialMessages>): ModelMessage[] {
@@ -263,51 +251,6 @@ function normalizeAiSdkError(error: unknown): AiProviderError {
     return new AiProviderError(message, "provider_unreachable");
   }
   return new AiProviderError(message || "AI run failed", "provider_bad_request");
-}
-
-function abortError(signal: AbortSignal): Error {
-  return signal.reason instanceof Error ? signal.reason : new AiProviderError("AI run was aborted", "run_cancelled");
-}
-
-function createFallbackProposal(input: AiRunInput, generatedText: string): AiPatchProposal | undefined {
-  const document = input.clientContext.activeDocument;
-  const text = cleanGeneratedMarkdown(generatedText);
-  if (!document || !input.clientContext.workspaceId || !text) {
-    return undefined;
-  }
-  return {
-    id: randomUUID(),
-    runId: input.runId,
-    workspaceId: input.clientContext.workspaceId,
-    pathRel: document.pathRel,
-    title: document.parsedTitle || document.title,
-    summary: "Generated document update",
-    sourceSnapshotHash: sha256Text(document.sourceText),
-    baseHash: document.baseHash,
-    operations: [
-      {
-        type: "replaceDocument",
-        beforeText: document.sourceText,
-        afterText: text
-      }
-    ]
-  };
-}
-
-function cleanGeneratedMarkdown(value: string): string {
-  return value
-    .trim()
-    .replace(/^```(?:markdown|md)?\s*/i, "")
-    .replace(/\s*```$/i, "")
-    .trim();
-}
-
-function summarizeInput(input: unknown): string {
-  try {
-    return JSON.stringify(input).slice(0, 240);
-  } catch {
-    return String(input).slice(0, 240);
-  }
 }
 
 class LegacyProviderAgentEngine {

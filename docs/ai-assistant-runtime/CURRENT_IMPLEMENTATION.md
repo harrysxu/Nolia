@@ -1,6 +1,6 @@
 # Nolia AI Assistant Current Implementation
 
-更新日期：2026-06-16
+更新日期：2026-06-19
 
 本文记录当前代码中已经落地的 AI Assistant、Agent Runtime、工具、权限、语义索引和测试状态。它是后续换位置继续测试、提交 GitHub 和交接开发时的事实来源。
 
@@ -41,6 +41,8 @@ Nolia AI 已经从早期 V1 方案演进为基于 Vercel AI SDK Core 的 agent r
 - `src/main/ai/aiSdkAgentEngine.ts`
   - Vercel AI SDK Core agent loop。
   - `streamText`、tool calling、step limit、usage event、fallback proposal。
+- `src/main/ai/agentRuntimeUtils.ts`
+  - SDK runtime 与 legacy runtime 共用的 fallback proposal、工具输入摘要和 abort error 处理。
 - `src/main/ai/aiSdkProvider.ts`
   - 把当前 AI provider settings 转换成 AI SDK language model。
 - `src/main/ai/providerRegistry.ts`
@@ -266,7 +268,7 @@ AI 写入分两类：
 当前实现支持手动语义索引：
 
 - 设置页配置 embedding provider、base URL、model。
-- 用户手动点击 `更新语义索引`。
+- 用户手动点击 `创建/更新语义索引`。
 - 用户可点击 `清空并重建`。
 - 状态包括 `not_configured`、`not_created`、`ready`、`updating`、`stale`、`failed`。
 

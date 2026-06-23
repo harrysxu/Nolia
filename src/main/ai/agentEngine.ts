@@ -1,7 +1,5 @@
-import { randomUUID } from "node:crypto";
-
-import type { AiPatchProposal, AiRunEvent } from "../../shared/ai";
-import { sha256Text } from "../utils/hash";
+import type { AiRunEvent } from "../../shared/ai";
+import { abortError, createFallbackProposal, summarizeToolInput } from "./agentRuntimeUtils";
 import { buildInitialMessages } from "./context/aiContextBuilder";
 import { AiProviderError, type AiChatMessage, type AiProvider, type AiRunInput, type AiRuntimeServices } from "./types";
 import { AiToolRegistry } from "./tools/toolRegistry";
@@ -23,7 +21,7 @@ export class AgentEngine {
     const tools = input.allowTools && this.provider.capabilities.nativeToolCalling
       ? registry.providerTools(input.allowedScopes, Boolean(input.clientContext.activeDocument), Boolean(input.clientContext.workspaceId))
       : [];
-    const maxRounds = Math.max(1, Math.min(3, input.maxToolRounds));
+    const maxRounds = Math.max(1, Math.min(30, input.maxToolRounds));
     let exhaustedToolCalls: string[] = [];
 
     for (let round = 0; round < maxRounds; round += 1) {
@@ -47,7 +45,7 @@ export class AgentEngine {
             runId: input.runId,
             callId: event.callId,
             toolName: event.toolName,
-            inputSummary: summarizeInput(event.input)
+            inputSummary: summarizeToolInput(event.input)
           };
         } else if (event.type === "usage") {
           yield { type: "usage", runId: input.runId, usage: event.usage };
@@ -57,7 +55,7 @@ export class AgentEngine {
         throw new AiProviderError("模型服务结束了本轮请求，但没有返回文本或工具调用。请检查模型服务是否正常，或确认当前模型支持所选接口模式。", "provider_empty_response");
       }
       if (!pendingToolCalls.length) {
-        if (input.patchFallback && !emittedProposal) {
+        if (input.patchFallback && input.allowedScopes.allowDocumentPatch && !emittedProposal) {
           const proposal = createFallbackProposal(input, generatedText);
           if (proposal) {
             yield { type: "patch-proposal", runId: input.runId, proposal };
@@ -115,7 +113,7 @@ export class AgentEngine {
     if (!generatedText.trim() && !emittedProposal) {
       throw new AiProviderError("模型请求结束，但没有生成最终回答或修改建议。请检查模型服务日志后重试。", "provider_empty_response");
     }
-    if (input.patchFallback && !emittedProposal) {
+    if (input.patchFallback && input.allowedScopes.allowDocumentPatch && !emittedProposal) {
       const proposal = createFallbackProposal(input, generatedText);
       if (proposal) {
         yield { type: "patch-proposal", runId: input.runId, proposal };
@@ -123,49 +121,4 @@ export class AgentEngine {
     }
     yield { type: "done", runId: input.runId };
   }
-}
-
-function createFallbackProposal(input: AiRunInput, generatedText: string): AiPatchProposal | undefined {
-  const document = input.clientContext.activeDocument;
-  const text = cleanGeneratedMarkdown(generatedText);
-  if (!document || !input.clientContext.workspaceId || !text) {
-    return undefined;
-  }
-  return {
-    id: randomUUID(),
-    runId: input.runId,
-    workspaceId: input.clientContext.workspaceId,
-    pathRel: document.pathRel,
-    title: document.parsedTitle || document.title,
-    summary: "Generated document update",
-    sourceSnapshotHash: sha256Text(document.sourceText),
-    baseHash: document.baseHash,
-    operations: [
-      {
-        type: "replaceDocument",
-        beforeText: document.sourceText,
-        afterText: text
-      }
-    ]
-  };
-}
-
-function cleanGeneratedMarkdown(value: string): string {
-  return value
-    .trim()
-    .replace(/^```(?:markdown|md)?\s*/i, "")
-    .replace(/\s*```$/i, "")
-    .trim();
-}
-
-function summarizeInput(input: unknown): string {
-  try {
-    return JSON.stringify(input).slice(0, 240);
-  } catch {
-    return String(input).slice(0, 240);
-  }
-}
-
-function abortError(signal: AbortSignal): Error {
-  return signal.reason instanceof Error ? signal.reason : new AiProviderError("AI run was aborted", "run_cancelled");
 }

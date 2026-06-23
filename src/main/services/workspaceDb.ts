@@ -1,4 +1,4 @@
-import { readFile, writeFile } from "node:fs/promises";
+import { rename, readFile, writeFile } from "node:fs/promises";
 import initSqlJs from "sql.js";
 import type { SqlJsStatic, SqlValue } from "sql.js";
 
@@ -65,6 +65,9 @@ let sqlJsPromise: Promise<SqlJsStatic> | undefined;
 export class WorkspaceDb {
   private indexVersion = 0;
   private ftsEnabled = true;
+  private dirty = false;
+  private saveTimer?: NodeJS.Timeout;
+  private savePromise?: Promise<void>;
 
   private constructor(
     private readonly dbPath: string,
@@ -73,31 +76,111 @@ export class WorkspaceDb {
 
   static async open(dbPath: string): Promise<WorkspaceDb> {
     const SQL = await getSqlJs();
-    let db: Db;
+    let db = await openSqlDatabase(SQL, dbPath);
+    let workspaceDb = new WorkspaceDb(dbPath, db);
     try {
-      const bytes = await readFile(dbPath);
-      db = new SQL.Database(bytes);
-    } catch {
-      db = new SQL.Database();
+      workspaceDb.ensureSchema();
+      return workspaceDb;
+    } catch (error) {
+      db.close();
+      if (!isRecoverableSqliteCorruption(error)) {
+        throw error;
+      }
     }
 
-    const workspaceDb = new WorkspaceDb(dbPath, db);
+    await backupCorruptDatabase(dbPath);
+    db = new SQL.Database();
+    workspaceDb = new WorkspaceDb(dbPath, db);
     workspaceDb.ensureSchema();
     await workspaceDb.save();
     return workspaceDb;
   }
 
   close(): void {
+    if (this.saveTimer) {
+      clearTimeout(this.saveTimer);
+      this.saveTimer = undefined;
+    }
     this.db.close();
   }
 
   async save(): Promise<void> {
+    if (this.saveTimer) {
+      clearTimeout(this.saveTimer);
+      this.saveTimer = undefined;
+    }
+    return this.flush({ force: true });
+  }
+
+  scheduleSave(delayMs = 1500): void {
+    this.dirty = true;
+    if (this.saveTimer) {
+      return;
+    }
+    this.saveTimer = setTimeout(() => {
+      this.saveTimer = undefined;
+      void this.flush();
+    }, delayMs);
+  }
+
+  async flush(options: { force?: boolean } = {}): Promise<void> {
+    if (options.force) {
+      this.dirty = true;
+    }
+    if (this.savePromise) {
+      await this.savePromise;
+      if (!this.dirty) {
+        return;
+      }
+    }
+    this.savePromise = this.writeToDisk();
+    try {
+      await this.savePromise;
+    } finally {
+      this.savePromise = undefined;
+    }
+  }
+
+  private async writeToDisk(): Promise<void> {
+    if (!this.dirty) {
+      return;
+    }
+    this.dirty = false;
     const bytes = this.db.export();
     await writeFile(this.dbPath, Buffer.from(bytes));
   }
 
   markAllFilesDeleted(): void {
     this.db.run("UPDATE files SET deleted = 1");
+  }
+
+  markMissingFilesDeleted(currentPaths: Set<string>): void {
+    const rows = this.all("SELECT path_rel AS pathRel FROM files WHERE deleted = 0");
+    for (const row of rows) {
+      const pathRel = readString(row.pathRel);
+      if (!currentPaths.has(pathRel)) {
+        this.removeFile(pathRel);
+      }
+    }
+  }
+
+  shouldIndexFile(entry: FileIndexEntry): boolean {
+    const row = this.first(
+      `SELECT size, mtime_ms AS mtimeMs, sha256, deleted
+       FROM files
+       WHERE path_rel = ?`,
+      [entry.pathRel]
+    );
+    if (!row || readNumber(row.deleted) !== 0) {
+      return true;
+    }
+    if (readNumber(row.size) !== entry.size || readNumber(row.mtimeMs) !== entry.mtimeMs) {
+      return true;
+    }
+    if (entry.kind === "markdown" && entry.sha256 && readString(row.sha256) !== entry.sha256) {
+      return true;
+    }
+    return false;
   }
 
   upsertFile(entry: FileIndexEntry): number {
@@ -209,6 +292,10 @@ export class WorkspaceDb {
     }));
   }
 
+  countSemanticIndexableDocuments(): number {
+    return readNumber(this.first("SELECT COUNT(*) AS count FROM files WHERE deleted = 0 AND kind = 'markdown'")?.count);
+  }
+
   getSemanticIndexMetadata(): SemanticIndexMetadata | undefined {
     const row = this.first("SELECT value_json AS valueJson FROM workspace_settings WHERE key = ?", [SEMANTIC_INDEX_KEY]);
     if (!row) {
@@ -294,24 +381,73 @@ export class WorkspaceDb {
     return readNumber(row?.count) > 0;
   }
 
-  semanticIndexStatus(settings: AiEmbeddingSettings, progress?: AiSemanticIndexStatus["progress"], transientError?: string): AiSemanticIndexStatus {
+  semanticIndexStatus(settings: AiEmbeddingSettings, progress?: AiSemanticIndexStatus["progress"], transientError?: string, options: { fast?: boolean } = {}): AiSemanticIndexStatus {
     const metadata = this.getSemanticIndexMetadata();
     const totalFiles = readNumber(this.first("SELECT COUNT(*) AS count FROM files WHERE deleted = 0 AND kind = 'markdown'")?.count);
-    const chunkCount = readNumber(this.first("SELECT COUNT(*) AS count FROM semantic_chunks")?.count);
-    const indexedFiles = readNumber(this.first("SELECT COUNT(DISTINCT file_id) AS count FROM semantic_chunks")?.count);
-    const staleFiles = this.countSemanticStaleFiles(settings, totalFiles);
+    const metadataMatches = metadata?.providerId === settings.providerId && metadata.model === settings.model && metadata.baseUrl === settings.baseUrl && metadata.apiMode === settings.apiMode;
+    const error = transientError ?? (metadataMatches ? metadata?.error : undefined);
+    if (options.fast) {
+      const state = progress
+        ? "updating"
+        : !settings.enabled || !settings.model.trim()
+          ? "not_configured"
+          : error
+            ? "failed"
+            : metadata?.updatedAt && !metadataMatches
+              ? "stale"
+              : metadata?.updatedAt
+                ? "ready"
+                : "not_created";
+      return {
+        state,
+        enabled: Boolean(settings.enabled),
+        providerId: settings.providerId,
+        model: settings.model,
+        updatedAt: metadata?.updatedAt,
+        totalFiles,
+        indexedFiles: state === "ready" ? totalFiles : 0,
+        staleFiles: state === "ready" ? 0 : totalFiles,
+        chunkCount: 0,
+        progress,
+        error
+      };
+    }
+    const chunkCount = readNumber(this.first(
+      `SELECT COUNT(*) AS count
+       FROM semantic_chunks c
+       JOIN files f ON f.id = c.file_id
+       WHERE f.deleted = 0
+         AND f.kind = 'markdown'
+         AND c.provider_id = ?
+         AND c.model = ?
+         AND c.file_sha256 = COALESCE(f.sha256, '')`,
+      [settings.providerId, settings.model]
+    )?.count);
+    const indexedFiles = readNumber(this.first(
+      `SELECT COUNT(DISTINCT f.id) AS count
+       FROM files f
+       JOIN semantic_chunks c ON c.file_id = f.id
+       WHERE f.deleted = 0
+          AND f.kind = 'markdown'
+          AND c.provider_id = ?
+          AND c.model = ?
+          AND c.file_sha256 = COALESCE(f.sha256, '')`,
+      [settings.providerId, settings.model]
+    )?.count);
+    const staleFiles = Math.max(0, totalFiles - indexedFiles);
     let state: AiSemanticIndexStatus["state"];
-    const error = transientError ?? metadata?.error;
     if (progress) {
       state = "updating";
     } else if (!settings.enabled || !settings.model.trim()) {
       state = "not_configured";
     } else if (error) {
       state = "failed";
+    } else if (metadata?.updatedAt && !metadataMatches) {
+      state = "stale";
+    } else if (metadata?.updatedAt && staleFiles > 0) {
+      state = "stale";
     } else if (!chunkCount || !metadata?.updatedAt) {
       state = "not_created";
-    } else if (staleFiles > 0 || metadata.providerId !== settings.providerId || metadata.model !== settings.model || metadata.baseUrl !== settings.baseUrl || metadata.apiMode !== settings.apiMode) {
-      state = "stale";
     } else {
       state = "ready";
     }
@@ -360,31 +496,6 @@ export class WorkspaceDb {
       .filter((item) => Number.isFinite(item.score) && item.score > 0)
       .sort((a, b) => b.score - a.score)
       .slice(0, Math.max(1, Math.min(20, limit)));
-  }
-
-  private countSemanticStaleFiles(settings: AiEmbeddingSettings, totalFiles: number): number {
-    if (!settings.enabled || !settings.model.trim()) {
-      return 0;
-    }
-    const currentRows = this.all(
-      `SELECT f.id AS fileId, f.sha256 AS sha256
-       FROM files f
-       WHERE f.deleted = 0 AND f.kind = 'markdown'`
-    );
-    if (!currentRows.length) {
-      return 0;
-    }
-    const currentCount = currentRows.filter((row) => {
-      const existing = this.first(
-        `SELECT 1 AS found
-         FROM semantic_chunks
-         WHERE file_id = ? AND file_sha256 = ? AND provider_id = ? AND model = ?
-         LIMIT 1`,
-        [readNumber(row.fileId), readString(row.sha256), settings.providerId, settings.model]
-      );
-      return Boolean(existing);
-    }).length;
-    return Math.max(0, totalFiles - currentCount);
   }
 
   touchRecentFile(pathRel: string, editorMode?: string): void {
@@ -949,6 +1060,58 @@ async function getSqlJs(): Promise<SqlJsStatic> {
     sqlJsPromise = initSqlJs({ wasmBinary });
   }
   return sqlJsPromise;
+}
+
+async function openSqlDatabase(SQL: SqlJsStatic, dbPath: string): Promise<Db> {
+  let bytes: Buffer;
+  try {
+    bytes = await readFile(dbPath);
+  } catch (error) {
+    if (isNotFoundError(error)) {
+      return new SQL.Database();
+    }
+    throw error;
+  }
+
+  try {
+    return new SQL.Database(bytes);
+  } catch (error) {
+    if (!isRecoverableSqliteCorruption(error)) {
+      throw error;
+    }
+  }
+
+  await backupCorruptDatabase(dbPath);
+  return new SQL.Database();
+}
+
+function isRecoverableSqliteCorruption(error: unknown): boolean {
+  const message = error instanceof Error ? error.message : String(error);
+  return /database disk image is malformed|file is not a database|not a database|database malformed/i.test(message);
+}
+
+function isNotFoundError(error: unknown): boolean {
+  return typeof error === "object" && error !== null && "code" in error && (error as { code?: unknown }).code === "ENOENT";
+}
+
+async function backupCorruptDatabase(dbPath: string): Promise<void> {
+  const timestamp = new Date().toISOString().replace(/[:.]/g, "-");
+  for (let attempt = 0; attempt < 100; attempt += 1) {
+    const suffix = attempt === 0 ? timestamp : `${timestamp}-${attempt}`;
+    try {
+      await rename(dbPath, `${dbPath}.corrupt-${suffix}`);
+      return;
+    } catch (error) {
+      if (isNotFoundError(error)) {
+        return;
+      }
+      if (typeof error === "object" && error !== null && "code" in error && (error as { code?: unknown }).code === "EEXIST") {
+        continue;
+      }
+      throw error;
+    }
+  }
+  throw new Error(`Unable to back up corrupted workspace database: ${dbPath}`);
 }
 
 function readString(value: unknown): string {

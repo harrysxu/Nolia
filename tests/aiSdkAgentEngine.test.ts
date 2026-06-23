@@ -32,6 +32,59 @@ describe("AI SDK agent engine", () => {
       code: "run_timeout"
     });
   });
+
+  it("fails visibly when the final SDK step only returns tool results without a final answer", async () => {
+    const { AiSdkAgentEngine } = await import("../src/main/ai/aiSdkAgentEngine");
+    streamTextMock.mockImplementationOnce((options: {
+      onStepFinish?: (step: { toolCalls: Array<{ toolName: string }>; toolResults: unknown[]; usage: unknown }) => void;
+      tools?: Record<string, { execute: (input: unknown, options: { toolCallId: string }) => Promise<unknown> }>;
+    }) => ({
+      fullStream: (async function* () {
+        yield { type: "text-delta", text: "我先查看工作区。" };
+        await options.tools?.listTags.execute({}, { toolCallId: "sdk-call-1" });
+        options.onStepFinish?.({
+          toolCalls: [{ toolName: "listTags" }],
+          toolResults: [{ output: { tags: [] } }],
+          usage: {}
+        });
+        yield { type: "start" };
+      })(),
+      finishReason: Promise.resolve("stop")
+    }));
+    const request = input(new AbortController().signal);
+    request.allowTools = true;
+    request.clientContext = { workspaceId: "ws_sdk_tools" };
+    request.allowedScopes = {
+      ...request.allowedScopes,
+      allowWorkspaceRead: true
+    };
+
+    await expect(collectRunEvents(new AiSdkAgentEngine(provider(), services()).run(request))).rejects.toMatchObject({
+      code: "tool_failed"
+    });
+  });
+
+  it("fails visibly when the final SDK step stops after a tool call without a tool result", async () => {
+    const { AiSdkAgentEngine } = await import("../src/main/ai/aiSdkAgentEngine");
+    streamTextMock.mockReturnValueOnce({
+      fullStream: (async function* () {
+        yield { type: "text-delta", text: "我先查看工作区。" };
+        yield { type: "tool-call", toolName: "readNote" };
+      })(),
+      finishReason: Promise.resolve("stop")
+    });
+    const request = input(new AbortController().signal);
+    request.allowTools = true;
+    request.clientContext = { workspaceId: "ws_sdk_tools" };
+    request.allowedScopes = {
+      ...request.allowedScopes,
+      allowWorkspaceRead: true
+    };
+
+    await expect(collectRunEvents(new AiSdkAgentEngine(provider(), services()).run(request))).rejects.toMatchObject({
+      code: "tool_failed"
+    });
+  });
 });
 
 async function collectRunEvents<T>(events: AsyncIterable<T>): Promise<T[]> {
@@ -74,6 +127,7 @@ function input(signal: AbortSignal): AiRunInput {
       allowWorkspaceSearch: false,
       allowReadSearchResults: false,
       allowWorkspaceRead: false,
+      allowDocumentPatch: false,
       allowWorkspaceOperations: false
     },
     allowTools: false,
@@ -107,7 +161,7 @@ function provider(): AiProvider {
 function services(): AiRuntimeServices {
   return {
     files: {} as never,
-    workspaces: {} as never,
+    workspaces: { requireWorkspace: () => ({ db: { listTags: () => [] } }) } as never,
     settings: {} as never,
     diagnostics: {} as never
   };
