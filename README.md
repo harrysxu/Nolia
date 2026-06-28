@@ -22,6 +22,7 @@ User documents stay in the workspace folder selected by the user. Markdown files
 - [Architecture Map](docs/architecture/CODEBASE_MAP.md)
 - [QA Test Plan](docs/qa/README.md)
 - [Release Checklist](docs/release/RELEASE_CHECKLIST.md)
+- [Upgrade Notes](docs/release/UPGRADE.md)
 - [Changelog](docs/release/CHANGELOG.md)
 - [Privacy Statement](docs/legal/PRIVACY.md)
 - [Terms](docs/legal/TERMS.md)

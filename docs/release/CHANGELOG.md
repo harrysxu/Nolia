@@ -4,6 +4,8 @@
 
 ## 1.0.0 - 2026-06-28
 
+升级注意事项见 [Nolia 1.0.0 升级说明](UPGRADE.md)。
+
 ### Added
 
 - AI Assistant runtime，支持 OpenAI-compatible、OpenAI Responses 和 Ollama provider。
