@@ -147,11 +147,44 @@ Local first design notes.
         },
         parseMarkdown(beta, "beta.md")
       );
+      const gamma = "# Gamma\n\nRead [the Alpha note](alpha.md) before editing.\n";
+      db.upsertDocument(
+        {
+          pathRel: "gamma.md",
+          name: "gamma.md",
+          ext: ".md",
+          kind: "markdown",
+          size: gamma.length,
+          mtimeMs: Date.now(),
+          sha256: "gamma"
+        },
+        parseMarkdown(gamma, "gamma.md")
+      );
+      const mention = "# Mention\n\nAlpha appears as plain text but is not linked.\n";
+      db.upsertDocument(
+        {
+          pathRel: "mention.md",
+          name: "mention.md",
+          ext: ".md",
+          kind: "markdown",
+          size: mention.length,
+          mtimeMs: Date.now(),
+          sha256: "mention"
+        },
+        parseMarkdown(mention, "mention.md")
+      );
 
       const search = db.search({ workspaceId: "ws_test", query: "local", limit: 10 });
       expect(search.items.map((item) => item.pathRel)).toContain("alpha.md");
       expect(db.listTags()).toEqual([{ name: "dev", displayName: "dev", count: 1 }]);
-      expect(db.getBacklinks("alpha.md").linked[0]).toMatchObject({ pathRel: "beta.md" });
+      const backlinks = db.getBacklinks("alpha.md", true);
+      expect(backlinks.linked).toEqual(expect.arrayContaining([
+        expect.objectContaining({ pathRel: "beta.md", context: "[[Alpha]]" }),
+        expect.objectContaining({ pathRel: "gamma.md", context: "alpha.md" })
+      ]));
+      expect(backlinks.unlinked).toEqual([
+        expect.objectContaining({ pathRel: "mention.md", context: expect.stringContaining("Alpha") })
+      ]);
     } finally {
       db.close();
       await rm(root, { recursive: true, force: true });

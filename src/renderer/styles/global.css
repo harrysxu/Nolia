@@ -263,11 +263,12 @@ button {
 }
 
 .workspace-grid {
+  --nav-column-width: 64px;
   --left-panel-width: 300px;
   --right-panel-width: 320px;
   position: relative;
   display: grid;
-  grid-template-columns: 64px var(--left-panel-width) 10px minmax(0, 1fr) 10px var(--right-panel-width);
+  grid-template-columns: var(--nav-column-width) var(--left-panel-width) 10px minmax(0, 1fr) 10px var(--right-panel-width);
   grid-template-rows: minmax(0, 1fr);
   min-height: 0;
   padding: 10px;
@@ -277,20 +278,24 @@ button {
     var(--bg);
 }
 
+.app-shell.is-platform-darwin .workspace-grid {
+  --nav-column-width: 84px;
+}
+
 .app-shell.is-ai-open .workspace-grid:not(.is-single-file):not(.is-immersive) {
-  grid-template-columns: 64px var(--left-panel-width) 10px minmax(0, calc(100% - 520px)) 10px var(--right-panel-width);
+  grid-template-columns: var(--nav-column-width) var(--left-panel-width) 10px minmax(0, calc(100% - 520px)) 10px var(--right-panel-width);
 }
 
 .workspace-grid.is-left-collapsed {
-  grid-template-columns: 64px 0 0 minmax(0, 1fr) 10px var(--right-panel-width);
+  grid-template-columns: var(--nav-column-width) 0 0 minmax(0, 1fr) 10px var(--right-panel-width);
 }
 
 .workspace-grid.is-right-collapsed {
-  grid-template-columns: 64px var(--left-panel-width) 10px minmax(0, 1fr) 0 0;
+  grid-template-columns: var(--nav-column-width) var(--left-panel-width) 10px minmax(0, 1fr) 0 0;
 }
 
 .workspace-grid.is-left-collapsed.is-right-collapsed {
-  grid-template-columns: 64px 0 0 minmax(0, 1fr) 0 0;
+  grid-template-columns: var(--nav-column-width) 0 0 minmax(0, 1fr) 0 0;
 }
 
 .workspace-grid.is-single-file,
@@ -312,6 +317,10 @@ button {
   background: color-mix(in srgb, var(--nav-bg) 86%, var(--surface));
   box-shadow: var(--shadow-sm);
   overflow: hidden;
+}
+
+.app-shell.is-platform-darwin .app-nav {
+  padding-top: 30px;
 }
 
 .nav-avatar,
@@ -2191,38 +2200,6 @@ body.is-resizing-right-panel {
 
 .text-resource-codemirror .cm-line {
   padding: 0;
-}
-
-.text-resource-codemirror .cm-search {
-  border: 1px solid var(--border);
-  color: var(--text);
-  background: var(--surface);
-}
-
-.text-resource-codemirror .cm-search label {
-  color: var(--muted);
-}
-
-.text-resource-codemirror .cm-search input:not([type="checkbox"]),
-.text-resource-codemirror .cm-search button {
-  border: 1px solid var(--border);
-  border-radius: 4px;
-  color: var(--text);
-  background: var(--control-bg);
-  font: inherit;
-}
-
-.text-resource-codemirror .cm-search input:not([type="checkbox"])::placeholder {
-  color: var(--subtle);
-}
-
-.text-resource-codemirror .cm-search input[type="checkbox"] {
-  accent-color: var(--accent);
-}
-
-.text-resource-codemirror .cm-search button:hover {
-  border-color: color-mix(in srgb, var(--accent) 55%, var(--border));
-  background: var(--hover-bg);
 }
 
 .cm-visible-whitespace {
@@ -4631,6 +4608,21 @@ body.is-resizing-right-panel {
   font-weight: 700;
 }
 
+.ai-semantic-grid .ai-semantic-toggle-row {
+  grid-template-columns: minmax(0, 1fr);
+}
+
+.ai-semantic-grid .ai-semantic-toggle-control {
+  display: flex;
+  align-items: center;
+  justify-content: flex-start;
+  min-height: 34px;
+}
+
+.ai-semantic-grid .ai-semantic-toggle-control input[type="checkbox"] {
+  margin: 0;
+}
+
 .ai-semantic-status {
   display: inline-flex;
   align-items: center;
@@ -5809,17 +5801,16 @@ body.is-resizing-right-panel {
 .welcome-recent-item {
   width: 100%;
   display: grid;
-  grid-template-columns: 38px minmax(0, 1fr) auto;
+  grid-template-columns: minmax(0, 1fr) 34px;
   align-items: center;
-  gap: 14px;
+  gap: 8px;
   min-height: 86px;
-  padding: 14px 16px;
+  padding: 0;
   border: 1px solid var(--border);
   border-radius: 10px;
   background: var(--panel);
   color: var(--text);
   text-align: left;
-  cursor: pointer;
   transition: border-color 120ms ease, background 120ms ease, transform 120ms ease;
 }
 
@@ -5833,12 +5824,13 @@ body.is-resizing-right-panel {
   transform: translateY(0);
 }
 
-.welcome-recent-item:focus-visible {
+.welcome-recent-main:focus-visible,
+.welcome-recent-delete:focus-visible {
   outline: 2px solid var(--focus);
   outline-offset: 2px;
 }
 
-.welcome-recent-item:disabled {
+.welcome-recent-main:disabled {
   cursor: progress;
   opacity: 0.76;
 }
@@ -5853,6 +5845,19 @@ body.is-resizing-right-panel {
   border-color: rgba(181, 71, 71, 0.44);
   background: var(--danger-bg);
   transform: none;
+}
+
+.welcome-recent-main {
+  display: grid;
+  grid-template-columns: 38px minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 14px;
+  min-width: 0;
+  min-height: 84px;
+  padding: 14px 4px 14px 16px;
+  color: inherit;
+  text-align: left;
+  cursor: pointer;
 }
 
 .welcome-recent-icon {
@@ -5922,6 +5927,22 @@ body.is-resizing-right-panel {
   color: var(--accent);
 }
 
+.welcome-recent-delete {
+  width: 30px;
+  height: 30px;
+  display: grid;
+  place-items: center;
+  margin-right: 12px;
+  border-radius: 8px;
+  color: var(--muted);
+  cursor: pointer;
+}
+
+.welcome-recent-delete:hover {
+  color: var(--error);
+  background: var(--danger-bg);
+}
+
 @media (max-width: 860px) {
   .welcome-screen {
     align-content: start;
@@ -5981,9 +6002,13 @@ body.is-resizing-right-panel {
   }
 
   .welcome-recent-item {
-    grid-template-columns: 30px minmax(0, 1fr);
     min-height: 76px;
-    padding: 12px;
+  }
+
+  .welcome-recent-main {
+    grid-template-columns: 30px minmax(0, 1fr);
+    min-height: 74px;
+    padding: 12px 4px 12px 12px;
   }
 
   .welcome-recent-arrow {
@@ -6075,11 +6100,11 @@ body.is-resizing-right-panel {
 
   .workspace-grid,
   .workspace-grid.is-right-collapsed {
-    grid-template-columns: 64px minmax(260px, min(var(--left-panel-width), 38vw)) 8px minmax(0, 1fr) 0 0;
+    grid-template-columns: var(--nav-column-width) minmax(260px, min(var(--left-panel-width), 38vw)) 8px minmax(0, 1fr) 0 0;
   }
 
   .app-shell.is-ai-open .workspace-grid:not(.is-single-file):not(.is-immersive) {
-    grid-template-columns: 64px minmax(260px, min(var(--left-panel-width), 38vw)) 8px minmax(0, 1fr) 0 0;
+    grid-template-columns: var(--nav-column-width) minmax(260px, min(var(--left-panel-width), 38vw)) 8px minmax(0, 1fr) 0 0;
   }
 
   .workspace-grid:not(.is-left-collapsed) .right-panel {
@@ -6098,7 +6123,7 @@ body.is-resizing-right-panel {
   .workspace-grid.is-left-collapsed,
   .workspace-grid.is-right-collapsed,
   .workspace-grid.is-left-collapsed.is-right-collapsed {
-    grid-template-columns: 64px 0 0 minmax(0, 1fr) 0 0;
+    grid-template-columns: var(--nav-column-width) 0 0 minmax(0, 1fr) 0 0;
   }
 
   .sidebar,

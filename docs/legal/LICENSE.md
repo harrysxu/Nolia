@@ -1,6 +1,6 @@
 # Nolia 项目许可
 
-Copyright (c) 2026 Nolia contributors.
+Copyright (c) 2026 徐晓龙.
 
 Nolia 采用 GNU General Public License v3.0 or later 开源许可发布。
 

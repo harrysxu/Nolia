@@ -2,7 +2,7 @@
 
 Effective date: 2026-05-31
 
-This notice describes the current data handling model of Nolia. Before public release, the distributor should review it for the actual distribution channel, support contact, and legal jurisdiction.
+This notice describes the current data handling model of Nolia. Nolia is a local-first desktop app. It does not provide official cloud sync and does not upload user notes to official servers by default.
 
 ## Local-First
 
@@ -60,18 +60,18 @@ Network access may occur when:
 
 - The user opens external links.
 - The user installs and enables a plugin with network permissions.
+- The user enables AI Assistant and configures an OpenAI-compatible, OpenAI Responses, or other cloud model service.
 - A future feature is explicitly enabled by the user.
+
+When a cloud AI service is enabled, requests may include user prompts, current document excerpts, workspace search results, semantic index snippets, file names, or paths as context. Requests are sent to the model provider or gateway configured by the user. Nolia does not relay these requests through official servers. When local Ollama is used, requests are sent to the local Ollama service by default.
+
+AI API keys are stored locally. The app prefers system secure storage; if system secure storage is unavailable, it uses fallback storage in the local app data directory.
 
 ## Diagnostics
 
-The project includes diagnostic capabilities. Diagnostics should be used for troubleshooting and should not include Markdown body content by default.
+Nolia writes local diagnostic logs for troubleshooting startup, window, workspace, plugin, and indexing issues. Diagnostic logs are not uploaded automatically.
 
-Before public release, clarify:
-
-- Whether diagnostics are collected.
-- Whether diagnostics are exported manually by the user.
-- Whether diagnostics include file paths, system version, stack traces, or plugin information.
-- The support email or feedback channel.
+Logs may include timestamps, error messages, window state, plugin IDs, workspace paths, file paths, or system error stacks. Logs should not include Markdown body content by default. Users can open logs from the app and decide whether to share them with maintainers.
 
 ## User Control
 
@@ -81,4 +81,3 @@ Users can:
 - Delete derived data in workspace `.nolia` directories.
 - Delete the global app data directory.
 - Disable or remove external plugins.
-

@@ -1,7 +1,7 @@
 import { readFile, writeFile, mkdir, access } from "node:fs/promises";
 import path from "node:path";
 
-import { DEFAULT_SETTINGS } from "../../shared/constants";
+import { DEFAULT_SETTINGS, WORKSPACE_CONFIG_FILE, WORKSPACE_META_DIR } from "../../shared/constants";
 import { normalizeAiSettings as normalizeSharedAiSettings } from "../../shared/ai";
 import type { AppSettings, RecentWorkspace } from "../../shared/types";
 
@@ -124,17 +124,21 @@ export class SettingsService {
 
   async listRecentWorkspaces(): Promise<RecentWorkspace[]> {
     const items = await Promise.all(
-      this.state.recentWorkspaces.map(async (workspace) => ({
-        ...workspace,
-        exists: await exists(workspace.path)
-      }))
+      this.state.recentWorkspaces.map(async (workspace) => {
+        const availability = await workspaceAvailability(workspace.path);
+        return {
+          ...workspace,
+          exists: availability === "available",
+          availability
+        };
+      })
     );
     return items.sort((a, b) => b.lastOpenedAt - a.lastOpenedAt);
   }
 
   async addRecentWorkspace(workspace: RecentWorkspace): Promise<void> {
     const existing = this.state.recentWorkspaces.filter((item) => item.workspaceId !== workspace.workspaceId);
-    this.state.recentWorkspaces = [workspace, ...existing].slice(0, 12);
+    this.state.recentWorkspaces = [{ ...workspace, exists: true, availability: "available" as const }, ...existing].slice(0, 12);
     await this.persist();
   }
 
@@ -203,4 +207,14 @@ async function exists(filePath: string): Promise<boolean> {
   } catch {
     return false;
   }
+}
+
+async function workspaceAvailability(rootPath: string): Promise<RecentWorkspace["availability"]> {
+  if (!(await exists(rootPath))) {
+    return "missing";
+  }
+  if (!(await exists(path.join(rootPath, WORKSPACE_META_DIR, WORKSPACE_CONFIG_FILE)))) {
+    return "notWorkspace";
+  }
+  return "available";
 }

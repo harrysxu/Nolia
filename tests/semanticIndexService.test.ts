@@ -70,7 +70,7 @@ describe("semantic index service", () => {
     }
   });
 
-  it("keeps completed semantic chunks when a later file fails", async () => {
+  it("skips a failed file and keeps indexing the remaining documents", async () => {
     const root = await mkdtemp(path.join(os.tmpdir(), "nolia-semantic-"));
     const db = await WorkspaceDb.open(path.join(root, "workspace.sqlite"));
     const embedMany = vi.fn(async (_settings: unknown, values: string[]) => {
@@ -112,13 +112,30 @@ describe("semantic index service", () => {
         },
         parseMarkdown("# Beta\n\nSecond document fails.", "beta.md")
       );
+      db.upsertDocument(
+        {
+          pathRel: "gamma.md",
+          name: "gamma.md",
+          ext: ".md",
+          kind: "markdown",
+          size: 35,
+          mtimeMs: Date.now(),
+          sha256: "gamma-v1"
+        },
+        parseMarkdown("# Gamma\n\nThird document still succeeds.", "gamma.md")
+      );
 
-      await expect(service.update(db, settings)).rejects.toMatchObject({ code: "provider_unreachable" });
-      expect(db.semanticIndexStatus(settings)).toMatchObject({
-        state: "failed",
-        indexedFiles: 1,
-        error: expect.stringContaining("provider reset connection")
+      const status = await service.update(db, settings);
+      expect(status).toMatchObject({
+        state: "ready",
+        totalFiles: 3,
+        indexedFiles: 2,
+        staleFiles: 1,
+        error: expect.stringContaining("已跳过 1 个失败文件")
       });
+      expect(status.error).toContain("beta.md");
+      expect(status.error).toContain("provider reset connection");
+      expect(db.semanticSearch([1, 1], settings, 5).map((item) => item.pathRel)).toEqual(expect.arrayContaining(["alpha.md", "gamma.md"]));
     } finally {
       db.close();
       await rm(root, { recursive: true, force: true });
@@ -212,9 +229,7 @@ describe("semantic index service", () => {
           throw new AiProviderError("bad embedding credentials", "provider_auth_failed");
         })
       } as never);
-      await expect(failingService.update(db, { ...settings, model: "broken-model" })).rejects.toMatchObject({
-        code: "provider_auth_failed"
-      });
+      await failingService.update(db, { ...settings, model: "broken-model" });
       expect(service.status(db, { ...settings, model: "broken-model" })).toMatchObject({
         state: "failed",
         error: expect.stringContaining("bad embedding credentials")

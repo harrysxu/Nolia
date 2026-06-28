@@ -66,10 +66,11 @@ test("workspace, settings, search, and resource editor layouts stay readable acr
   await page.getByRole("button", { name: /assets/ }).first().click();
   await page.getByRole("button", { name: "config.json", exact: true }).click();
   await page.getByRole("button", { name: "搜索/替换" }).click();
-  await expect(page.locator(".text-resource-codemirror .cm-search")).toBeVisible();
+  await expect(page.locator(".editor-find-replace")).toBeVisible();
+  await expect(page.locator(".text-resource-codemirror .cm-search")).toHaveCount(0);
   await expectReadable(page, ".resource-editor-toolbar");
   await assertToolbarButtonsVisible(page, "JSON 工具");
-  await expectReadable(page, ".text-resource-codemirror .cm-search");
+  await expectReadable(page, ".editor-find-replace");
   await page.screenshot({ path: "test-results/ui-visual-dark-json-editor.png", fullPage: false });
 
   await page.getByRole("navigation", { name: "工作区导航" }).getByRole("button", { name: "设置" }).click();
@@ -214,7 +215,7 @@ async function assertFloatingEditorsStayBelowModal(page: Page) {
       return ["settings dialog missing"];
     }
     const modalRect = modal.getBoundingClientRect();
-    return [...document.querySelectorAll(".cm-search")].flatMap((searchPanel) => {
+    return [...document.querySelectorAll(".editor-find-replace")].flatMap((searchPanel) => {
       if (!(searchPanel instanceof HTMLElement)) {
         return [];
       }

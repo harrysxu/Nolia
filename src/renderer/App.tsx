@@ -1,8 +1,10 @@
 /* eslint-disable react-hooks/exhaustive-deps -- The shell coordinates IPC subscriptions and ref-backed debounced document state. */
 import {
   Component,
+  Suspense,
   useEffect,
   forwardRef,
+  lazy,
   useLayoutEffect,
   useImperativeHandle,
   useMemo,
@@ -86,14 +88,12 @@ import { createTranslator, formatFileSize as formatLocalizedFileSize, resolveLoc
 import { hasExtensionPermission, type ExtensionContributions, type ExtensionManifest, type ExtensionPermission, type FileEditorContribution, type PluginDescriptor, type SettingContribution, type SidebarPanelContribution } from "../shared/extensions";
 import { normalizeAiSettings, normalizeAiSettingsPublic, type AiEmbeddingSettings, type AiPatchOperation, type AiPatchProposal, type AiProviderProfile, type AiProviderTestResult, type AiRunEvent, type AiSelectionActionId, type AiSemanticIndexStatus, type AiSettings, type AiSettingsPublic, type AiSourceRef } from "../shared/ai";
 import type { AppSettings, BacklinksResponse, EditorMode, FileBinaryReadResponse, FileHistoryEntry, FileReadResponse, FileTreeNode, FileWriteResponse, RecentWorkspace, ResolvedLocale, SearchResultItem, WorkspaceInfo } from "../shared/types";
-import { AiSettingsPanel } from "./ai/AiSettingsPanel";
-import { AiSidebar, type AiMessageView } from "./ai/AiSidebar";
+import type { AiMessageView } from "./ai/AiSidebar";
 import { CommandPalette, type PaletteAction } from "./components/CommandPalette";
-import { MarkdownPreview } from "./components/MarkdownPreview";
-import { SourceEditor, type SourceEditorHandle } from "./components/SourceEditor";
-import { TextResourceEditor, type TextResourceEditorHandle } from "./components/TextResourceEditor";
-import { WelcomeScreen } from "./components/WelcomeScreen";
-import { WysiwygEditor, type WysiwygEditorHandle } from "./components/WysiwygEditor";
+import type { SourceEditorHandle } from "./components/SourceEditor";
+import type { TextResourceEditorHandle } from "./components/TextResourceEditor";
+import { WelcomeScreen, recentWorkspaceUnavailableReason } from "./components/WelcomeScreen";
+import type { WysiwygEditorHandle } from "./components/WysiwygEditor";
 import type { FindReplaceOptions, FindReplaceResult } from "./components/findReplace";
 import type { MarkdownOpenTarget } from "./components/markdownOpenTarget";
 import noliaIconUrl from "../../build/icon.svg";
@@ -145,6 +145,13 @@ import {
   type PluginSidebarPanelContext
 } from "./extensions/runtime";
 import { createExtensionRegistry, filterMenuContributions, isExtensionEnabled, isExtensionPermissionAccepted, selectFileEditor, selectFileViewer } from "./extensions/registry";
+
+const AiSettingsPanel = lazy(async () => ({ default: (await import("./ai/AiSettingsPanel")).AiSettingsPanel }));
+const AiSidebar = lazy(async () => ({ default: (await import("./ai/AiSidebar")).AiSidebar }));
+const MarkdownPreview = lazy(async () => ({ default: (await import("./components/MarkdownPreview")).MarkdownPreview }));
+const SourceEditor = lazy(async () => ({ default: (await import("./components/SourceEditor")).SourceEditor }));
+const TextResourceEditor = lazy(async () => ({ default: (await import("./components/TextResourceEditor")).TextResourceEditor }));
+const WysiwygEditor = lazy(async () => ({ default: (await import("./components/WysiwygEditor")).WysiwygEditor }));
 
 const emptyBacklinks: BacklinksResponse = { linked: [], unlinked: [] };
 const FLOATING_MENU_MARGIN = 8;
@@ -283,6 +290,7 @@ export function App() {
   const [aiSettings, setAiSettings] = useState<AiSettingsPublic | undefined>();
   const [aiSemanticStatus, setAiSemanticStatus] = useState<AiSemanticIndexStatus | undefined>();
   const [aiSidebarOpen, setAiSidebarOpen] = useState(false);
+  const [aiSidebarEverOpened, setAiSidebarEverOpened] = useState(false);
   const [aiMessages, setAiMessages] = useState<AiMessageView[]>([]);
   const [aiSources, setAiSources] = useState<AiSourceRef[]>([]);
   const [aiPatchProposal, setAiPatchProposal] = useState<AiPatchProposal | undefined>();
@@ -571,13 +579,23 @@ export function App() {
   }, []);
 
   useEffect(() => {
-    const unsubscribe = window.nolia.ai?.onRunEvent((event) => {
+    const ai = window.nolia.ai;
+    if (!ai) {
+      return undefined;
+    }
+    const unsubscribe = ai.onRunEvent((event) => {
       handleAiRunEvent(event);
     });
     return () => {
-      unsubscribe?.();
+      unsubscribe();
     };
   }, []);
+
+  useEffect(() => {
+    if (aiSidebarOpen) {
+      setAiSidebarEverOpened(true);
+    }
+  }, [aiSidebarOpen]);
 
   useEffect(() => {
     return () => {
@@ -782,6 +800,7 @@ export function App() {
           onOpenWorkspace={() => void openWorkspace()}
           onCreateWorkspace={() => void createWorkspace()}
           onOpenRecent={(item) => void openRecentWorkspace(item)}
+          onRemoveRecent={(item) => void removeRecentWorkspace(item)}
         />
       </RendererI18nProvider>
     );
@@ -869,8 +888,8 @@ export function App() {
         onSetAiApiKey={setAiApiKey}
         onClearAiApiKey={clearAiApiKey}
         onGetAiApiKey={getAiApiKey}
-        onTestAiProvider={(provider, apiKey) => window.nolia.ai?.testProvider({ providerProfileId: provider.id, provider: aiProviderRequest(provider), apiKey }) ?? Promise.resolve({ ok: false, providerId: "ollama", localOnly: true, message: tr("AI API 不可用") })}
-        onListAiModels={(provider, apiKey) => window.nolia.ai?.listModels({ providerProfileId: provider.id, provider: aiProviderRequest(provider), apiKey }) ?? Promise.resolve([])}
+        onTestAiProvider={(provider, apiKey) => getAiApi().testProvider({ providerProfileId: provider.id, provider: aiProviderRequest(provider), apiKey })}
+        onListAiModels={(provider, apiKey) => getAiApi().listModels({ providerProfileId: provider.id, provider: aiProviderRequest(provider), apiKey })}
         onRefreshAiSemanticStatus={refreshAiSemanticStatus}
         onTestAiEmbedding={testAiEmbedding}
         onUpdateAiSemanticIndex={updateAiSemanticIndex}
@@ -1086,7 +1105,7 @@ export function App() {
       <footer className="statusbar">
         {visibleResource ? (
           <>
-            <StatusPill label={visibleResource.pathRel} />
+            <StatusPill label={visibleResource.pathRel} accessibilityLabel={tr("路径")} />
             <StatusPill label={resourceEditorKindLabel(visibleResource, tr)} />
             <StatusPill label={formatFileSize(visibleResource.size, startupLocale)} tone="muted" />
             <StatusPill label={visibleResource.dirty ? tr("未保存") : tr("已保存")} tone={visibleResource.dirty ? "warn" : "ok"} />
@@ -1094,7 +1113,7 @@ export function App() {
           </>
         ) : (
           <>
-            {visibleDocument ? <StatusPill label={visibleDocument.pathRel} /> : null}
+            {visibleDocument ? <StatusPill label={visibleDocument.pathRel} accessibilityLabel={tr("路径")} /> : null}
             <StatusPill label={visibleDocument?.dirty ? tr("未保存") : tr("已保存")} tone={visibleDocument?.dirty ? "warn" : "ok"} />
             <StatusPill label={tr("{count} 字词", { count: visibleDocument?.parsed.wordCount ?? 0 })} />
             {selectedCharCount > 0 ? <StatusPill label={tr("选中 {count} 字符", { count: selectedCharCount })} tone="ok" /> : null}
@@ -1103,21 +1122,26 @@ export function App() {
           </>
         )}
       </footer>
-      <AiSidebar
-        open={aiSidebarOpen}
-        settings={aiSettings}
-        activeRunId={aiActiveRunId}
-        running={aiRunning}
-        messages={aiMessages}
-        sources={aiSources}
-        patchProposal={aiPatchProposal}
-        patchApplyMode={aiPatchApplyMode}
-        contextSummary={aiContextSummary(visibleDocument, selectedCharCount, aiSettings, tr)}
-        onClose={() => setAiSidebarOpen(false)}
-        onOpenSettings={() => openSettings("ai")}
-        onUpdateDefaultProvider={(patch) => void updateDefaultAiProvider(patch)}
-        onSend={(message, intent) => {
+      {aiSidebarEverOpened ? (
+        <Suspense fallback={aiSidebarOpen ? <div className="ai-sidebar ai-sidebar-loading"><EditorLoadingState label={tr("加载中。")} /></div> : null}>
+          <AiSidebar
+            open={aiSidebarOpen}
+            settings={aiSettings}
+            activeRunId={aiActiveRunId}
+            running={aiRunning}
+            messages={aiMessages}
+            sources={aiSources}
+            patchProposal={aiPatchProposal}
+            patchApplyMode={aiPatchApplyMode}
+            contextSummary={aiContextSummary(visibleDocument, selectedCharCount, aiSettings, tr)}
+            onClose={() => setAiSidebarOpen(false)}
+            onOpenSettings={() => openSettings("ai")}
+            onUpdateDefaultProvider={(patch) => void updateDefaultAiProvider(patch)}
+            onSend={(message, intent) => {
           if (isRegenerateLastAiRequest(message) && retryLastAiRun(message)) {
+            return;
+          }
+          if (isWritePreviousAiResponseToExistingDocumentRequest(message) && proposeExistingDocumentAppendFromLastAiResponse(message)) {
             return;
           }
           if (isWritePreviousAiResponseToNewDirectoryRequest(message) && proposeDirectoryDocumentFromLastAiResponse(message)) {
@@ -1129,9 +1153,13 @@ export function App() {
           const workspaceOperation = isWorkspaceOperationRequest(message);
           const workspaceOnlyOperation = workspaceOperation && isWorkspaceOperationOnlyRequest(message);
           const createDocument = !workspaceOperation && isDocumentGenerationRequest(message);
-          const workspaceDocumentGeneration = workspaceOperation && isDocumentGenerationRequest(message);
+          const workspaceMarkdownTarget = requestedMarkdownPath(message);
+          const workspaceDocumentGeneration = workspaceOperation && !workspaceMarkdownTarget && isDocumentGenerationRequest(message);
+          const workspaceDocumentEdit = workspaceOperation && !workspaceDocumentGeneration && Boolean(workspaceMarkdownTarget) && isWorkspaceMarkdownFileWriteRequest(message);
           const editInstruction = workspaceDocumentGeneration
             ? workspaceDocumentGenerationInstruction(message)
+            : workspaceDocumentEdit
+              ? workspaceDocumentEditInstruction(message)
             : !workspaceOnlyOperation && isDocumentEditRequest(message)
               ? (createDocument ? documentGenerationInstruction(message, tr) : documentEditInstruction(message, tr))
               : undefined;
@@ -1146,7 +1174,14 @@ export function App() {
             requiresCurrentNote && intent === "summarize-current-note"
               ? { displayText: message, requireCurrentNote: true }
               : editInstruction
-                ? { displayText: message, requireCurrentNote: !workspaceDocumentGeneration, patchFallback: !workspaceOperation, allowDocumentPatch: !workspaceOperation, allowWorkspaceOperations: workspaceOperation, patchApplyMode: createDocument ? "new-document" : "current-document" }
+                ? {
+                    displayText: message,
+                    requireCurrentNote: !(workspaceDocumentGeneration || workspaceDocumentEdit),
+                    patchFallback: !(workspaceDocumentGeneration || workspaceDocumentEdit),
+                    allowDocumentPatch: !(workspaceDocumentGeneration || workspaceDocumentEdit),
+                    allowWorkspaceOperations: workspaceOperation,
+                    patchApplyMode: createDocument ? "new-document" : "current-document"
+                  }
                 : requiresCurrentNote
                   ? { displayText: message, requireCurrentNote: true }
                 : workspaceOperation
@@ -1156,7 +1191,7 @@ export function App() {
         }}
         onCancel={() => {
           if (aiActiveRunId) {
-            void window.nolia.ai?.cancelRun({ runId: aiActiveRunId });
+            void getAiApi().cancelRun({ runId: aiActiveRunId });
           }
         }}
         canRetry={aiCanRetry}
@@ -1165,8 +1200,10 @@ export function App() {
         }}
         onCopy={(text) => void window.nolia.clipboard.writeRich({ text, html: `<pre>${escapeHtml(text)}</pre>` })}
         onApplyPatch={applyAiPatch}
-        onDiscardPatch={discardAiPatchProposal}
-      />
+            onDiscardPatch={discardAiPatchProposal}
+          />
+        </Suspense>
+      ) : null}
     </div>
     </RendererI18nProvider>
   );
@@ -1474,7 +1511,7 @@ export function App() {
       return;
     }
     markAiRunTerminal(runId, "watchdog");
-    void window.nolia.ai?.cancelRun({ runId });
+    void getAiApi().cancelRun({ runId });
     finishAiRun(runId);
     setAiMessages((messages) => [...messages, { id: `${runId}:watchdog`, role: "error", text, errorCode: "run_timeout", retryable: true }]);
   }
@@ -1525,10 +1562,8 @@ export function App() {
   }
 
   async function updateAiSettings(next: Partial<AiSettings>) {
-    const settings = await window.nolia.ai?.setSettings({ settings: next });
-    if (settings) {
-      setAiSettings(normalizeAiSettingsPublic(settings));
-    }
+    const settings = await getAiApi().setSettings({ settings: next });
+    setAiSettings(normalizeAiSettingsPublic(settings));
   }
 
   async function updateDefaultAiProvider(patch: Partial<AiProviderProfile> & { defaultProviderId?: string }) {
@@ -1563,36 +1598,29 @@ export function App() {
   }
 
   async function setAiApiKey(providerProfileId: string, apiKey: string) {
-    const settings = await window.nolia.ai?.setApiKey({ providerProfileId, apiKey });
-    if (settings) {
-      setAiSettings(normalizeAiSettingsPublic(settings));
-    }
+    const settings = await getAiApi().setApiKey({ providerProfileId, apiKey });
+    setAiSettings(normalizeAiSettingsPublic(settings));
   }
 
   async function clearAiApiKey(providerProfileId: string) {
-    const settings = await window.nolia.ai?.clearApiKey({ providerProfileId });
-    if (settings) {
-      setAiSettings(normalizeAiSettingsPublic(settings));
-    }
+    const settings = await getAiApi().clearApiKey({ providerProfileId });
+    setAiSettings(normalizeAiSettingsPublic(settings));
   }
 
   async function getAiApiKey(providerProfileId: string): Promise<string | undefined> {
-    return (await window.nolia.ai?.getApiKey({ providerProfileId }))?.apiKey;
+    return (await getAiApi().getApiKey({ providerProfileId })).apiKey;
   }
 
   async function refreshAiSemanticStatus(settings?: AiEmbeddingSettings, apiKey?: string): Promise<void> {
-    if (!workspace || !window.nolia.ai?.semanticIndexStatus) {
+    if (!workspace) {
       setAiSemanticStatus(undefined);
       return;
     }
-    setAiSemanticStatus(await window.nolia.ai.semanticIndexStatus({ workspaceId: workspace.workspaceId, settings, apiKey }));
+    setAiSemanticStatus(await getAiApi().semanticIndexStatus({ workspaceId: workspace.workspaceId, settings, apiKey }));
   }
 
   async function testAiEmbedding(settings: AiEmbeddingSettings, apiKey?: string): Promise<AiProviderTestResult> {
-    if (!window.nolia.ai?.testEmbedding) {
-      return { ok: false, providerId: settings.providerId, model: settings.model, localOnly: settings.providerId === "ollama", message: tr("AI API 不可用") };
-    }
-    const result = await window.nolia.ai.testEmbedding({ settings, apiKey });
+    const result = await getAiApi().testEmbedding({ settings, apiKey });
     await refreshAiSemanticStatus();
     return result;
   }
@@ -1601,10 +1629,8 @@ export function App() {
     if (!workspace) {
       return undefined;
     }
-    const handler = reset ? window.nolia.ai?.resetSemanticIndex : window.nolia.ai?.updateSemanticIndex;
-    if (!handler) {
-      return undefined;
-    }
+    const ai = getAiApi();
+    const handler = reset ? ai.resetSemanticIndex : ai.updateSemanticIndex;
     const result = await handler({ workspaceId: workspace.workspaceId, settings, apiKey });
     setAiSemanticStatus(result.status);
     return result.status;
@@ -1667,25 +1693,10 @@ export function App() {
           maxToolRounds: aiSettings?.agentMaxSteps ?? 12
         }
       } as const;
-      const legacyRunRequest = {
-        ...runRequest,
-        options: {
-          ...runRequest.options,
-          maxToolRounds: 3
-        }
-      };
-      let response: Awaited<ReturnType<NonNullable<typeof window.nolia.ai>["startRun"]>>;
-      try {
-        response = window.nolia.ai.startTask ? await window.nolia.ai.startTask(runRequest) : await window.nolia.ai.startRun(legacyRunRequest);
-      } catch (error) {
-        if (!isMissingAiTaskHandlerError(error) || !window.nolia.ai.startRun) {
-          throw error;
-        }
-        response = await window.nolia.ai.startRun(legacyRunRequest);
-      }
+      const response = await getAiApi().startTask(runRequest);
       if (aiStartSequenceRef.current !== startSequence) {
         markAiRunTerminal(response.runId, "cancelled");
-        void window.nolia.ai.cancelRun({ runId: response.runId });
+        void getAiApi().cancelRun({ runId: response.runId });
         return;
       }
       clearAiStartWatchdog();
@@ -1770,6 +1781,49 @@ export function App() {
       ...aiLastRunOptionsRef.current,
       displayText
     });
+    return true;
+  }
+
+  function proposeExistingDocumentAppendFromLastAiResponse(request: string): boolean {
+    if (!workspace) {
+      return false;
+    }
+    const targetPath = resolveRequestedExistingMarkdownPath(request, fileTree);
+    if (!targetPath) {
+      return false;
+    }
+    const content = lastAssistantDocumentContent(aiMessages);
+    if (!content) {
+      showMissingPreviousAiResponseMessage(request);
+      return true;
+    }
+    const proposal: AiPatchProposal = {
+      id: `local-existing-document-append:${Date.now()}`,
+      runId: `local-existing-document-append:${Date.now()}`,
+      workspaceId: workspace.workspaceId,
+      pathRel: targetPath,
+      title: targetPath,
+      summary: `将上一条 AI 回复合并到 ${targetPath}`,
+      sourceSnapshotHash: "workspace",
+      baseHash: "workspace",
+      operations: [
+        {
+          type: "append",
+          pathRel: targetPath,
+          afterText: content
+        }
+      ]
+    };
+    setAiSidebarOpen(true);
+    setAiMessages((messages) => [...messages, { id: `user:${Date.now()}`, role: "user", text: request }]);
+    setAiSources([]);
+    setAiPatchProposal(proposal);
+    setAiPatchApplyMode("current-document");
+    setAiCanRetry(false);
+    aiLastInstructionRef.current = "";
+    aiLastDisplayTextRef.current = "";
+    aiLastActionRef.current = undefined;
+    aiLastRunOptionsRef.current = {};
     return true;
   }
 
@@ -1954,8 +2008,8 @@ export function App() {
       throw new Error(message);
     }
     try {
-      if (proposal.taskId && proposal.approvalId && window.nolia.ai?.approveProposal) {
-        await window.nolia.ai.approveProposal({ taskId: proposal.taskId, approvalId: proposal.approvalId });
+      if (proposal.taskId && proposal.approvalId) {
+        await getAiApi().approveProposal({ taskId: proposal.taskId, approvalId: proposal.approvalId });
         setAiPatchProposal(undefined);
         await loadWorkspaceData(workspace);
         const firstPath = firstOpenableWorkspaceOperationPath(proposal.operations, proposal.pathRel);
@@ -2135,9 +2189,9 @@ export function App() {
     if (!proposal) {
       return;
     }
-    if (proposal.taskId && proposal.approvalId && window.nolia.ai?.rejectProposal) {
+    if (proposal.taskId && proposal.approvalId) {
       try {
-        await window.nolia.ai.rejectProposal({ taskId: proposal.taskId, approvalId: proposal.approvalId, reason: tr("用户放弃了本次 AI 建议。") });
+        await getAiApi().rejectProposal({ taskId: proposal.taskId, approvalId: proposal.approvalId, reason: tr("用户放弃了本次 AI 建议。") });
       } catch (error) {
         const message = tr("放弃 AI 建议失败：{message}", { message: errorMessageFor(error, tr("未知错误")) });
         setAiMessages((messages) => [...messages, { id: `patch-discard-error:${Date.now()}`, role: "error", text: message }]);
@@ -2538,11 +2592,8 @@ export function App() {
   async function openRecentWorkspace(item: RecentWorkspace) {
     setWelcomeErrorMessage(undefined);
     if (!item.exists) {
-      const next =
-        (await window.nolia.workspace.removeRecent?.({ workspaceId: item.workspaceId })) ??
-        recentWorkspaces.filter((workspaceItem) => workspaceItem.workspaceId !== item.workspaceId);
-      setRecentWorkspaces(next);
-      setStatusMessage(tr("已移除不可用工作区 {name}", { name: item.name }));
+      setWelcomeErrorMessage(tr("无法打开「{name}」：{reason}。", { name: item.name, reason: recentWorkspaceUnavailableReason(item, tr) }));
+      setStatusMessage(tr("最近工作区打开失败"));
       return;
     }
     setWelcomeOpeningWorkspaceId(item.workspaceId);
@@ -2560,6 +2611,15 @@ export function App() {
     } finally {
       setWelcomeOpeningWorkspaceId(undefined);
     }
+  }
+
+  async function removeRecentWorkspace(item: RecentWorkspace) {
+    setWelcomeErrorMessage(undefined);
+    const next =
+      (await window.nolia.workspace.removeRecent?.({ workspaceId: item.workspaceId })) ??
+      recentWorkspaces.filter((workspaceItem) => workspaceItem.workspaceId !== item.workspaceId);
+    setRecentWorkspaces(next);
+    setStatusMessage(tr("已删除工作区记录 {name}", { name: item.name }));
   }
 
   async function closeWorkspace() {
@@ -3832,8 +3892,11 @@ function errorMessageFor(error: unknown, fallback: string): string {
   return error instanceof Error && error.message ? error.message : fallback;
 }
 
-function isMissingAiTaskHandlerError(error: unknown): boolean {
-  return /No handler registered for 'ai\.task\.start'/.test(errorMessageFor(error, ""));
+function getAiApi(): NonNullable<typeof window.nolia.ai> {
+  if (!window.nolia.ai) {
+    throw new Error("AI API 不可用");
+  }
+  return window.nolia.ai;
 }
 
 function containsRelatedTarget(event: Pick<ReactDragEvent<HTMLElement>, "currentTarget" | "relatedTarget">): boolean {
@@ -5140,6 +5203,18 @@ function workspaceDocumentGenerationInstruction(request: string): string {
 4. 不要只在聊天里输出目录规划或文档内容；需要让用户看到可确认的工作区操作提案。`;
 }
 
+function workspaceDocumentEditInstruction(request: string): string {
+  const targetPath = requestedMarkdownPath(request);
+  return `完成这个工作区 Markdown 文件修改请求：${request}
+
+要求：
+1. 必须先定位并读取目标 Markdown 文件${targetPath ? ` ${targetPath}` : ""}，确认现有内容和路径。
+2. 必须调用 proposeWorkspacePatch，提出 append 或 replaceDocument 操作；不要只在聊天里说明计划，也不要声称已经写入。
+3. 如果用户说“合并”“追加”“加入”“保存到已有文件”，优先使用 append，把新增内容作为 afterText。
+4. 如果用户明确要求重写、替换全文或覆盖，使用 replaceDocument，并确保 beforeText 与当前文件内容一致。
+5. 如果目标文件不存在，说明无法合并到不存在的文件，并改为提出 createFile 操作，除非用户明确不希望新建。`;
+}
+
 function isDocumentEditRequest(value: string): boolean {
   const normalized = value.toLowerCase().replace(/\s+/g, "");
   if (isDocumentGenerationRequest(value)) {
@@ -5156,11 +5231,12 @@ function isDocumentEditRequest(value: string): boolean {
 
 function isDocumentGenerationRequest(value: string): boolean {
   const normalized = stripExplicitNonWriteClauses(value.toLowerCase().replace(/\s+/g, ""));
+  const documentLike = "(文档|笔记|markdown|md|总结|报告|文章|材料|方案|summary|report|article|note)";
   return (
-    /(新建|创建|生成|重新生成|另存|保存|写入|输出).*(新|新的|单独|另一个)?(文档|笔记|markdown|md|总结|summary|note)/i.test(normalized) ||
-    /(文档|笔记|markdown|md|note).*(新建|创建|生成|保存|另存|写入|输出)/i.test(normalized) ||
-    /(写入|保存|输出).*(到|至|为)?(新|新的|单独|另一个)(文档|笔记|markdown|md|note)/i.test(normalized) ||
-    /(总结|summary).*(文档|笔记|markdown|md|note).*(新建|创建|生成|保存|另存|写入|输出)/i.test(normalized)
+    new RegExp(`(新建|创建|生成|重新生成|另存|保存|写入|输出|整理).*(新|新的|单独|另一个|一份|一个)?${documentLike}`, "i").test(normalized) ||
+    new RegExp(`${documentLike}.*(新建|创建|生成|保存|另存|写入|输出|整理)`, "i").test(normalized) ||
+    new RegExp(`(写入|保存|输出).*(到|至|为)?(新|新的|单独|另一个)?${documentLike}`, "i").test(normalized) ||
+    new RegExp(`(总结|summary|报告|report).*${documentLike}.*(新建|创建|生成|保存|另存|写入|输出)`, "i").test(normalized)
   );
 }
 
@@ -5168,7 +5244,8 @@ function isWorkspaceOperationRequest(value: string): boolean {
   const normalized = stripExplicitNonWriteClauses(value.toLowerCase().replace(/\s+/g, ""));
   return /(\u5de5\u4f5c\u533a|\u591a\u6587\u4ef6|\u6574\u4e2a\u4ed3\u5e93|\u9879\u76ee|workspace|multi-file|multiple files|project|repository|repo)/i.test(normalized) ||
     /(创建|新建|生成|保存|写入|放到|存到|另存).{0,24}(目录|文件夹|文件|路径|folder|directory|file)/i.test(normalized) ||
-    /(目录|文件夹|文件|路径|folder|directory|file).{0,24}(创建|新建|生成|保存|写入|放到|存到|另存)/i.test(normalized);
+    /(目录|文件夹|文件|路径|folder|directory|file).{0,24}(创建|新建|生成|保存|写入|放到|存到|另存)/i.test(normalized) ||
+    (Boolean(requestedMarkdownPath(value)) && /(合并|追加|加入|插入|写入|保存|放到|存到|更新|修改|替换|覆盖|merge|append|insert|write|save|update|replace)/i.test(normalized));
 }
 
 function isWorkspaceOperationOnlyRequest(value: string): boolean {
@@ -5209,6 +5286,24 @@ function isWritePreviousAiResponseToNewDocumentRequest(value: string): boolean {
   );
 }
 
+function isWritePreviousAiResponseToExistingDocumentRequest(value: string): boolean {
+  const normalized = value.toLowerCase().replace(/\s+/g, "");
+  const mentionsPreviousResponse = /(刚才|刚刚|上一条|上条|上一次|上次|上面|前面|前一条|最近|这个|这些|此).{0,12}(内容|回复|回答|结果|文档|文本|文章)|ai(回复|回答|结果)|last(response|answer|message)/i.test(normalized);
+  const asksToMerge = /(合并|追加|加入|插入|写入|保存|放到|存到|merge|append|insert|write|save)/i.test(normalized);
+  return Boolean(requestedMarkdownPath(value)) && mentionsPreviousResponse && asksToMerge && !/(新建|创建|另存|新的|新文档|新笔记|newdocument|newnote)/i.test(normalized);
+}
+
+function isWorkspaceMarkdownFileWriteRequest(value: string): boolean {
+  const normalized = stripExplicitNonWriteClauses(value.toLowerCase().replace(/\s+/g, ""));
+  if (!requestedMarkdownPath(value) || isExplicitNonWriteRequest(normalized)) {
+    return false;
+  }
+  if (/(删除|移除|重命名|改名|移动|搬到|迁移|delete|remove|rename|move)/i.test(normalized)) {
+    return false;
+  }
+  return /(合并|追加|加入|插入|写入|保存|放到|存到|补充|更新|修改|替换|覆盖|改写|重写|merge|append|insert|write|save|update|replace|rewrite)/i.test(normalized);
+}
+
 function isPlainChatTransformRequest(normalized: string): boolean {
   return (
     /^(翻译|译成|翻成|translate|解释|说明|总结|概括|润色|校对|分析)/i.test(normalized) &&
@@ -5241,6 +5336,63 @@ function lastAssistantDocumentContent(messages: AiMessageView[]): string | undef
     }
   }
   return undefined;
+}
+
+function requestedMarkdownPath(value: string): string | undefined {
+  const matches = [...value.matchAll(/[^\s`'"“”‘’「」『』《》,，。;；!！?？:：()（）<>]+\.m(?:arkdown|down|d)\b/giu)];
+  for (const match of matches) {
+    const raw = match[0] ?? "";
+    const cleaned = raw
+      .replace(/^[\s`'"“”‘’「」『』《》]+|[\s`'"“”‘’「」『』《》]+$/g, "")
+      .replace(/^.*?(?:到|至|进|入|为|成|在|to|into|as|file|path|文件|路径)(?=[^/\\]*\.m(?:arkdown|down|d)\b)/i, "");
+    const normalized = normalizeRequestedWorkspacePath(cleaned);
+    if (normalized && isMarkdownPath(normalized)) {
+      return normalized;
+    }
+  }
+  return undefined;
+}
+
+function resolveRequestedExistingMarkdownPath(request: string, nodes: FileTreeNode[]): string | undefined {
+  const requested = requestedMarkdownPath(request);
+  if (!requested) {
+    return undefined;
+  }
+  const requestedKey = requested.toLowerCase();
+  const exact = findFileTreeNode(nodes, requested);
+  if (exact?.kind === "markdown") {
+    return exact.pathRel;
+  }
+  const notes = collectMarkdownNotes(nodes);
+  const exactMatch = notes.find((item) => item.pathRel.toLowerCase() === requestedKey);
+  if (exactMatch) {
+    return exactMatch.pathRel;
+  }
+  const requestedName = fileNameFor(requested).toLowerCase();
+  const nameMatches = notes.filter((item) => item.name.toLowerCase() === requestedName || fileNameFor(item.pathRel).toLowerCase() === requestedName);
+  return nameMatches.length === 1 ? nameMatches[0].pathRel : undefined;
+}
+
+function normalizeRequestedWorkspacePath(value: string): string | undefined {
+  const trimmed = value.trim().replace(/\\/g, "/").replace(/^\.\/+/, "");
+  if (!trimmed) {
+    return undefined;
+  }
+  const parts: string[] = [];
+  for (const part of trimmed.split("/")) {
+    if (!part || part === ".") {
+      continue;
+    }
+    if (part === "..") {
+      if (!parts.length) {
+        return undefined;
+      }
+      parts.pop();
+      continue;
+    }
+    parts.push(part);
+  }
+  return parts.join("/");
 }
 
 function uniqueAiDirectoryPath(request: string, content: string, existingPaths: Set<string>, sourcePathRel?: string): string {
@@ -5621,6 +5773,7 @@ const EditorPane = forwardRef<EditorPaneHandle, {
   const [replaceText, setReplaceText] = useState("");
   const [findCaseSensitive, setFindCaseSensitive] = useState(false);
   const [findResult, setFindResult] = useState<FindReplaceResult>({ total: 0, currentIndex: -1 });
+  const [findTargetReady, setFindTargetReady] = useState(false);
   const sourceToolsActive = document?.mode === "source" || document?.mode === "split";
   const sourceEditorKey = document ? `${document.sourceKind ?? "workspace"}:${document.filePath ?? document.pathRel}` : "empty";
   const insertSourceSnippet = (snippet: MarkdownSnippet) => insertSnippetIntoSourceEditor(sourceEditorRef, snippet);
@@ -5696,6 +5849,9 @@ const EditorPane = forwardRef<EditorPaneHandle, {
   };
   const findOptions = (backwards = false): FindReplaceOptions => ({ caseSensitive: findCaseSensitive, backwards });
   const activeFindTarget = () => {
+    if (resource && (resource.editorId === "json.editor.fileEditor" || resource.editorId === "text.editor.fileEditor")) {
+      return textResourceEditorRef.current;
+    }
     if (!document) {
       return undefined;
     }
@@ -5707,6 +5863,26 @@ const EditorPane = forwardRef<EditorPaneHandle, {
     }
     return undefined;
   };
+  useEffect(() => {
+    let cancelled = false;
+    let attempts = 0;
+    const update = () => {
+      if (cancelled) {
+        return;
+      }
+      const ready = Boolean(activeFindTarget());
+      setFindTargetReady(ready);
+      if (!ready && attempts < 60) {
+        attempts += 1;
+        window.requestAnimationFrame(update);
+      }
+    };
+    setFindTargetReady(false);
+    update();
+    return () => {
+      cancelled = true;
+    };
+  }, [document?.mode, document?.pathRel, resource?.pathRel, resource?.editorId]);
   const focusFindQuery = () => {
     window.requestAnimationFrame(() => {
       findQueryInputRef.current?.focus();
@@ -5747,14 +5923,14 @@ const EditorPane = forwardRef<EditorPaneHandle, {
       return;
     }
     focusFindQuery();
-  }, [findReplaceOpen, document?.pathRel, document?.mode]);
+  }, [findReplaceOpen, document?.pathRel, document?.mode, resource?.pathRel, resource?.editorId]);
 
   useEffect(() => {
     if (!findReplaceOpen) {
       return;
     }
     setFindResult({ total: 0, currentIndex: -1 });
-  }, [findReplaceOpen, document?.pathRel, document?.mode, findQuery, findCaseSensitive]);
+  }, [findReplaceOpen, document?.pathRel, document?.mode, resource?.pathRel, resource?.editorId, findQuery, findCaseSensitive]);
 
   useImperativeHandle(ref, () => ({
     undoEdit: () => runHistoryCommand("undo"),
@@ -5836,7 +6012,14 @@ const EditorPane = forwardRef<EditorPaneHandle, {
       const scrollers = editorScrollElementsForMode(document.mode, editorPaneRootRef.current, sourceEditorRef.current?.view?.scrollDOM, splitPreviewRef.current);
       if (!scrollers.length) {
         attempts += 1;
-        if (attempts < 10) {
+        if (attempts < 60) {
+          frame = window.requestAnimationFrame(restore);
+        }
+        return;
+      }
+      if (scrollers.some((scroller) => scroller.scrollHeight <= scroller.clientHeight)) {
+        attempts += 1;
+        if (attempts < 60) {
           frame = window.requestAnimationFrame(restore);
         }
         return;
@@ -5845,7 +6028,7 @@ const EditorPane = forwardRef<EditorPaneHandle, {
         restoreEditorScroll(scroller, snapshot);
       }
       attempts += 1;
-      if (attempts < 5) {
+      if (attempts < 8) {
         frame = window.requestAnimationFrame(restore);
         return;
       }
@@ -6035,6 +6218,72 @@ const EditorPane = forwardRef<EditorPaneHandle, {
     onSourceChange(nextSource);
   };
 
+  const findMatchLabel = findQuery
+    ? findResult.total > 0
+      ? tr("{current}/{total}", { current: String(findResult.currentIndex + 1), total: String(findResult.total) })
+      : tr("无匹配")
+    : tr("输入关键字");
+  const findReplaceBar = findReplaceOpen ? (
+    <div className="editor-find-replace" role="search" aria-label={tr("查找和替换")}>
+      <label className="editor-find-input">
+        <Search size={14} />
+        <input
+          ref={findQueryInputRef}
+          className="editor-find-query"
+          value={findQuery}
+          aria-label={tr("查找")}
+          placeholder={tr("查找")}
+          onChange={(event) => setFindQuery(event.target.value)}
+          onKeyDown={(event) => {
+            if (event.key === "Enter") {
+              event.preventDefault();
+              runFind(findQuery, event.shiftKey);
+            }
+            if (event.key === "Escape") {
+              event.preventDefault();
+              closeFindReplace();
+            }
+          }}
+        />
+      </label>
+      <label className="editor-find-input">
+        <input
+          className="editor-replace-input"
+          value={replaceText}
+          aria-label={tr("替换为")}
+          placeholder={tr("替换为")}
+          onChange={(event) => setReplaceText(event.target.value)}
+          onKeyDown={(event) => {
+            if (event.key === "Enter") {
+              event.preventDefault();
+              replaceCurrentMatch();
+            }
+            if (event.key === "Escape") {
+              event.preventDefault();
+              closeFindReplace();
+            }
+          }}
+        />
+      </label>
+      <span className="editor-find-count" aria-live="polite">{findMatchLabel}</span>
+      <button type="button" className="toolbar-icon-button" title={tr("上一个")} aria-label={tr("上一个")} disabled={!findQuery || !findTargetReady} onClick={() => runFind(findQuery, true)}>
+        <ChevronDown size={15} className="icon-rotate-180" />
+      </button>
+      <button type="button" className="toolbar-icon-button" title={tr("下一个")} aria-label={tr("下一个")} disabled={!findQuery || !findTargetReady} onClick={() => runFind(findQuery)}>
+        <ChevronDown size={15} />
+      </button>
+      <button type="button" className="secondary-button editor-find-action" disabled={!findQuery || !findTargetReady} onClick={replaceCurrentMatch}>{tr("替换")}</button>
+      <button type="button" className="secondary-button editor-find-action" disabled={!findQuery || !findTargetReady} onClick={replaceAllMatches}>{tr("全部替换")}</button>
+      <label className="editor-find-toggle" title={tr("区分大小写")}>
+        <input type="checkbox" checked={findCaseSensitive} onChange={(event) => setFindCaseSensitive(event.target.checked)} />
+        <span>Aa</span>
+      </label>
+      <button type="button" className="toolbar-icon-button" title={tr("关闭")} aria-label={tr("关闭")} onClick={closeFindReplace}>
+        <X size={15} />
+      </button>
+    </div>
+  ) : null;
+
   if (resource) {
     const pluginEditor = resource.editorId ? pluginFileEditors.get(resource.editorId) : undefined;
     if (pluginEditor) {
@@ -6058,28 +6307,36 @@ const EditorPane = forwardRef<EditorPaneHandle, {
     }
     if (resource.editorId === "json.editor.fileEditor") {
       return (
-        <BuiltInJsonEditor
-          ref={textResourceEditorRef}
-          resource={resource}
-          workspaceId={workspaceId}
-          onDirtyChange={onPluginEditorDirtyChange}
-          onSaved={onPluginEditorSaved}
-          onStatus={onPluginEditorStatus}
-          onRegisterSaveHandler={onRegisterPluginEditorSaveHandler}
-        />
+        <div ref={editorPaneRootRef} className={`editor-pane mode-resource${findReplaceOpen ? " has-find-replace" : ""}`} onKeyDownCapture={handleFindShortcut}>
+          {findReplaceBar}
+          <BuiltInJsonEditor
+            ref={textResourceEditorRef}
+            resource={resource}
+            workspaceId={workspaceId}
+            onDirtyChange={onPluginEditorDirtyChange}
+            onSaved={onPluginEditorSaved}
+            onStatus={onPluginEditorStatus}
+            onOpenFindReplace={openFindReplace}
+            onRegisterSaveHandler={onRegisterPluginEditorSaveHandler}
+          />
+        </div>
       );
     }
     if (resource.editorId === "text.editor.fileEditor") {
       return (
-        <BuiltInTextEditor
-          ref={textResourceEditorRef}
-          resource={resource}
-          workspaceId={workspaceId}
-          onDirtyChange={onPluginEditorDirtyChange}
-          onSaved={onPluginEditorSaved}
-          onStatus={onPluginEditorStatus}
-          onRegisterSaveHandler={onRegisterPluginEditorSaveHandler}
-        />
+        <div ref={editorPaneRootRef} className={`editor-pane mode-resource${findReplaceOpen ? " has-find-replace" : ""}`} onKeyDownCapture={handleFindShortcut}>
+          {findReplaceBar}
+          <BuiltInTextEditor
+            ref={textResourceEditorRef}
+            resource={resource}
+            workspaceId={workspaceId}
+            onDirtyChange={onPluginEditorDirtyChange}
+            onSaved={onPluginEditorSaved}
+            onStatus={onPluginEditorStatus}
+            onOpenFindReplace={openFindReplace}
+            onRegisterSaveHandler={onRegisterPluginEditorSaveHandler}
+          />
+        </div>
       );
     }
     if (resource.editorId) {
@@ -6096,74 +6353,9 @@ const EditorPane = forwardRef<EditorPaneHandle, {
     return <div className="editor-empty">{tr("打开一个 Markdown 文件。")}</div>;
   }
 
-  const findMatchLabel = findQuery
-    ? findResult.total > 0
-      ? tr("{current}/{total}", { current: String(findResult.currentIndex + 1), total: String(findResult.total) })
-      : tr("无匹配")
-    : tr("输入关键字");
-
   return (
     <div ref={editorPaneRootRef} className={`editor-pane mode-${document.mode}${findReplaceOpen ? " has-find-replace" : ""}`} onKeyDownCapture={handleFindShortcut}>
-      {findReplaceOpen ? (
-        <div className="editor-find-replace" role="search" aria-label={tr("查找和替换")}>
-          <label className="editor-find-input">
-            <Search size={14} />
-            <input
-              ref={findQueryInputRef}
-              className="editor-find-query"
-              value={findQuery}
-              aria-label={tr("查找")}
-              placeholder={tr("查找")}
-              onChange={(event) => setFindQuery(event.target.value)}
-              onKeyDown={(event) => {
-                if (event.key === "Enter") {
-                  event.preventDefault();
-                  runFind(findQuery, event.shiftKey);
-                }
-                if (event.key === "Escape") {
-                  event.preventDefault();
-                  closeFindReplace();
-                }
-              }}
-            />
-          </label>
-          <label className="editor-find-input">
-            <input
-              className="editor-replace-input"
-              value={replaceText}
-              aria-label={tr("替换为")}
-              placeholder={tr("替换为")}
-              onChange={(event) => setReplaceText(event.target.value)}
-              onKeyDown={(event) => {
-                if (event.key === "Enter") {
-                  event.preventDefault();
-                  replaceCurrentMatch();
-                }
-                if (event.key === "Escape") {
-                  event.preventDefault();
-                  closeFindReplace();
-                }
-              }}
-            />
-          </label>
-          <span className="editor-find-count" aria-live="polite">{findMatchLabel}</span>
-          <button type="button" className="toolbar-icon-button" title={tr("上一个")} aria-label={tr("上一个")} disabled={!findQuery} onClick={() => runFind(findQuery, true)}>
-            <ChevronDown size={15} className="icon-rotate-180" />
-          </button>
-          <button type="button" className="toolbar-icon-button" title={tr("下一个")} aria-label={tr("下一个")} disabled={!findQuery} onClick={() => runFind(findQuery)}>
-            <ChevronDown size={15} />
-          </button>
-          <button type="button" className="secondary-button editor-find-action" disabled={!findQuery} onClick={replaceCurrentMatch}>{tr("替换")}</button>
-          <button type="button" className="secondary-button editor-find-action" disabled={!findQuery} onClick={replaceAllMatches}>{tr("全部替换")}</button>
-          <label className="editor-find-toggle" title={tr("区分大小写")}>
-            <input type="checkbox" checked={findCaseSensitive} onChange={(event) => setFindCaseSensitive(event.target.checked)} />
-            <span>Aa</span>
-          </label>
-          <button type="button" className="toolbar-icon-button" title={tr("关闭")} aria-label={tr("关闭")} onClick={closeFindReplace}>
-            <X size={15} />
-          </button>
-        </div>
-      ) : null}
+      {findReplaceBar}
       {document.mode === "source" ? (
         <div className="source-shell">
           {toolbarVisible ? (
@@ -6179,33 +6371,37 @@ const EditorPane = forwardRef<EditorPaneHandle, {
               onRedo={redoSourceEdit}
             />
           ) : null}
-          <SourceEditor
-            key={sourceEditorKey}
-            ref={sourceEditorRef}
-            value={document.sourceText}
-            onChange={onSourceChange}
-            onSelectionLengthChange={onSelectionLengthChange}
-            onOpenFindReplace={openFindReplace}
-            showLineNumbers={lineNumbersVisible}
-          />
+          <Suspense fallback={<EditorLoadingState label={tr("加载中。")} />}>
+            <SourceEditor
+              key={sourceEditorKey}
+              ref={sourceEditorRef}
+              value={document.sourceText}
+              onChange={onSourceChange}
+              onSelectionLengthChange={onSelectionLengthChange}
+              onOpenFindReplace={openFindReplace}
+              showLineNumbers={lineNumbersVisible}
+            />
+          </Suspense>
         </div>
       ) : null}
       {document.mode === "wysiwyg" ? (
-        <WysiwygEditor
-          ref={wysiwygEditorRef}
-          html={html}
-          sourceText={document.pendingHtml ? undefined : document.sourceText}
-          workspaceId={workspaceId}
-          documentPathRel={document.pathRel}
-          onChange={onHtmlChange}
-          onMarkdownPaste={onMarkdownPaste}
-          onSelectionLengthChange={onSelectionLengthChange}
-          onOpenMarkdownTarget={onOpenMarkdownTarget}
-          onInsertToc={(currentHtml) => {
-            void insertOrUpdateWysiwygToc(currentHtml);
-          }}
-          showToolbar={toolbarVisible}
-        />
+        <Suspense fallback={<EditorLoadingState label={tr("加载中。")} />}>
+          <WysiwygEditor
+            ref={wysiwygEditorRef}
+            html={html}
+            sourceText={document.pendingHtml ? undefined : document.sourceText}
+            workspaceId={workspaceId}
+            documentPathRel={document.pathRel}
+            onChange={onHtmlChange}
+            onMarkdownPaste={onMarkdownPaste}
+            onSelectionLengthChange={onSelectionLengthChange}
+            onOpenMarkdownTarget={onOpenMarkdownTarget}
+            onInsertToc={(currentHtml) => {
+              void insertOrUpdateWysiwygToc(currentHtml);
+            }}
+            showToolbar={toolbarVisible}
+          />
+        </Suspense>
       ) : null}
       {document.mode === "split" ? (
         <div className="split-pane" style={{ gridTemplateColumns: `minmax(0, ${splitLeftPercent}fr) 10px minmax(0, ${100 - splitLeftPercent}fr)` }}>
@@ -6224,15 +6420,17 @@ const EditorPane = forwardRef<EditorPaneHandle, {
                   onRedo={redoSourceEdit}
                 />
               ) : null}
-              <SourceEditor
-                key={sourceEditorKey}
-                ref={sourceEditorRef}
-                value={document.sourceText}
-                onChange={onSourceChange}
-                onSelectionLengthChange={onSelectionLengthChange}
-                onOpenFindReplace={openFindReplace}
-                showLineNumbers={lineNumbersVisible}
-              />
+              <Suspense fallback={<EditorLoadingState label={tr("加载中。")} />}>
+                <SourceEditor
+                  key={sourceEditorKey}
+                  ref={sourceEditorRef}
+                  value={document.sourceText}
+                  onChange={onSourceChange}
+                  onSelectionLengthChange={onSelectionLengthChange}
+                  onOpenFindReplace={openFindReplace}
+                  showLineNumbers={lineNumbersVisible}
+                />
+              </Suspense>
             </div>
           </div>
           <button
@@ -6245,7 +6443,9 @@ const EditorPane = forwardRef<EditorPaneHandle, {
             onDoubleClick={() => updateSplitLeftPercent(DEFAULT_SPLIT_LEFT_PERCENT)}
           />
           <div ref={splitPreviewRef} className="split-preview">
-            <MarkdownPreview html={html} onMermaidClick={focusSplitMermaidSource} onCodeLanguageChange={updateSplitCodeLanguage} />
+            <Suspense fallback={<EditorLoadingState label={tr("加载中。")} />}>
+              <MarkdownPreview html={html} onMermaidClick={focusSplitMermaidSource} onCodeLanguageChange={updateSplitCodeLanguage} />
+            </Suspense>
           </div>
         </div>
       ) : null}
@@ -6278,26 +6478,37 @@ type BuiltInResourceEditorProps = {
   onDirtyChange: (pathRel: string, dirty: boolean) => void;
   onSaved: (pathRel: string, result: FileWriteResponse) => void;
   onStatus: (message: string) => void;
+  onOpenFindReplace: () => void;
   onRegisterSaveHandler: (pathRel: string, handler: () => Promise<void>) => () => void;
 };
 
 const BuiltInJsonEditor = forwardRef<TextResourceEditorHandle, BuiltInResourceEditorProps>(function BuiltInJsonEditor(
-  { resource, workspaceId, onDirtyChange, onSaved, onStatus, onRegisterSaveHandler },
+  { resource, workspaceId, onDirtyChange, onSaved, onStatus, onOpenFindReplace, onRegisterSaveHandler },
   ref
 ) {
+  const { tr } = useRendererI18n();
   return (
-    <TextResourceEditor ref={ref} resource={resource} workspaceId={workspaceId} editorKind="json" onDirtyChange={onDirtyChange} onSaved={onSaved} onStatus={onStatus} onRegisterSaveHandler={onRegisterSaveHandler} />
+    <Suspense fallback={<EditorLoadingState label={tr("加载中。")} />}>
+      <TextResourceEditor ref={ref} resource={resource} workspaceId={workspaceId} editorKind="json" onDirtyChange={onDirtyChange} onSaved={onSaved} onStatus={onStatus} onOpenFindReplace={onOpenFindReplace} onRegisterSaveHandler={onRegisterSaveHandler} />
+    </Suspense>
   );
 });
 
 const BuiltInTextEditor = forwardRef<TextResourceEditorHandle, BuiltInResourceEditorProps>(function BuiltInTextEditor(
-  { resource, workspaceId, onDirtyChange, onSaved, onStatus, onRegisterSaveHandler },
+  { resource, workspaceId, onDirtyChange, onSaved, onStatus, onOpenFindReplace, onRegisterSaveHandler },
   ref
 ) {
+  const { tr } = useRendererI18n();
   return (
-    <TextResourceEditor ref={ref} resource={resource} workspaceId={workspaceId} editorKind="text" onDirtyChange={onDirtyChange} onSaved={onSaved} onStatus={onStatus} onRegisterSaveHandler={onRegisterSaveHandler} />
+    <Suspense fallback={<EditorLoadingState label={tr("加载中。")} />}>
+      <TextResourceEditor ref={ref} resource={resource} workspaceId={workspaceId} editorKind="text" onDirtyChange={onDirtyChange} onSaved={onSaved} onStatus={onStatus} onOpenFindReplace={onOpenFindReplace} onRegisterSaveHandler={onRegisterSaveHandler} />
+    </Suspense>
   );
 });
+
+function EditorLoadingState({ label }: { label: string }) {
+  return <div className="empty-state editor-loading-state">{label}</div>;
+}
 
 function ResourcePreview({ resource, workspaceId, platform }: { resource: ActiveResource; workspaceId?: string; platform?: NodeJS.Platform }) {
   const { tr, locale } = useRendererI18n();
@@ -7976,21 +8187,23 @@ function SettingsDialog({
                   </div>
                 </div>
               ) : activeTab === "ai" && aiSettings ? (
-                <AiSettingsPanel
-                  settings={aiSettings}
-                  onUpdate={onUpdateAiSettings}
-                  onSetApiKey={onSetAiApiKey}
-                  onClearApiKey={onClearAiApiKey}
-                  onGetApiKey={onGetAiApiKey}
-                  onTestProvider={onTestAiProvider}
-                  onListModels={onListAiModels}
-                  workspaceId={workspaceId}
-                  semanticStatus={aiSemanticStatus}
-                  onRefreshSemanticStatus={onRefreshAiSemanticStatus}
-                  onTestEmbedding={onTestAiEmbedding}
-                  onUpdateSemanticIndex={(settings, apiKey) => onUpdateAiSemanticIndex(false, settings, apiKey)}
-                  onResetSemanticIndex={(settings, apiKey) => onUpdateAiSemanticIndex(true, settings, apiKey)}
-                />
+                <Suspense fallback={<div className="settings-tab-content"><EditorLoadingState label={tr("加载中。")} /></div>}>
+                  <AiSettingsPanel
+                    settings={aiSettings}
+                    onUpdate={onUpdateAiSettings}
+                    onSetApiKey={onSetAiApiKey}
+                    onClearApiKey={onClearAiApiKey}
+                    onGetApiKey={onGetAiApiKey}
+                    onTestProvider={onTestAiProvider}
+                    onListModels={onListAiModels}
+                    workspaceId={workspaceId}
+                    semanticStatus={aiSemanticStatus}
+                    onRefreshSemanticStatus={onRefreshAiSemanticStatus}
+                    onTestEmbedding={onTestAiEmbedding}
+                    onUpdateSemanticIndex={(settings, apiKey) => onUpdateAiSemanticIndex(false, settings, apiKey)}
+                    onResetSemanticIndex={(settings, apiKey) => onUpdateAiSemanticIndex(true, settings, apiKey)}
+                  />
+                </Suspense>
               ) : (
                 <div className="settings-tab-content settings-tab-content-plugins">
                   {pluginSettingContributions.length ? (
@@ -8464,8 +8677,12 @@ function ErrorPanel({ statusMessage }: { statusMessage: string }) {
   return <div className="panel-empty">{statusMessage}</div>;
 }
 
-function StatusPill({ label, tone = "normal" }: { label: string; tone?: "normal" | "warn" | "ok" | "muted" }) {
-  return <span className={`status-pill tone-${tone}`}>{label}</span>;
+function StatusPill({ label, tone = "normal", accessibilityLabel }: { label: string; tone?: "normal" | "warn" | "ok" | "muted"; accessibilityLabel?: string }) {
+  return (
+    <span className={`status-pill tone-${tone}`} aria-label={accessibilityLabel} title={accessibilityLabel ? label : undefined}>
+      {label}
+    </span>
+  );
 }
 
 function SettingToggle({

@@ -73,6 +73,7 @@ export function AiSettingsPanel({
   const embedding = useMemo(() => normalizeAiEmbeddingSettings(settings.embedding, DEFAULT_AI_EMBEDDING_SETTINGS), [settings.embedding]);
   const displayedSemanticStatus = localSemanticStatus ?? semanticStatus;
   const semanticUpdating = Boolean(displayedSemanticStatus?.progress);
+  const usingLocalSecretStorage = settings.secretStorageBackend === "local-file";
   const activeEnabledProvider = useMemo(() => settings.providers.find((provider) => provider.id === settings.defaultProviderId && !provider.disabled), [settings.defaultProviderId, settings.providers]);
   const defaultProviderId = activeEnabledProvider?.id ?? settings.providers.find((provider) => !provider.disabled)?.id ?? settings.defaultProviderId;
 
@@ -395,9 +396,11 @@ export function AiSettingsPanel({
         </header>
 
         <div className="ai-semantic-grid">
-          <label className="setting-row">
+          <label className="setting-row ai-semantic-toggle-row">
             <span>{tr("启用语义检索")}</span>
-            <input aria-label={tr("启用语义检索")} type="checkbox" checked={embedding.enabled} onChange={(event) => updateEmbeddingSettings({ enabled: event.target.checked })} />
+            <span className="ai-semantic-toggle-control">
+              <input aria-label={tr("启用语义检索")} type="checkbox" checked={embedding.enabled} onChange={(event) => updateEmbeddingSettings({ enabled: event.target.checked })} />
+            </span>
           </label>
           <label className="setting-row">
             <span>{tr("Embedding 服务商")}</span>
@@ -428,7 +431,6 @@ export function AiSettingsPanel({
                   aria-label="Embedding API key"
                   type={embeddingApiKeyVisible ? "text" : "password"}
                   value={embeddingApiKeyDraft}
-                  disabled={!settings.secretStorageAvailable}
                   onFocus={(event) => {
                     if (embeddingApiKeyDraft === API_KEY_MASK) {
                       event.currentTarget.select();
@@ -449,7 +451,6 @@ export function AiSettingsPanel({
                   className="icon-button ai-secret-toggle"
                   aria-label={embeddingApiKeyVisible ? tr("隐藏密钥") : tr("显示密钥")}
                   title={embeddingApiKeyVisible ? tr("隐藏密钥") : tr("显示密钥")}
-                  disabled={!settings.secretStorageAvailable}
                   onClick={() => {
                     if (embeddingApiKeyVisible) {
                       setEmbeddingApiKeyVisible(false);
@@ -473,6 +474,7 @@ export function AiSettingsPanel({
               </div>
             </div>
           ) : null}
+          {usingLocalSecretStorage ? <div className="plugin-empty-state is-warning ai-model-field-span">{tr("系统安全存储不可用，API key 将保存到本机配置文件。")}</div> : null}
         </div>
 
         <div className="ai-semantic-summary">
@@ -594,7 +596,7 @@ export function AiSettingsPanel({
           busy={busy}
           modelOptions={modelOptions}
           testResult={testResult}
-          secretStorageAvailable={settings.secretStorageAvailable}
+          usingLocalSecretStorage={usingLocalSecretStorage}
           onUpdate={updateDraft}
           onRefreshModels={refreshDialogModels}
           onTestProvider={testDialogProvider}
@@ -624,7 +626,7 @@ function ModelDialog({
   busy,
   modelOptions,
   testResult,
-  secretStorageAvailable,
+  usingLocalSecretStorage,
   onUpdate,
   onRefreshModels,
   onTestProvider,
@@ -637,7 +639,7 @@ function ModelDialog({
   busy: boolean;
   modelOptions: AiModelDescriptor[];
   testResult?: AiProviderTestResult;
-  secretStorageAvailable: boolean;
+  usingLocalSecretStorage: boolean;
   onUpdate: (patch: Partial<ModelDraft>) => void;
   onRefreshModels: () => void;
   onTestProvider: () => void;
@@ -648,7 +650,7 @@ function ModelDialog({
   const { tr } = useRendererI18n();
   const [apiKeyVisible, setApiKeyVisible] = useState(false);
   const [apiKeyRevealBusy, setApiKeyRevealBusy] = useState(false);
-  const confirmDisabled = busy || !draft.model.trim() || !draft.baseUrl.trim() || (draft.providerId === "openai-compatible" && !secretStorageAvailable && !draft.apiKeyDraft);
+  const confirmDisabled = busy || !draft.model.trim() || !draft.baseUrl.trim();
   const toggleApiKeyVisible = () => {
     if (apiKeyVisible) {
       setApiKeyVisible(false);
@@ -705,7 +707,7 @@ function ModelDialog({
             <span><RequiredMark /> {tr("自定义请求地址")}</span>
             <input value={draft.baseUrl} onChange={(event) => onUpdate({ baseUrl: event.target.value })} placeholder={draft.providerId === "ollama" ? "http://localhost:11434" : "https://api.example.com/v1"} />
             {draft.providerId === "openai-compatible" && draft.apiMode === "chat-completions" ? (
-              <small>{tr("请填写兼容 OpenAI API 的服务端地址，不要以斜杠结尾。/chat/completions 将会被补充到你填写的地址末尾。")}</small>
+              <small>{tr("请填写兼容 OpenAI API 的 /v1 服务端地址，不要以斜杠结尾。/chat/completions 将会被补充到你填写的地址末尾。")}</small>
             ) : null}
           </label>
 
@@ -736,7 +738,6 @@ function ModelDialog({
                     aria-label="API key"
                     type={apiKeyVisible ? "text" : "password"}
                     value={draft.apiKeyDraft}
-                    disabled={!secretStorageAvailable}
                     onFocus={(event) => {
                       if (draft.apiKeyDraft === API_KEY_MASK) {
                         event.currentTarget.select();
@@ -756,14 +757,14 @@ function ModelDialog({
                     className="icon-button ai-secret-toggle"
                     aria-label={apiKeyVisible ? tr("隐藏密钥") : tr("显示密钥")}
                     title={apiKeyVisible ? tr("隐藏密钥") : tr("显示密钥")}
-                    disabled={!secretStorageAvailable || apiKeyRevealBusy}
+                    disabled={apiKeyRevealBusy}
                     onClick={toggleApiKeyVisible}
                   >
                     {apiKeyVisible ? <EyeOff size={16} /> : <Eye size={16} />}
                   </button>
                 </div>
               </div>
-              {!secretStorageAvailable ? <div className="plugin-empty-state is-warning">{tr("系统安全存储不可用，无法保存云端 API key。")}</div> : null}
+              {usingLocalSecretStorage ? <div className="plugin-empty-state is-warning ai-model-field-span">{tr("系统安全存储不可用，API key 将保存到本机配置文件。")}</div> : null}
             </>
           ) : (
             <p className="ai-context-note ai-model-field-span">{tr("本地 Ollama 不需要 API key，Nolia 只会请求你的本机服务。")}</p>

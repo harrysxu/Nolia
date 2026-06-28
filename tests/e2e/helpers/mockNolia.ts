@@ -714,6 +714,11 @@ export async function installMockNolia(page: Page, options: MockWorkspaceOptions
           };
         },
         startTask: async ({ instruction, clientContext, entryPoint, actionId, conversation, options, title }) => {
+          if (instruction.includes("模拟启动无响应")) {
+            return await new Promise(() => {
+              // Simulates an IPC call that never resolves before a task event is emitted.
+            });
+          }
           const runId = `mock-ai-${++aiRunCounter}`;
           const taskId = `mock-task-${aiRunCounter}`;
           testWindow.__noliaMock.aiRuns.push({ runId, taskId, via: "task", instruction, entryPoint, actionId, clientContext, conversation, options });
@@ -744,6 +749,10 @@ export async function installMockNolia(page: Page, options: MockWorkspaceOptions
           aiRunListeners.forEach((listener) => listener({ type: "cancelled", runId }));
           return { ok: true };
         },
+        listTasks: async () => [],
+        readTask: async () => undefined,
+        resumeTask: async () => undefined,
+        cancelTask: async () => ({ ok: true }),
         approveProposal: async ({ taskId, approvalId }) => ({
           id: taskId,
           runId: `mock-ai-${aiRunCounter}`,
@@ -775,6 +784,7 @@ export async function installMockNolia(page: Page, options: MockWorkspaceOptions
             writes: []
           };
         },
+        undoWrite: async () => undefined,
         onRunEvent: (listener) => {
           aiRunListeners.add(listener);
           return () => aiRunListeners.delete(listener);
@@ -830,7 +840,9 @@ export async function installMockNolia(page: Page, options: MockWorkspaceOptions
             return { runId };
           }
           if (instruction.includes("模拟启动无响应")) {
-            return await new Promise<{ runId: string }>(() => undefined);
+            return await new Promise<{ runId: string }>(() => {
+              // Legacy startRun path: keep the call pending forever.
+            });
           }
           if (instruction.includes("保持运行直到取消")) {
             window.setTimeout(() => {
@@ -939,7 +951,31 @@ export async function installMockNolia(page: Page, options: MockWorkspaceOptions
                   }
                 })
               );
-            } else if (instruction.includes("AI未来发展的文档") && instruction.includes("createDirectory") && instruction.includes("createFile") && allowsWorkspaceOperations(options)) {
+            } else if (instruction.includes("future-of-ai.md") && instruction.includes("proposeWorkspacePatch") && allowsWorkspaceOperations(options)) {
+              aiRunListeners.forEach((listener) =>
+                listener({
+                  type: "patch-proposal",
+                  runId,
+                  proposal: {
+                    id: `mock-future-of-ai-append-proposal-${Date.now()}`,
+                    runId,
+                    workspaceId: clientContext.workspaceId ?? workspace.workspaceId,
+                    pathRel: "future-of-ai.md",
+                    title: "future-of-ai.md",
+                    summary: "Mock future-of-ai append operation",
+                    sourceSnapshotHash: clientContext.activeDocument?.baseHash ?? "",
+                    baseHash: clientContext.activeDocument?.baseHash ?? "",
+                    operations: [
+                      {
+                        type: "append",
+                        pathRel: "future-of-ai.md",
+                        afterText: "## AI 未来补充\n\nAI 将更深地融入个人工作流。"
+                      }
+                    ]
+                  }
+                })
+              );
+            } else if (instruction.includes("AI未来") && instruction.includes("createDirectory") && instruction.includes("createFile") && allowsWorkspaceOperations(options)) {
               aiRunListeners.forEach((listener) =>
                 listener({
                   type: "patch-proposal",

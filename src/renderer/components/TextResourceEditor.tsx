@@ -10,7 +10,6 @@ import { yaml } from "@codemirror/lang-yaml";
 import { defaultHighlightStyle, foldKeymap, syntaxHighlighting } from "@codemirror/language";
 import { linter, lintGutter, openLintPanel } from "@codemirror/lint";
 import { EditorState, RangeSetBuilder } from "@codemirror/state";
-import { openSearchPanel, search, searchKeymap } from "@codemirror/search";
 import { Decoration, EditorView, keymap, ViewPlugin, type DecorationSet, type ViewUpdate, WidgetType } from "@codemirror/view";
 import {
   ArrowDownAZ,
@@ -33,6 +32,7 @@ import {
 import { formatFileSize as formatLocalizedFileSize, type Translator } from "../../shared/i18n";
 import type { FileWriteResponse, ResolvedLocale } from "../../shared/types";
 import { useRendererI18n } from "../app/i18n";
+import { exactMatchIndex, findPlainTextMatches, nextMatchIndex, type FindReplaceOptions, type FindReplaceResult } from "./findReplace";
 
 export type TextResourceInfo = {
   pathRel: string;
@@ -67,16 +67,20 @@ export type TextResourceEditorProps = {
   onDirtyChange: (pathRel: string, dirty: boolean) => void;
   onSaved: (pathRel: string, result: FileWriteResponse) => void;
   onStatus: (message: string) => void;
+  onOpenFindReplace: () => void;
   onRegisterSaveHandler: (pathRel: string, handler: () => Promise<void>) => () => void;
 };
 
 export type TextResourceEditorHandle = {
   undoEdit: () => boolean;
   redoEdit: () => boolean;
+  findText: (query: string, options?: FindReplaceOptions) => FindReplaceResult;
+  replaceCurrent: (query: string, replacement: string, options?: FindReplaceOptions) => FindReplaceResult;
+  replaceAll: (query: string, replacement: string, options?: FindReplaceOptions) => FindReplaceResult;
 };
 
 export const TextResourceEditor = forwardRef<TextResourceEditorHandle, TextResourceEditorProps>(function TextResourceEditor(
-  { resource, workspaceId, editorKind, onDirtyChange, onSaved, onStatus, onRegisterSaveHandler },
+  { resource, workspaceId, editorKind, onDirtyChange, onSaved, onStatus, onOpenFindReplace, onRegisterSaveHandler },
   ref
 ) {
   const { tr, locale } = useRendererI18n();
@@ -171,15 +175,6 @@ export const TextResourceEditor = forwardRef<TextResourceEditorHandle, TextResou
     }
   }
 
-  const openSearch = () => {
-    const view = editorRef.current?.view;
-    if (!view) {
-      return;
-    }
-    openSearchPanel(view);
-    view.focus();
-  };
-
   const openDiagnostics = () => {
     const view = editorRef.current?.view;
     const nextStatus = statusForContent(contentRef.current, language, undefined, resource.pathRel, tr, locale);
@@ -273,7 +268,57 @@ export const TextResourceEditor = forwardRef<TextResourceEditorHandle, TextResou
 
   useImperativeHandle(ref, () => ({
     undoEdit: () => dispatchEditorCommand(undo),
-    redoEdit: () => dispatchEditorCommand(redo)
+    redoEdit: () => dispatchEditorCommand(redo),
+    findText: (query: string, options: FindReplaceOptions = {}) => {
+      const view = editorRef.current?.view;
+      if (!view || !query) {
+        return { total: 0, currentIndex: -1 };
+      }
+      return selectTextResourceMatch(view, query, options);
+    },
+    replaceCurrent: (query: string, replacement: string, options: FindReplaceOptions = {}) => {
+      const view = editorRef.current?.view;
+      if (!view || !query) {
+        return { total: 0, currentIndex: -1, replaced: 0 };
+      }
+      const text = view.state.doc.toString();
+      const matches = findPlainTextMatches(text, query, options);
+      if (!matches.length) {
+        return { total: 0, currentIndex: -1, replaced: 0 };
+      }
+      const range = view.state.selection.main;
+      let index = exactMatchIndex(matches, range.from, range.to);
+      if (index < 0) {
+        index = nextMatchIndex(matches, range.head, Boolean(options.backwards));
+      }
+      const match = matches[index];
+      view.dispatch({
+        changes: { from: match.from, to: match.to, insert: replacement },
+        selection: { anchor: match.from, head: match.from + replacement.length },
+        scrollIntoView: true
+      });
+      view.focus();
+      const nextText = `${text.slice(0, match.from)}${replacement}${text.slice(match.to)}`;
+      const nextMatches = findPlainTextMatches(nextText, query, options);
+      return { total: nextMatches.length, currentIndex: nextMatchIndex(nextMatches, match.from + replacement.length), replaced: 1 };
+    },
+    replaceAll: (query: string, replacement: string, options: FindReplaceOptions = {}) => {
+      const view = editorRef.current?.view;
+      if (!view || !query) {
+        return { total: 0, currentIndex: -1, replaced: 0 };
+      }
+      const matches = findPlainTextMatches(view.state.doc.toString(), query, options);
+      if (!matches.length) {
+        return { total: 0, currentIndex: -1, replaced: 0 };
+      }
+      view.dispatch({
+        changes: matches.map((match) => ({ from: match.from, to: match.to, insert: replacement })),
+        selection: { anchor: matches[0].from + replacement.length },
+        scrollIntoView: true
+      });
+      view.focus();
+      return { total: 0, currentIndex: -1, replaced: matches.length };
+    }
   }));
 
   const announceEditorOption = (label: string) => {
@@ -325,7 +370,7 @@ export const TextResourceEditor = forwardRef<TextResourceEditorHandle, TextResou
       <div className="resource-editor-toolbar" role="toolbar" aria-label={toolbarLabel}>
         <ResourceToolbarButton title={tr("撤销")} icon={<Undo2 size={16} />} onClick={() => dispatchEditorCommand(undo)} />
         <ResourceToolbarButton title={tr("重做")} icon={<Redo2 size={16} />} onClick={() => dispatchEditorCommand(redo)} />
-        <ResourceToolbarButton title={tr("搜索/替换")} icon={<Search size={16} />} onClick={openSearch} />
+        <ResourceToolbarButton title={tr("搜索/替换")} icon={<Search size={16} />} onClick={onOpenFindReplace} />
         <ToolbarDivider />
         <ResourceToolbarButton title={tr("自动换行（长行时生效）")} ariaLabel={tr("自动换行")} icon={<WrapText size={16} />} active={wrap} pressed={wrap} onClick={toggleWrap} />
         <ResourceToolbarButton title={tr("行号")} icon={<ListOrdered size={16} />} active={lineNumbers} pressed={lineNumbers} onClick={toggleLineNumbers} />
@@ -376,6 +421,7 @@ export const TextResourceEditor = forwardRef<TextResourceEditorHandle, TextResou
           wrap={wrap}
           showWhitespace={showWhitespace}
           ariaLabel={editorLabel}
+          onOpenFindReplace={onOpenFindReplace}
           onChange={setEditorContent}
           onSelectionStats={setSelectionStats}
         />
@@ -420,11 +466,12 @@ type TextEditorCoreProps = {
   wrap: boolean;
   showWhitespace: boolean;
   ariaLabel: string;
+  onOpenFindReplace: () => void;
   onChange: (value: string) => void;
   onSelectionStats: (stats: SelectionStats) => void;
 };
 
-const TextEditorCore = forwardRef<ReactCodeMirrorRef, TextEditorCoreProps>(function TextEditorCore({ value, language, showLineNumbers, wrap, showWhitespace, ariaLabel, onChange, onSelectionStats }, ref) {
+const TextEditorCore = forwardRef<ReactCodeMirrorRef, TextEditorCoreProps>(function TextEditorCore({ value, language, showLineNumbers, wrap, showWhitespace, ariaLabel, onOpenFindReplace, onChange, onSelectionStats }, ref) {
   const { tr } = useRendererI18n();
   const extensions = useMemo(
     () => [
@@ -445,10 +492,18 @@ const TextEditorCore = forwardRef<ReactCodeMirrorRef, TextEditorCoreProps>(funct
         "current match": tr("当前匹配"),
         "on line": tr("在第")
       }),
-      search({ top: true }),
       lintGutter(),
       ...(language === "json" ? [linter(jsonParseLinter())] : []),
-      keymap.of([...searchKeymap, ...foldKeymap]),
+      keymap.of([
+        {
+          key: "Mod-f",
+          run: () => {
+            onOpenFindReplace();
+            return true;
+          }
+        },
+        ...foldKeymap
+      ]),
       EditorView.updateListener.of((update: ViewUpdate) => {
         if (update.selectionSet || update.docChanged) {
           onSelectionStats(selectionStats(update.state));
@@ -457,7 +512,7 @@ const TextEditorCore = forwardRef<ReactCodeMirrorRef, TextEditorCoreProps>(funct
       ...(wrap ? [EditorView.lineWrapping] : []),
       ...(showWhitespace ? [visibleWhitespace()] : [])
     ],
-    [language, onSelectionStats, showWhitespace, tr, wrap]
+    [language, onOpenFindReplace, onSelectionStats, showWhitespace, tr, wrap]
   );
 
   return (
@@ -473,7 +528,8 @@ const TextEditorCore = forwardRef<ReactCodeMirrorRef, TextEditorCoreProps>(funct
         highlightActiveLine: true,
         highlightActiveLineGutter: showLineNumbers,
         bracketMatching: true,
-        closeBrackets: true
+        closeBrackets: true,
+        searchKeymap: false
       }}
       onChange={onChange}
       className="text-resource-codemirror"
@@ -636,6 +692,25 @@ function selectionStats(state: EditorState): SelectionStats {
     }
   });
   return { line: line.number, column: range.head - line.from + 1, selectedChars };
+}
+
+function selectTextResourceMatch(view: EditorView, query: string, options: FindReplaceOptions): FindReplaceResult {
+  const matches = findPlainTextMatches(view.state.doc.toString(), query, options);
+  if (!matches.length) {
+    return { total: 0, currentIndex: -1 };
+  }
+  const range = view.state.selection.main;
+  const selectedIndex = exactMatchIndex(matches, range.from, range.to);
+  const currentIndex = selectedIndex >= 0
+    ? nextMatchIndex(matches, options.backwards ? range.from : range.to, Boolean(options.backwards))
+    : nextMatchIndex(matches, range.head, Boolean(options.backwards));
+  const match = matches[currentIndex];
+  view.dispatch({
+    selection: { anchor: match.from, head: match.to },
+    scrollIntoView: true
+  });
+  view.focus();
+  return { total: matches.length, currentIndex };
 }
 
 function visibleWhitespace() {

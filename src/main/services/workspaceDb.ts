@@ -391,13 +391,13 @@ export class WorkspaceDb {
         ? "updating"
         : !settings.enabled || !settings.model.trim()
           ? "not_configured"
-          : error
-            ? "failed"
-            : metadata?.updatedAt && !metadataMatches
+          : metadata?.updatedAt && !metadataMatches
               ? "stale"
               : metadata?.updatedAt
                 ? "ready"
-                : "not_created";
+                : error
+                  ? "failed"
+                  : "not_created";
       return {
         state,
         enabled: Boolean(settings.enabled),
@@ -440,12 +440,16 @@ export class WorkspaceDb {
       state = "updating";
     } else if (!settings.enabled || !settings.model.trim()) {
       state = "not_configured";
-    } else if (error) {
-      state = "failed";
     } else if (metadata?.updatedAt && !metadataMatches) {
       state = "stale";
+    } else if (error && !chunkCount) {
+      state = "failed";
+    } else if (metadata?.updatedAt && error && chunkCount > 0) {
+      state = "ready";
     } else if (metadata?.updatedAt && staleFiles > 0) {
       state = "stale";
+    } else if (error) {
+      state = "failed";
     } else if (!chunkCount || !metadata?.updatedAt) {
       state = "not_created";
     } else {

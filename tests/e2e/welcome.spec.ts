@@ -1,4 +1,4 @@
-import { expect, test, type Locator } from "@playwright/test";
+import { expect, test, type Locator, type Page } from "@playwright/test";
 import { DEFAULT_SETTINGS } from "../../src/shared/constants";
 import type { AppSettings, FileTreeNode, ParsedDocument, RecentWorkspace, WorkspaceInfo } from "../../src/shared/types";
 import { installMockNolia } from "./helpers/mockNolia";
@@ -20,11 +20,15 @@ const settings: AppSettings = {
   plugins: {}
 };
 
+async function gotoApp(page: Page) {
+  await page.goto("/", { waitUntil: "domcontentloaded" });
+}
+
 test("renderer shows a desktop runtime message when preload bridge is unavailable", async ({ page }) => {
   const pageErrors: Error[] = [];
   page.on("pageerror", (error) => pageErrors.push(error));
 
-  await page.goto("/");
+  await gotoApp(page);
 
   await expect(page.getByRole("heading", { name: /请通过 Nolia 桌面应用打开|Open Nolia in the desktop app/ })).toBeVisible();
   await expect(page.locator("#root")).toContainText(/Electron preload|桌面应用/);
@@ -65,12 +69,12 @@ test("welcome screen renders with preload API mocked", async ({ page }) => {
       }
     };
   }, settings);
-  await page.goto("/");
+  await gotoApp(page);
   await expect(page.getByRole("heading", { name: "Nolia" })).toBeVisible();
   await expect(page.getByRole("heading", { name: "继续上次的工作" })).toBeVisible();
 });
 
-test("welcome recent workspace cards open available workspaces and remove unavailable paths", async ({ page }) => {
+test("welcome recent workspace cards open available workspaces and delete recent records", async ({ page }) => {
   const now = Date.now();
   const recentWorkspaces: RecentWorkspace[] = [
     {
@@ -103,21 +107,45 @@ test("welcome recent workspace cards open available workspaces and remove unavai
     files: { "home.md": "# Recent Home\n\nOpened from the welcome screen." }
   });
 
-  await page.goto("/");
+  await gotoApp(page);
   await expect(page.getByRole("heading", { name: "继续上次的工作" })).toBeVisible();
   await expect(page.locator(".welcome-content")).toBeVisible();
   await expect(page.locator(".welcome-recent-panel")).toBeVisible();
-  await expect(page.getByRole("button", { name: /Missing Workspace/ })).toContainText("路径不可用");
+  const missingItem = page.locator(".welcome-recent-item", { hasText: "Missing Workspace" });
+  const availableItem = page.locator(".welcome-recent-item", { hasText: "Available Workspace" });
+  await expect(missingItem).toContainText("路径不可用");
 
-  await page.getByRole("button", { name: /Missing Workspace/ }).click();
-  await expect(page.getByRole("button", { name: /Missing Workspace/ })).toHaveCount(0);
+  await missingItem.getByRole("button", { name: /删除工作区记录/ }).click();
+  await expect(missingItem).toHaveCount(0);
   await expect(page.getByRole("status")).toHaveCount(0);
   await expect(page.getByRole("heading", { name: "Nolia" })).toBeVisible();
 
-  await page.getByRole("button", { name: /Available Workspace/ }).click();
+  await availableItem.getByRole("button", { name: /打开最近工作区/ }).click();
   await expect(page.getByText("文件与资源")).toBeVisible();
   await expect(page.getByRole("navigation", { name: "工作区导航" })).toBeVisible();
   await expect(page.getByRole("button", { name: "home.md", exact: true })).toBeVisible();
+});
+
+test("macOS workspace navigation reserves space for window controls", async ({ page }) => {
+  await page.setViewportSize({ width: 1180, height: 760 });
+  await installMockNolia(page, {
+    platform: "darwin",
+    workspace: {
+      workspaceId: "mac-window-controls",
+      name: "Mac Window Controls",
+      rootPath: "/tmp/nolia-mac-window-controls",
+      configPath: "/tmp/nolia-mac-window-controls/.nolia"
+    },
+    files: { "home.md": "# Home\n\nMac layout." }
+  });
+
+  await gotoApp(page);
+  await expect(page.getByRole("navigation", { name: "工作区导航" })).toBeVisible();
+  await expect(page.locator(".app-shell")).toHaveClass(/is-platform-darwin/);
+  const logoTop = await page.locator(".nav-avatar-logo").evaluate((element) => element.getBoundingClientRect().top);
+  expect(logoTop).toBeGreaterThanOrEqual(48);
+  const navRight = await page.locator(".app-nav").evaluate((element) => element.getBoundingClientRect().right);
+  expect(navRight).toBeGreaterThanOrEqual(84);
 });
 
 test("closing the active workspace returns to the recent workspace home", async ({ page }) => {
@@ -141,7 +169,7 @@ test("closing the active workspace returns to the recent workspace home", async 
     files: { "home.md": "# Close Home\n\nWorkspace content." }
   });
 
-  await page.goto("/");
+  await gotoApp(page);
   await expect(page.getByRole("navigation", { name: "工作区导航" })).toBeVisible();
   await page.getByRole("button", { name: "命令面板" }).click();
   await page.getByPlaceholder("输入命令").fill("关闭工作区");
@@ -150,7 +178,7 @@ test("closing the active workspace returns to the recent workspace home", async 
   await expect(page.getByRole("heading", { name: "Nolia" })).toBeVisible();
   await expect(page.getByRole("heading", { name: "继续上次的工作" })).toBeVisible();
   await expect(page.getByRole("navigation", { name: "工作区导航" })).toHaveCount(0);
-  await expect(page.getByRole("button", { name: /Close Workspace/ })).toBeVisible();
+  await expect(page.locator(".welcome-recent-item", { hasText: "Close Workspace" })).toBeVisible();
 
   await page.reload();
   await expect(page.getByRole("heading", { name: "Nolia" })).toBeVisible();
@@ -243,7 +271,7 @@ test("workspace startup routes JSON recent results through the JSON editor", asy
     };
   }, shellSettings);
 
-  await page.goto("/");
+  await gotoApp(page);
   await expect(page.locator(".resource-kind-pill")).toHaveText("JSON 编辑器");
   await expect(page.getByTestId("builtin-json-editor")).toBeVisible();
   await expect(page.getByRole("toolbar", { name: "JSON 工具" })).toBeVisible();
@@ -338,7 +366,7 @@ test("recent list keeps current order while active and refreshes on re-entry", a
     };
   }, shellSettings);
 
-  await page.goto("/");
+  await gotoApp(page);
   await page.getByRole("navigation", { name: "工作区导航" }).getByRole("button", { name: "最近", exact: true }).click();
   const recentItems = page.locator(".document-simple-list .document-simple-item");
   await expect(recentItems.nth(0).locator(".document-simple-name")).toHaveText("alpha.md");
@@ -436,7 +464,7 @@ test("settings apply theme, focus, and editor width preferences", async ({ page 
     };
   }, shellSettings);
 
-  await page.goto("/");
+  await gotoApp(page);
   await expect(page.locator(".source-editor .cm-content")).toBeVisible();
   await expect.poll(() => page.evaluate(() => document.documentElement.dataset.theme)).toBe("dark");
   await page.emulateMedia({ colorScheme: "light" });
@@ -581,7 +609,7 @@ test("split source typing keeps latest text while parse and autosave resolve out
     };
   }, shellSettings);
 
-  await page.goto("/");
+  await gotoApp(page);
   const source = page.locator(".split-editor .source-editor .cm-content");
   await expect(source).toBeVisible();
   await source.click();
@@ -779,7 +807,7 @@ test("workspace shell creates notes without native dialogs", async ({ page }) =>
     };
   }, shellSettings);
 
-  await page.goto("/");
+  await gotoApp(page);
   await expect(page.getByRole("navigation", { name: "工作区导航" })).toBeVisible();
   await expect(page.getByRole("navigation", { name: "工作区导航" }).getByRole("button")).toContainText(["最近", "笔记", "收藏", "搜索"]);
   await expect(page.getByText("文件与资源")).toBeVisible();
@@ -1067,7 +1095,7 @@ test("source and split editors support long document scrolling", async ({ page }
     };
   }, shellSettings);
 
-  await page.goto("/");
+  await gotoApp(page);
   const sourceScroller = page.locator(".source-editor .cm-scroller");
   await expect(sourceScroller).toBeVisible();
   await expect.poll(() => sourceScroller.evaluate((element) => element.scrollHeight > element.clientHeight)).toBe(true);
@@ -1240,7 +1268,7 @@ test("immersive mode supports menu toggling and direct system Markdown files", a
     };
   }, shellSettings);
 
-  await page.goto("/");
+  await gotoApp(page);
   await page.getByRole("navigation", { name: "工作区导航" }).getByRole("button", { name: "笔记", exact: true }).click();
   await page.getByRole("button", { name: "alpha.md", exact: true }).click();
   await expect(page.locator(".statusbar")).toContainText("alpha.md");
@@ -1366,7 +1394,7 @@ test("wysiwyg keeps Markdown list and code block editing behavior", async ({ pag
     };
   }, shellSettings);
 
-  await page.goto("/");
+  await gotoApp(page);
   await page.getByRole("navigation", { name: "工作区导航" }).getByRole("button", { name: "笔记", exact: true }).click();
   await page.getByRole("button", { name: "alpha.md", exact: true }).click();
 
@@ -1598,7 +1626,7 @@ test("wysiwyg keeps code block selection stable around autosave", async ({ page 
     };
   }, shellSettings);
 
-  await page.goto("/");
+  await gotoApp(page);
   await page.getByRole("navigation", { name: "工作区导航" }).getByRole("button", { name: "笔记", exact: true }).click();
   await page.getByRole("button", { name: "alpha.md", exact: true }).click();
 

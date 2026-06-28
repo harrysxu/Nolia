@@ -1,10 +1,18 @@
 {
   "name": "nolia",
-  "version": "0.1.0",
+  "version": "1.0.0",
   "private": true,
   "description": "Nolia local-first Markdown knowledge workstation",
-  "author": "Nolia contributors",
+  "author": "徐晓龙",
   "license": "GPL-3.0-or-later",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/harrysxu/Nolia.git"
+  },
+  "homepage": "https://github.com/harrysxu/Nolia#readme",
+  "bugs": {
+    "url": "https://github.com/harrysxu/Nolia/issues"
+  },
   "main": "dist/main/index.js",
   "type": "commonjs",
   "scripts": {
@@ -55,6 +63,10 @@
       {
         "from": "CONTRIBUTING.md",
         "to": "CONTRIBUTING.md"
+      },
+      {
+        "from": "CODE_OF_CONDUCT.md",
+        "to": "CODE_OF_CONDUCT.md"
       }
     ],
     "directories": {
@@ -78,7 +90,7 @@
     "linux": {
       "icon": "build/icon.svg",
       "category": "Office",
-      "maintainer": "Nolia contributors",
+      "maintainer": "徐晓龙",
       "description": "Nolia local-first Markdown knowledge workstation",
       "extraResources": [
         {
@@ -145,25 +157,28 @@
     "@codemirror/lang-yaml": "^6.1.3",
     "@codemirror/language": "^6.12.3",
     "@codemirror/lint": "^6.9.6",
-    "@codemirror/search": "^6.7.0",
     "@codemirror/state": "^6.6.0",
     "@codemirror/view": "^6.43.0",
+    "@tiptap/core": "^3.23.6",
+    "@tiptap/extension-code": "^3.23.6",
     "@tiptap/extension-code-block-lowlight": "3.23.6",
     "@tiptap/extension-image": "^3.23.6",
     "@tiptap/extension-placeholder": "^3.23.6",
     "@tiptap/extension-table": "^3.23.6",
     "@tiptap/extension-task-item": "^3.23.6",
     "@tiptap/extension-task-list": "^3.23.6",
+    "@tiptap/pm": "^3.23.6",
     "@tiptap/react": "^3.23.6",
     "@tiptap/starter-kit": "^3.23.6",
     "@uiw/react-codemirror": "^4.25.10",
     "ai": "^6.0.206",
     "chokidar": "^5.0.0",
+    "highlight.js": "^11.11.1",
     "katex": "^0.17.0",
     "lowlight": "^3.3.0",
     "lucide-react": "^1.16.0",
     "mdast-util-to-string": "^4.0.0",
-    "mermaid": "^11.15.0",
+    "mermaid": "^11.16.0",
     "mime-types": "^3.0.2",
     "react": "^19.2.6",
     "react-dom": "^19.2.6",
@@ -191,6 +206,7 @@
     "@electron/notarize": "^3.1.1",
     "@eslint/js": "^10.0.1",
     "@playwright/test": "^1.60.0",
+    "@types/mdast": "^4.0.4",
     "@types/mime-types": "^3.0.1",
     "@types/node": "^25.9.1",
     "@types/react": "^19.2.15",
@@ -199,23 +215,30 @@
     "@typescript-eslint/eslint-plugin": "^8.59.4",
     "@typescript-eslint/parser": "^8.59.4",
     "@vitejs/plugin-react": "^6.0.2",
-    "concurrently": "^9.2.1",
+    "app-builder-lib": "^26.15.3",
+    "concurrently": "^9.2.3",
     "cross-env": "^10.1.0",
-    "electron": "^42.2.0",
-    "electron-builder": "^26.8.1",
+    "electron": "^42.5.0",
+    "electron-builder": "^26.15.3",
     "eslint": "^10.4.0",
     "eslint-plugin-react-hooks": "^7.1.1",
     "globals": "^17.6.0",
+    "mdast-util-to-markdown": "^2.1.2",
     "playwright": "^1.60.0",
     "resedit": "^1.7.2",
     "tsup": "^8.5.1",
     "typescript": "^6.0.3",
-    "vite": "^8.0.14",
+    "vite": "^8.1.0",
     "vitest": "^4.1.7",
     "wait-on": "^9.0.10"
   },
   "overrides": {
-    "tmp": "^0.2.6"
+    "dompurify": "^3.4.11",
+    "esbuild": "^0.28.1",
+    "form-data": "^4.0.6",
+    "tar": "^7.5.19",
+    "tmp": "^0.2.6",
+    "undici": "^7.28.0"
   },
-  "copyright": "Copyright © 2026 Nolia contributors"
+  "copyright": "Copyright © 2026 徐晓龙"
 }

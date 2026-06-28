@@ -107,12 +107,19 @@ export class AiSettingsService {
   }
 
   async clearSecret(request: AiSecretClearRequest): Promise<AiSettingsPublic> {
+    const settings = normalizeAiSettings(this.settings.getSettings().ai);
+    const provider = settings.providers.find((item) => item.id === request.providerProfileId);
     await this.secrets.clear(request.providerProfileId);
+    if (provider && provider.providerId !== request.providerProfileId) {
+      await this.secrets.clear(provider.providerId);
+    }
     return this.publicSettings();
   }
 
   getSecret(request: AiSecretGetRequest): AiSecretGetResponse {
-    return { apiKey: this.secrets.get(request.providerProfileId) };
+    const settings = normalizeAiSettings(this.settings.getSettings().ai);
+    const provider = settings.providers.find((item) => item.id === request.providerProfileId);
+    return { apiKey: this.secrets.get(request.providerProfileId) || (provider ? this.secrets.get(provider.providerId) : undefined) };
   }
 
   private publicProvider(provider: AiProviderProfile): AiProviderProfilePublic {

@@ -1,13 +1,19 @@
-import { readFile, writeFile, mkdir } from "node:fs/promises";
+import { chmod, readFile, writeFile, mkdir } from "node:fs/promises";
 import path from "node:path";
 import { safeStorage } from "electron";
 
 interface SecretState {
   version: 1;
-  items: Record<string, { encrypted: string } | undefined>;
+  items: Record<string, SecretItem | undefined>;
+}
+
+interface SecretItem {
+  encrypted?: string;
+  localPlainText?: string;
 }
 
 const emptyState: SecretState = { version: 1, items: {} };
+const localFileBackend = "local-file";
 
 export class AiSecretService {
   private readonly statePath: string;
@@ -32,10 +38,13 @@ export class AiSecretService {
   }
 
   isAvailable(): boolean {
-    return safeStorage.isEncryptionAvailable();
+    return this.isSecureStorageAvailable() || Boolean(this.statePath);
   }
 
   backend(): string | undefined {
+    if (!this.isSecureStorageAvailable()) {
+      return localFileBackend;
+    }
     try {
       return safeStorage.getSelectedStorageBackend();
     } catch {
@@ -44,31 +53,41 @@ export class AiSecretService {
   }
 
   has(secretId: string): boolean {
-    return Boolean(this.state.items[secretId]?.encrypted);
+    return Boolean(this.get(secretId));
   }
 
   get(secretId: string): string | undefined {
-    const encrypted = this.state.items[secretId]?.encrypted;
-    if (!encrypted || !this.isAvailable()) {
+    const item = this.state.items[secretId];
+    if (!item) {
       return undefined;
     }
-    try {
-      return safeStorage.decryptString(Buffer.from(encrypted, "base64"));
-    } catch {
-      return undefined;
+    if (item.encrypted && this.isSecureStorageAvailable()) {
+      try {
+        return safeStorage.decryptString(Buffer.from(item.encrypted, "base64"));
+      } catch {
+        return item.localPlainText;
+      }
     }
+    return item.localPlainText;
   }
 
   async set(secretId: string, apiKey: string): Promise<void> {
-    if (!this.isAvailable()) {
-      throw new Error("Secret storage is not available");
+    const cleanApiKey = apiKey.trim();
+    if (!cleanApiKey) {
+      return;
     }
-    const encrypted = safeStorage.encryptString(apiKey);
+    let item: SecretItem;
+    if (this.isSecureStorageAvailable()) {
+      const encrypted = safeStorage.encryptString(cleanApiKey);
+      item = { encrypted: encrypted.toString("base64") };
+    } else {
+      item = { localPlainText: cleanApiKey };
+    }
     this.state = {
       version: 1,
       items: {
         ...this.state.items,
-        [secretId]: { encrypted: encrypted.toString("base64") }
+        [secretId]: item
       }
     };
     await this.persist();
@@ -81,7 +100,16 @@ export class AiSecretService {
     await this.persist();
   }
 
+  private isSecureStorageAvailable(): boolean {
+    try {
+      return safeStorage.isEncryptionAvailable();
+    } catch {
+      return false;
+    }
+  }
+
   private async persist(): Promise<void> {
-    await writeFile(this.statePath, `${JSON.stringify(this.state, null, 2)}\n`, "utf8");
+    await writeFile(this.statePath, `${JSON.stringify(this.state, null, 2)}\n`, { encoding: "utf8", mode: 0o600 });
+    await chmod(this.statePath, 0o600).catch(() => undefined);
   }
 }

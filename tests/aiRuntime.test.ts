@@ -5,6 +5,7 @@ import { AgentEngine } from "../src/main/ai/agentEngine";
 import { AiService } from "../src/main/ai/aiService";
 import { AiTaskService } from "../src/main/ai/aiTaskService";
 import { AiProviderError, type AiProvider, type AiResolvedSettings, type AiRuntimeServices } from "../src/main/ai/types";
+import { normalizedOpenAiCompatibleBaseUrl } from "../src/main/ai/aiSdkProvider";
 import { AiToolRegistry } from "../src/main/ai/tools/toolRegistry";
 import { normalizeAiSettings } from "../src/main/ai/aiSettingsService";
 import { joinUrl } from "../src/main/ai/providerUtils";
@@ -180,6 +181,30 @@ describe("AI runtime", () => {
     expect(joinUrl("https://example.test/v1/", "v1/models")).toBe("https://example.test/v1/models");
     expect(joinUrl("https://example.test/proxy", "/v1/chat/completions")).toBe("https://example.test/proxy/v1/chat/completions");
     expect(joinUrl("http://localhost:11434", "/api/chat")).toBe("http://localhost:11434/api/chat");
+  });
+
+  it("normalizes AI SDK OpenAI-compatible chat base URLs to the v1 API root", () => {
+    expect(
+      normalizedOpenAiCompatibleBaseUrl({
+        providerId: "openai-compatible",
+        apiMode: "chat-completions",
+        baseUrl: "https://example.test"
+      })
+    ).toBe("https://example.test/v1");
+    expect(
+      normalizedOpenAiCompatibleBaseUrl({
+        providerId: "openai-compatible",
+        apiMode: "chat-completions",
+        baseUrl: "https://example.test/v1/"
+      })
+    ).toBe("https://example.test/v1");
+    expect(
+      normalizedOpenAiCompatibleBaseUrl({
+        providerId: "ollama",
+        apiMode: "chat-completions",
+        baseUrl: "http://localhost:11434"
+      })
+    ).toBe("http://localhost:11434/v1");
   });
 
   it("lists OpenAI-compatible models through the v1 models endpoint", async () => {

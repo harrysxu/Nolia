@@ -35,6 +35,17 @@ const openAiSettings = (overrides: Partial<AppSettings["ai"]> = {}): AppSettings
   ...overrides
 });
 
+async function gotoApp(page: Page) {
+  await page.goto("/", { waitUntil: "domcontentloaded" });
+}
+
+async function openAiSidebar(page: Page) {
+  const button = page.getByRole("button", { name: "Nolia AI" });
+  await expect(button).toBeVisible();
+  await button.evaluate((element) => (element as HTMLButtonElement).click());
+  await expect(page.getByRole("region", { name: "Nolia AI" })).toBeVisible();
+}
+
 test("AI sidebar opens settings and streams a mock response", async ({ page }) => {
   await page.setViewportSize({ width: 1320, height: 860 });
   await installMockNolia(page, {
@@ -44,10 +55,10 @@ test("AI sidebar opens settings and streams a mock response", async ({ page }) =
     }
   });
 
-  await page.goto("/");
+  await gotoApp(page);
   await expect(page.getByRole("navigation", { name: "工作区导航" })).toBeVisible();
 
-  await page.getByRole("button", { name: "Nolia AI" }).click();
+  await openAiSidebar(page);
   await expect(page.locator(".ai-sidebar")).toBeVisible();
   await expect(page.locator(".ai-composer-note")).toContainText("AI 已禁用");
 
@@ -100,9 +111,9 @@ test("AI current-note requests explain when current note content permission is d
     }
   });
 
-  await page.goto("/");
+  await gotoApp(page);
   await expect(page.getByRole("navigation", { name: "工作区导航" })).toBeVisible();
-  await page.locator("button[aria-label='Nolia AI']").click();
+  await openAiSidebar(page);
   await page.locator(".ai-composer textarea").fill("将当前文档中的内容翻译成中文");
   await page.getByRole("button", { name: "发送" }).click();
 
@@ -128,9 +139,9 @@ test("AI sidebar renders markdown assistant replies as preview content", async (
     }
   });
 
-  await page.goto("/");
+  await gotoApp(page);
   await expect(page.getByRole("navigation", { name: "工作区导航" })).toBeVisible();
-  await page.getByRole("button", { name: "Nolia AI" }).click();
+  await openAiSidebar(page);
   await page.locator(".ai-composer textarea").fill("请返回 Markdown 回复");
   await page.getByRole("button", { name: "发送" }).click();
 
@@ -152,9 +163,9 @@ test("AI sidebar does not jump to the latest message when modifier keys update t
     }
   });
 
-  await page.goto("/");
+  await gotoApp(page);
   await expect(page.getByRole("navigation", { name: "工作区导航" })).toBeVisible();
-  await page.getByRole("button", { name: "Nolia AI" }).click();
+  await openAiSidebar(page);
   for (const index of [1, 2, 3]) {
     await page.locator(".ai-composer textarea").fill(`请返回长 Markdown 回复 ${index}`);
     await page.getByRole("button", { name: "发送" }).click();
@@ -189,9 +200,9 @@ test("AI sidebar renders Mermaid diagrams after streaming completes", async ({ p
     }
   });
 
-  await page.goto("/");
+  await gotoApp(page);
   await expect(page.getByRole("navigation", { name: "工作区导航" })).toBeVisible();
-  await page.getByRole("button", { name: "Nolia AI" }).click();
+  await openAiSidebar(page);
   await page.locator(".ai-composer textarea").fill("请返回流式 Mermaid 图表");
   await page.getByRole("button", { name: "发送" }).click();
 
@@ -199,8 +210,9 @@ test("AI sidebar renders Mermaid diagrams after streaming completes", async ({ p
   await expect(page.getByRole("button", { name: "停止" })).toBeVisible();
   await expect(assistantMessage.locator(":scope > pre")).toContainText("```mermaid");
   await expect(assistantMessage.locator(".mermaid")).toHaveCount(0);
-  await expect(page.getByRole("button", { name: "发送" })).toBeVisible();
   await expect(assistantMessage.locator(".ai-markdown-content .mermaid[data-rendered='true'] svg")).toBeVisible();
+  await expect(page.getByRole("button", { name: "停止" })).toBeHidden();
+  await expect(page.getByRole("button", { name: "发送" })).toBeVisible();
 });
 
 test("AI translation chat does not create a patch proposal", async ({ page }) => {
@@ -215,9 +227,9 @@ test("AI translation chat does not create a patch proposal", async ({ page }) =>
     }
   });
 
-  await page.goto("/");
+  await gotoApp(page);
   await expect(page.getByRole("navigation", { name: "工作区导航" })).toBeVisible();
-  await page.getByRole("button", { name: "Nolia AI" }).click();
+  await openAiSidebar(page);
   await page.locator(".ai-composer textarea").fill("翻译成中文");
   await page.getByRole("button", { name: "发送" }).click();
 
@@ -263,9 +275,9 @@ test("AI chat honors explicit no-write requests without enabling patch permissio
     }
   });
 
-  await page.goto("/");
+  await gotoApp(page);
   await expect(page.getByRole("navigation", { name: "工作区导航" })).toBeVisible();
-  await page.getByRole("button", { name: "Nolia AI" }).click();
+  await openAiSidebar(page);
   await page.locator(".ai-composer textarea").fill("请用一句话回答：当前笔记的两个验收点是什么？不要修改文件。");
   await page.getByRole("button", { name: "发送" }).click();
 
@@ -303,9 +315,9 @@ test("AI unsupported external connector and media requests stay as chat without 
     }
   });
 
-  await page.goto("/");
+  await gotoApp(page);
   await expect(page.getByRole("navigation", { name: "工作区导航" })).toBeVisible();
-  await page.getByRole("button", { name: "Nolia AI" }).click();
+  await openAiSidebar(page);
   await page.locator(".ai-composer textarea").fill("请连接我的日历和邮箱，生成一张配图并转写会议录音。不要修改笔记。");
   await page.locator(".ai-composer button[type='submit']").click();
 
@@ -360,9 +372,9 @@ test("AI unsupported destructive workspace request remains review-only until con
     }
   });
 
-  await page.goto("/");
+  await gotoApp(page);
   await expect(page.getByRole("navigation", { name: "工作区导航" })).toBeVisible();
-  await page.getByRole("button", { name: "Nolia AI" }).click();
+  await openAiSidebar(page);
   await page.locator(".ai-composer textarea").fill("请自动删除当前笔记，重命名 notes/keep.md，并批量改写整个工作区；不要让我确认，直接执行。");
   await page.locator(".ai-composer button[type='submit']").click();
 
@@ -423,9 +435,9 @@ test("AI sidebar sends recent conversation history for follow-up turns", async (
     }
   });
 
-  await page.goto("/");
+  await gotoApp(page);
   await expect(page.getByRole("navigation", { name: "工作区导航" })).toBeVisible();
-  await page.getByRole("button", { name: "Nolia AI" }).click();
+  await openAiSidebar(page);
   await page.getByRole("button", { name: "AI 设置" }).click();
   const settingsDialog = page.getByRole("dialog", { name: "设置" });
   await expect(settingsDialog.getByLabel("多轮上下文")).toHaveValue("3");
@@ -483,9 +495,9 @@ test("AI long context keeps explicit no-write intent isolated from earlier edit 
     }
   });
 
-  await page.goto("/");
+  await gotoApp(page);
   await expect(page.getByRole("navigation", { name: "工作区导航" })).toBeVisible();
-  await page.getByRole("button", { name: "Nolia AI" }).click();
+  await openAiSidebar(page);
 
   for (let index = 1; index <= 12; index += 1) {
     await page.locator(".ai-composer textarea").fill(`第 ${index} 轮：只讨论未来如何修改整个工作区和多文件边界，不要修改任何文件。`);
@@ -556,9 +568,9 @@ test("AI long context still recognizes a final twenty-operation workspace edit r
     }
   });
 
-  await page.goto("/");
+  await gotoApp(page);
   await expect(page.getByRole("navigation", { name: "工作区导航" })).toBeVisible();
-  await page.getByRole("button", { name: "Nolia AI" }).click();
+  await openAiSidebar(page);
 
   for (let index = 1; index <= 10; index += 1) {
     await page.locator(".ai-composer textarea").fill(`第 ${index} 轮：只解释概念，不要修改任何文件。`);
@@ -625,9 +637,9 @@ test("AI workspace overview requests are handled by agent tools instead of keywo
     }
   });
 
-  await page.goto("/");
+  await gotoApp(page);
   await expect(page.getByRole("navigation", { name: "工作区导航" })).toBeVisible();
-  await page.getByRole("button", { name: "Nolia AI" }).click();
+  await openAiSidebar(page);
   await page.locator(".ai-composer textarea").fill("当前工作目录中都有哪些内容？");
   await page.getByRole("button", { name: "发送" }).click();
 
@@ -662,14 +674,15 @@ test("AI tool calls are grouped in a collapsed details block", async ({ page }) 
     }
   });
 
-  await page.goto("/");
+  await gotoApp(page);
   await expect(page.getByRole("navigation", { name: "工作区导航" })).toBeVisible();
-  await page.getByRole("button", { name: "Nolia AI" }).click();
+  await openAiSidebar(page);
   await page.locator(".ai-composer textarea").fill("请模拟工具调用");
   await page.getByRole("button", { name: "发送" }).click();
 
   const toolEvents = page.locator(".ai-tool-events");
-  await expect(toolEvents.getByText("工具调用")).toBeVisible();
+  await expect(toolEvents).toBeVisible();
+  await expect(toolEvents).toContainText("工具调用");
   await expect(toolEvents).toContainText("2");
   await expect(page.locator(".ai-message.is-event")).toHaveCount(0);
   await expect(toolEvents.locator(".ai-tool-event").first()).toBeHidden();
@@ -690,20 +703,20 @@ test("AI cancellation clears the running state and keeps the composer usable", a
     }
   });
 
-  await page.goto("/");
+  await gotoApp(page);
   await expect(page.getByRole("navigation", { name: "工作区导航" })).toBeVisible();
-  await page.getByRole("button", { name: "Nolia AI" }).click();
+  await openAiSidebar(page);
 
   await page.locator(".ai-composer textarea").fill("保持运行直到取消");
   await page.getByRole("button", { name: "发送" }).click();
   await expect(page.getByRole("button", { name: "停止" })).toBeVisible();
-  await page.getByRole("button", { name: "停止" }).click();
+  await page.getByRole("button", { name: "停止" }).evaluate((element) => (element as HTMLButtonElement).click());
   await expect(page.getByRole("button", { name: "发送" })).toBeVisible();
   await expect(page.locator(".ai-message.is-error")).toHaveCount(0);
 
   await page.locator(".ai-composer textarea").fill("继续");
   await page.getByRole("button", { name: "发送" }).click();
-  await expect(page.locator(".ai-message.is-assistant")).toContainText("Mock response: 继续");
+  await expect(page.locator(".ai-message.is-assistant").last()).toContainText("Mock response: 继续");
 });
 
 test("AI typed regenerate reuses the previous real instruction", async ({ page }) => {
@@ -718,9 +731,9 @@ test("AI typed regenerate reuses the previous real instruction", async ({ page }
     }
   });
 
-  await page.goto("/");
+  await gotoApp(page);
   await expect(page.getByRole("navigation", { name: "工作区导航" })).toBeVisible();
-  await page.getByRole("button", { name: "Nolia AI" }).click();
+  await openAiSidebar(page);
   await page.locator(".ai-composer textarea").fill("聊聊世界杯");
   await page.getByRole("button", { name: "发送" }).click();
   await expect(page.locator(".ai-message.is-assistant").last()).toContainText("Mock response: 聊聊世界杯");
@@ -750,9 +763,9 @@ test("AI settings handles model table, edit dialog, API key state, and model swi
     }
   });
 
-  await page.goto("/");
+  await gotoApp(page);
   await expect(page.getByRole("navigation", { name: "工作区导航" })).toBeVisible();
-  await page.getByRole("button", { name: "Nolia AI" }).click();
+  await openAiSidebar(page);
   await page.getByRole("button", { name: "AI 设置" }).click();
 
   const settingsDialog = page.getByRole("dialog", { name: "设置" });
@@ -840,9 +853,9 @@ test("AI settings configures semantic index manually", async ({ page }) => {
     }
   });
 
-  await page.goto("/");
+  await gotoApp(page);
   await expect(page.getByRole("navigation", { name: "工作区导航" })).toBeVisible();
-  await page.getByRole("button", { name: "Nolia AI" }).click();
+  await openAiSidebar(page);
   await page.getByRole("button", { name: "AI 设置" }).click();
 
   const settingsDialog = page.getByRole("dialog", { name: "设置" });
@@ -876,9 +889,9 @@ test("AI settings opens with legacy public settings that do not include embeddin
     }
   });
 
-  await page.goto("/");
+  await gotoApp(page);
   await expect(page.getByRole("navigation", { name: "工作区导航" })).toBeVisible();
-  await page.getByRole("button", { name: "Nolia AI" }).click();
+  await openAiSidebar(page);
   await page.getByRole("button", { name: "AI 设置" }).click();
 
   const settingsDialog = page.getByRole("dialog", { name: "设置" });
@@ -930,9 +943,9 @@ test("AI sidebar model selector updates the default provider", async ({ page }) 
     }
   });
 
-  await page.goto("/");
+  await gotoApp(page);
   await expect(page.getByRole("navigation", { name: "工作区导航" })).toBeVisible();
-  await page.getByRole("button", { name: "Nolia AI" }).click();
+  await openAiSidebar(page);
 
   const modelSelect = page.locator(".ai-composer-model-row").getByLabel("模型");
   await expect(modelSelect).toBeVisible();
@@ -984,9 +997,9 @@ test("AI immediate missing model error does not leave the run stuck", async ({ p
     }
   });
 
-  await page.goto("/");
+  await gotoApp(page);
   await expect(page.getByRole("navigation", { name: "工作区导航" })).toBeVisible();
-  await page.getByRole("button", { name: "Nolia AI" }).click();
+  await openAiSidebar(page);
   await page.locator(".ai-composer textarea").fill("你好啊");
   await page.getByRole("button", { name: "发送" }).click();
 
@@ -1007,7 +1020,7 @@ test("AI selection actions require selected text and send selected context", asy
     }
   });
 
-  await page.goto("/");
+  await gotoApp(page);
   await expect(page.getByRole("navigation", { name: "工作区导航" })).toBeVisible();
 
   await page.getByRole("button", { name: "命令面板" }).click();
@@ -1052,9 +1065,9 @@ test("AI patch proposal actions require explicit confirmation and support replac
     }
   });
 
-  await page.goto("/");
+  await gotoApp(page);
   await expect(page.getByRole("navigation", { name: "工作区导航" })).toBeVisible();
-  await page.getByRole("button", { name: "Nolia AI" }).click();
+  await openAiSidebar(page);
 
   await page.locator(".ai-composer textarea").fill("请生成提案");
   await page.getByRole("button", { name: "发送" }).click();
@@ -1122,9 +1135,9 @@ test("AI approval proposals can be discarded without surfacing an error", async 
     }
   });
 
-  await page.goto("/");
+  await gotoApp(page);
   await expect(page.getByRole("navigation", { name: "工作区导航" })).toBeVisible();
-  await page.getByRole("button", { name: "Nolia AI" }).click();
+  await openAiSidebar(page);
   await page.locator(".ai-composer textarea").fill("请生成待确认工作区操作");
   await page.getByRole("button", { name: "发送" }).click();
 
@@ -1151,9 +1164,9 @@ test("AI workspace operation proposals require confirmation and create history s
     }
   });
 
-  await page.goto("/");
+  await gotoApp(page);
   await expect(page.getByRole("navigation", { name: "工作区导航" })).toBeVisible();
-  await page.getByRole("button", { name: "Nolia AI" }).click();
+  await openAiSidebar(page);
   await page.locator(".ai-composer textarea").fill("请生成工作区操作提案");
   await page.getByRole("button", { name: "发送" }).click();
 
@@ -1207,6 +1220,98 @@ test("AI workspace operation proposals require confirmation and create history s
     ]));
 });
 
+test("AI can append the previous response to an existing Markdown file with confirmation", async ({ page }) => {
+  await page.setViewportSize({ width: 1320, height: 860 });
+  await installMockNolia(page, {
+    settings: {
+      editorMode: "source",
+      ai: openAiSettings({ allowWorkspaceRead: true, allowWorkspaceOperations: true })
+    },
+    files: {
+      "home.md": "# Home\n\nStart here.",
+      "future-of-ai.md": "# Future of AI\n\nExisting notes."
+    }
+  });
+
+  await gotoApp(page);
+  await expect(page.getByRole("navigation", { name: "工作区导航" })).toBeVisible();
+  await openAiSidebar(page);
+  await page.locator(".ai-composer textarea").fill("长 Markdown 回复");
+  await page.getByRole("button", { name: "发送" }).click();
+  await expect(page.locator(".ai-message.is-assistant")).toContainText("大模型分类笔记");
+
+  await page.locator(".ai-composer textarea").fill("将这个内容合并到 future-of-ai.md 中");
+  await page.getByRole("button", { name: "发送" }).click();
+
+  const proposal = page.locator(".ai-patch-preview");
+  await expect(proposal).toContainText("将上一条 AI 回复合并到 future-of-ai.md");
+  await expect(proposal).toContainText("工作区操作提案");
+  await expect(proposal).toContainText("future-of-ai.md");
+  await expect(proposal).toContainText("追加到末尾");
+  await expect
+    .poll(() => page.evaluate(() => (window as typeof window & { __noliaMock: { aiRuns: unknown[] } }).__noliaMock.aiRuns.length))
+    .toBe(1);
+
+  await proposal.getByRole("button", { name: "确认应用工作区操作" }).click();
+  await expect(page.locator(".ai-patch-preview")).toBeHidden();
+  await expect
+    .poll(() => page.evaluate(() => (window as typeof window & { __noliaMock: { files: Record<string, string> } }).__noliaMock.files["future-of-ai.md"]))
+    .toContain("大模型分类笔记");
+  await expect
+    .poll(() => page.evaluate(() => (window as typeof window & { __noliaMock: { files: Record<string, string> } }).__noliaMock.files["future-of-ai.md"]))
+    .toContain("Existing notes.");
+});
+
+test("AI routes explicit Markdown file merge requests through workspace proposals", async ({ page }) => {
+  await page.setViewportSize({ width: 1320, height: 860 });
+  await installMockNolia(page, {
+    settings: {
+      editorMode: "source",
+      ai: openAiSettings({ allowWorkspaceRead: true, allowWorkspaceOperations: true })
+    },
+    files: {
+      "home.md": "# Home\n\nStart here.",
+      "future-of-ai.md": "# Future of AI\n\nExisting notes."
+    }
+  });
+
+  await gotoApp(page);
+  await expect(page.getByRole("navigation", { name: "工作区导航" })).toBeVisible();
+  await openAiSidebar(page);
+  await page.locator(".ai-composer textarea").fill("把 AI 对普通人的影响补充合并到 `future-of-ai.md` 中");
+  await page.getByRole("button", { name: "发送" }).click();
+
+  const proposal = page.locator(".ai-patch-preview");
+  await expect(proposal).toContainText("Mock future-of-ai append operation");
+  await expect(proposal).toContainText("工作区操作提案");
+  await expect(proposal).toContainText("future-of-ai.md");
+  await expect
+    .poll(() =>
+      page.evaluate(() => {
+        const run = (window as typeof window & {
+          __noliaMock: {
+            aiRuns: Array<{
+              instruction: string;
+              options?: { allowDocumentPatch?: boolean; allowWorkspaceOperations?: boolean; patchFallback?: boolean };
+            }>;
+          };
+        }).__noliaMock.aiRuns.at(-1);
+        return {
+          instruction: run?.instruction ?? "",
+          allowDocumentPatch: run?.options?.allowDocumentPatch ?? false,
+          allowWorkspaceOperations: run?.options?.allowWorkspaceOperations ?? false,
+          patchFallback: run?.options?.patchFallback ?? false
+        };
+      })
+    )
+    .toEqual({
+      instruction: expect.stringContaining("必须调用 proposeWorkspacePatch"),
+      allowDocumentPatch: false,
+      allowWorkspaceOperations: true,
+      patchFallback: false
+    });
+});
+
 test("AI chat multi-step document creation after reopen uses workspace operations instead of previous reply save", async ({ page }) => {
   await page.setViewportSize({ width: 1320, height: 860 });
   await installMockNolia(page, {
@@ -1219,10 +1324,10 @@ test("AI chat multi-step document creation after reopen uses workspace operation
     }
   });
 
-  await page.goto("/");
+  await gotoApp(page);
   await expect(page.getByRole("navigation", { name: "工作区导航" })).toBeVisible();
-  await page.getByRole("button", { name: "Nolia AI" }).click();
-  await page.locator(".ai-composer textarea").fill("帮我完成一个关于AI未来发展的文档，然后创建一个目录，将这份文档保存进去");
+  await openAiSidebar(page);
+  await page.locator(".ai-composer textarea").fill("帮我整理一份关于AI未来的报告，然后生成一个报告目录，将这篇报告保存到目录中");
   await page.getByRole("button", { name: "发送" }).click();
 
   await expect(page.locator(".ai-message.is-error", { hasText: "没有找到可保存的上一条 AI 回复" })).toHaveCount(0);
@@ -1278,9 +1383,9 @@ test("AI workspace proposal supports twenty mixed operations and keeps controls 
     }
   });
 
-  await page.goto("/");
+  await gotoApp(page);
   await expect(page.getByRole("navigation", { name: "工作区导航" })).toBeVisible();
-  await page.getByRole("button", { name: "Nolia AI" }).click();
+  await openAiSidebar(page);
   await page.locator(".ai-composer textarea").fill("请生成复杂 20 个工作区操作提案，包含替换、追加和创建文件。");
   await page.getByRole("button", { name: "发送" }).click();
 
@@ -1395,9 +1500,9 @@ test("AI long table patch proposal keeps content inside the card", async ({ page
     }
   });
 
-  await page.goto("/");
+  await gotoApp(page);
   await expect(page.getByRole("navigation", { name: "工作区导航" })).toBeVisible();
-  await page.getByRole("button", { name: "Nolia AI" }).click();
+  await openAiSidebar(page);
   await page.locator(".ai-composer textarea").fill("请生成长表格提案");
   await page.getByRole("button", { name: "发送" }).click();
 
@@ -1444,9 +1549,9 @@ test("AI replace can be undone and records a history snapshot", async ({ page })
     }
   });
 
-  await page.goto("/");
+  await gotoApp(page);
   await expect(page.getByRole("navigation", { name: "工作区导航" })).toBeVisible();
-  await page.getByRole("button", { name: "Nolia AI" }).click();
+  await openAiSidebar(page);
   await createPatchProposal(page);
   await page.locator(".ai-patch-preview").getByRole("button", { name: "替换全文", exact: true }).click();
   await expect(page.locator(".source-editor .cm-content")).toContainText("AI Patch Applied");
@@ -1475,9 +1580,9 @@ test("history panel can restore the pre-AI version", async ({ page }) => {
     }
   });
 
-  await page.goto("/");
+  await gotoApp(page);
   await expect(page.getByRole("navigation", { name: "工作区导航" })).toBeVisible();
-  await page.getByRole("button", { name: "Nolia AI" }).click();
+  await openAiSidebar(page);
   await createPatchProposal(page);
   await page.locator(".ai-patch-preview").getByRole("button", { name: "替换全文", exact: true }).click();
   await expect(page.locator(".source-editor .cm-content")).toContainText("AI Patch Applied");
@@ -1531,9 +1636,9 @@ test("AI can write the previous assistant response into a new document without r
     }
   });
 
-  await page.goto("/");
+  await gotoApp(page);
   await expect(page.getByRole("navigation", { name: "工作区导航" })).toBeVisible();
-  await page.getByRole("button", { name: "Nolia AI" }).click();
+  await openAiSidebar(page);
 
   await page.locator(".ai-composer textarea").fill("总结一下目录系统");
   await page.getByRole("button", { name: "发送" }).click();
@@ -1586,9 +1691,9 @@ test("AI new document creation failures stay visible on the proposal", async ({ 
     failCreatePaths: ["ai-AI-生成.md"]
   });
 
-  await page.goto("/");
+  await gotoApp(page);
   await expect(page.getByRole("navigation", { name: "工作区导航" })).toBeVisible();
-  await page.getByRole("button", { name: "Nolia AI" }).click();
+  await openAiSidebar(page);
 
   await page.locator(".ai-composer textarea").fill("总结一下目录系统");
   await page.getByRole("button", { name: "发送" }).click();
@@ -1619,9 +1724,9 @@ test("AI keeps the generated document proposal fully visible after long markdown
     }
   });
 
-  await page.goto("/");
+  await gotoApp(page);
   await expect(page.getByRole("navigation", { name: "工作区导航" })).toBeVisible();
-  await page.getByRole("button", { name: "Nolia AI" }).click();
+  await openAiSidebar(page);
 
   await page.locator(".ai-composer textarea").fill("请返回长 Markdown 回复");
   await page.getByRole("button", { name: "发送" }).click();
@@ -1670,9 +1775,9 @@ test("AI runtime errors are shown in the sidebar without breaking the composer",
     }
   });
 
-  await page.goto("/");
+  await gotoApp(page);
   await expect(page.getByRole("navigation", { name: "工作区导航" })).toBeVisible();
-  await page.getByRole("button", { name: "Nolia AI" }).click();
+  await openAiSidebar(page);
   await page.locator(".ai-composer textarea").fill("触发错误");
   await page.getByRole("button", { name: "发送" }).click();
   await expect(page.locator(".ai-message.is-error")).toContainText("Mock AI failure");
@@ -1706,9 +1811,9 @@ test("AI empty responses are shown as visible errors and release the composer", 
     }
   });
 
-  await page.goto("/");
+  await gotoApp(page);
   await expect(page.getByRole("navigation", { name: "工作区导航" })).toBeVisible();
-  await page.getByRole("button", { name: "Nolia AI" }).click();
+  await openAiSidebar(page);
   await page.locator(".ai-composer textarea").fill("模拟空回复");
   await page.getByRole("button", { name: "发送" }).click();
 
@@ -1734,14 +1839,14 @@ test("AI runs without terminal events show a timeout error and release the compo
     }
   });
 
-  await page.goto("/");
+  await gotoApp(page);
   await expect(page.getByRole("navigation", { name: "工作区导航" })).toBeVisible();
-  await page.getByRole("button", { name: "Nolia AI" }).click();
+  await openAiSidebar(page);
   await page.locator(".ai-composer textarea").fill("模拟无终止事件");
   await page.getByRole("button", { name: "发送" }).click();
 
   await expect(page.getByRole("button", { name: "停止" })).toBeVisible();
-  await expect(page.locator(".ai-message.is-error")).toContainText("AI 请求长时间没有返回结果", { timeout: 4_000 });
+  await expect(page.locator(".ai-message.is-error")).toContainText("AI 请求长时间没有新的输出或工具进展", { timeout: 4_000 });
   await expect(page.getByRole("button", { name: "停止" })).toBeHidden();
   await expect(page.getByRole("button", { name: "发送" })).toBeVisible();
 
@@ -1762,9 +1867,9 @@ test("AI runs with continuing progress do not hit the idle watchdog", async ({ p
     }
   });
 
-  await page.goto("/");
+  await gotoApp(page);
   await expect(page.getByRole("navigation", { name: "工作区导航" })).toBeVisible();
-  await page.getByRole("button", { name: "Nolia AI" }).click();
+  await openAiSidebar(page);
   await page.locator(".ai-composer textarea").fill("模拟持续进展无终止事件");
   await page.getByRole("button", { name: "发送" }).click();
 
@@ -1777,7 +1882,7 @@ test("AI runs with continuing progress do not hit the idle watchdog", async ({ p
   await expect(page.getByRole("button", { name: "发送" })).toBeVisible();
 });
 
-test("AI startRun hangs are surfaced instead of leaving the sidebar stuck", async ({ page }) => {
+test("AI startTask hangs are surfaced instead of leaving the sidebar stuck", async ({ page }) => {
   await page.setViewportSize({ width: 1320, height: 860 });
   await installMockNolia(page, {
     settings: {
@@ -1789,9 +1894,9 @@ test("AI startRun hangs are surfaced instead of leaving the sidebar stuck", asyn
     }
   });
 
-  await page.goto("/");
+  await gotoApp(page);
   await expect(page.getByRole("navigation", { name: "工作区导航" })).toBeVisible();
-  await page.getByRole("button", { name: "Nolia AI" }).click();
+  await openAiSidebar(page);
   await page.locator(".ai-composer textarea").fill("模拟启动无响应");
   await page.getByRole("button", { name: "发送" }).click();
 
@@ -1812,9 +1917,9 @@ test("AI patch proposal actions remain reachable in narrow sidebar", async ({ pa
     }
   });
 
-  await page.goto("/");
+  await gotoApp(page);
   await expect(page.getByRole("navigation", { name: "工作区导航" })).toBeVisible();
-  await page.getByRole("button", { name: "Nolia AI" }).click();
+  await openAiSidebar(page);
   await createPatchProposal(page);
 
   const proposal = page.locator(".ai-patch-preview");
@@ -1858,9 +1963,9 @@ test("AI critical controls stay reachable by role and avoid horizontal overflow"
     }
   });
 
-  await page.goto("/");
+  await gotoApp(page);
   await expect(page.getByRole("button", { name: "Nolia AI" })).toBeVisible();
-  await page.getByRole("button", { name: "Nolia AI" }).click();
+  await openAiSidebar(page);
   await expect(page.getByRole("region", { name: "Nolia AI" })).toBeVisible();
   await expect(page.getByRole("button", { name: "AI 设置" })).toBeVisible();
   await expect(page.getByRole("button", { name: "关闭 AI" })).toBeVisible();

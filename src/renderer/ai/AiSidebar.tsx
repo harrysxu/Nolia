@@ -1,10 +1,10 @@
-import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type FormEvent } from "react";
+import { Suspense, lazy, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type FormEvent } from "react";
 import { AlertTriangle, Copy, RefreshCw, Send, Settings, Sparkles, Square, Wrench, X } from "lucide-react";
 
 import type { AiErrorCode, AiPatchOperation, AiPatchProposal, AiProviderProfile, AiSettingsPublic, AiSourceRef } from "../../shared/ai";
-import { renderMarkdownToHtml } from "../../shared/markdown";
 import { useRendererI18n } from "../app/i18n";
-import { MarkdownPreview } from "../components/MarkdownPreview";
+
+const MarkdownPreview = lazy(async () => ({ default: (await import("../components/MarkdownPreview")).MarkdownPreview }));
 
 export interface AiMessageView {
   id: string;
@@ -520,11 +520,13 @@ function AiMarkdownContent({ text, renderDiagrams = true }: { text: string; rend
         cancelled = true;
       };
     }
-    void renderMarkdownToHtml(text).then((nextHtml) => {
-      if (!cancelled) {
-        setHtml(nextHtml);
-      }
-    });
+    void import("../../shared/markdown")
+      .then(({ renderMarkdownToHtml }) => renderMarkdownToHtml(text))
+      .then((nextHtml) => {
+        if (!cancelled) {
+          setHtml(nextHtml);
+        }
+      });
     return () => {
       cancelled = true;
     };
@@ -535,7 +537,9 @@ function AiMarkdownContent({ text, renderDiagrams = true }: { text: string; rend
   }
   return (
     <div className="ai-markdown-content">
-      <MarkdownPreview html={html} renderDiagrams={renderDiagrams} />
+      <Suspense fallback={<pre>{text}</pre>}>
+        <MarkdownPreview html={html} renderDiagrams={renderDiagrams} />
+      </Suspense>
     </div>
   );
 }
@@ -725,4 +729,3 @@ function isCurrentNoteSummaryRequest(value: string): boolean {
   const normalized = value.toLowerCase().replace(/\s+/g, "");
   return /(总结|概括|summary|summarize)/i.test(value) && /(当前|这篇|本文|笔记|note)/i.test(normalized);
 }
-

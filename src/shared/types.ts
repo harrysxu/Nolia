@@ -60,6 +60,7 @@ export interface RecentWorkspace {
   lastOpenedAt: number;
   createdAt: number;
   exists: boolean;
+  availability?: "available" | "missing" | "notWorkspace";
 }
 
 export interface FileTreeNode {

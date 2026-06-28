@@ -38,7 +38,7 @@ Developer ID Application: Your Name (YOURTEAMID)
 验证项目发布环境：
 
 ```sh
-cd /Users/long/workspace/xxl_note
+cd /path/to/nolia
 
 export CSC_NAME="Your Name (YOURTEAMID)"
 export NOTARIZE_KEYCHAIN_PROFILE="your-notary-profile"
@@ -66,7 +66,7 @@ xcrun notarytool store-credentials "your-notary-profile" \
 每次打开新终端后先设置环境变量：
 
 ```sh
-cd /Users/long/workspace/xxl_note
+cd /path/to/nolia
 
 export CSC_NAME="Your Name (YOURTEAMID)"
 export NOTARIZE_KEYCHAIN_PROFILE="your-notary-profile"
@@ -96,20 +96,20 @@ npx electron-builder --mac --universal --publish never
 发布产物命名统一使用 `Nolia-版本-系统-架构.扩展名`：
 
 ```text
-release/Nolia-0.1.0-mac-arm64.dmg
-release/Nolia-0.1.0-mac-arm64.zip
-release/Nolia-0.1.0-mac-x64.dmg
-release/Nolia-0.1.0-mac-x64.zip
-release/Nolia-0.1.0-mac-universal.dmg
-release/Nolia-0.1.0-mac-universal.zip
+release/Nolia-1.0.0-mac-arm64.dmg
+release/Nolia-1.0.0-mac-arm64.zip
+release/Nolia-1.0.0-mac-x64.dmg
+release/Nolia-1.0.0-mac-x64.zip
+release/Nolia-1.0.0-mac-universal.dmg
+release/Nolia-1.0.0-mac-universal.zip
 ```
 
-当前已验证的 0.1.0 正式包示例，实际体积以本次构建为准：
+每次发布记录本次实际产物名称、体积、SHA256 和 notarization 结果，不在长期文档中保留历史包清单。
 
 ```text
-arm64:     Nolia-0.1.0-mac-arm64.dmg, Nolia-0.1.0-mac-arm64.zip
-x64:       Nolia-0.1.0-mac-x64.dmg, Nolia-0.1.0-mac-x64.zip
-universal: Nolia-0.1.0-mac-universal.dmg, Nolia-0.1.0-mac-universal.zip
+arm64:     Nolia-1.0.0-mac-arm64.dmg, Nolia-1.0.0-mac-arm64.zip
+x64:       Nolia-1.0.0-mac-x64.dmg, Nolia-1.0.0-mac-x64.zip
+universal: Nolia-1.0.0-mac-universal.dmg, Nolia-1.0.0-mac-universal.zip
 ```
 
 本地验证包使用 `npm run package:unsigned`，不要把 unsigned 包作为正式发布包。
@@ -144,13 +144,13 @@ xcrun stapler validate release/mac-arm64/Nolia.app
 xcrun stapler validate release/mac/Nolia.app
 xcrun stapler validate release/mac-universal/Nolia.app
 
-hdiutil verify release/Nolia-0.1.0-mac-arm64.dmg
-hdiutil verify release/Nolia-0.1.0-mac-x64.dmg
-hdiutil verify release/Nolia-0.1.0-mac-universal.dmg
+hdiutil verify release/Nolia-1.0.0-mac-arm64.dmg
+hdiutil verify release/Nolia-1.0.0-mac-x64.dmg
+hdiutil verify release/Nolia-1.0.0-mac-universal.dmg
 
-unzip -tq release/Nolia-0.1.0-mac-arm64.zip
-unzip -tq release/Nolia-0.1.0-mac-x64.zip
-unzip -tq release/Nolia-0.1.0-mac-universal.zip
+unzip -tq release/Nolia-1.0.0-mac-arm64.zip
+unzip -tq release/Nolia-1.0.0-mac-x64.zip
+unzip -tq release/Nolia-1.0.0-mac-universal.zip
 ```
 
 验证结果必须包含 `source=Notarized Developer ID`。架构检查命令：
