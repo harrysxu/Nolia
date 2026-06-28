@@ -1,11 +1,13 @@
 import { describe, expect, it } from "vitest";
 
 import { BUILT_IN_EXTENSION_MANIFESTS } from "../src/shared/builtinExtensions";
+import { DEFAULT_SETTINGS } from "../src/shared/constants";
 import type { AppSettings } from "../src/shared/types";
 import type { ExtensionManifest } from "../src/shared/extensions";
 import { createExtensionRegistry, filterMenuContributions, selectFileEditor, selectFileViewer } from "../src/renderer/extensions/registry";
 
 const settings: AppSettings = {
+  ...DEFAULT_SETTINGS,
   language: "zh-CN",
   theme: "light",
   editorMode: "source",

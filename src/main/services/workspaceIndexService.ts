@@ -21,7 +21,7 @@ export class WorkspaceIndexService {
   async rebuildWorkspace(rootPath: string, db: WorkspaceDb, onProgress?: ProgressListener, options: RebuildOptions = {}): Promise<void> {
     const filePaths = await collectFiles(rootPath, options.signal);
     throwIfAborted(options.signal);
-    db.markAllFilesDeleted();
+    const currentPathRels = new Set(filePaths.map((absolutePath) => toWorkspaceRelative(rootPath, absolutePath)));
 
     for (const [index, absolutePath] of filePaths.entries()) {
       throwIfAborted(options.signal);
@@ -29,6 +29,7 @@ export class WorkspaceIndexService {
       onProgress?.({ indexed: index + 1, total: filePaths.length });
     }
 
+    db.markMissingFilesDeleted(currentPathRels);
     await db.save();
   }
 
@@ -66,16 +67,24 @@ export class WorkspaceIndexService {
     };
 
     if (kind !== "markdown") {
+      if (!db.shouldIndexFile(baseEntry)) {
+        return;
+      }
       db.upsertFile(baseEntry);
       return;
     }
 
     const content = await readFile(absolutePath, "utf8");
+    const sha256 = sha256Text(content);
+    const entry = {
+      ...baseEntry,
+      sha256
+    };
+    if (!db.shouldIndexFile(entry)) {
+      return;
+    }
     db.upsertDocument(
-      {
-        ...baseEntry,
-        sha256: sha256Text(content)
-      },
+      entry,
       parseMarkdown(content, pathRel)
     );
   }

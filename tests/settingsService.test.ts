@@ -73,6 +73,130 @@ describe("settings and plugin services", () => {
     }
   });
 
+  it("marks recent plain folders as unavailable workspaces", async () => {
+    const root = await makeTempDir();
+    const validWorkspace = await makeTempDir();
+    const plainFolder = await makeTempDir();
+    const missingWorkspace = path.join(root, "missing-workspace");
+    try {
+      await mkdir(path.join(validWorkspace, ".nolia"), { recursive: true });
+      await writeFile(path.join(validWorkspace, ".nolia", "workspace.json"), "{}", "utf8");
+      await writeFile(
+        path.join(root, "global-state.json"),
+        JSON.stringify({
+          settings: {},
+          recentWorkspaces: [
+            { workspaceId: "valid", name: "Valid", path: validWorkspace, createdAt: 1, lastOpenedAt: 3, exists: true },
+            { workspaceId: "plain", name: "Plain", path: plainFolder, createdAt: 1, lastOpenedAt: 2, exists: true },
+            { workspaceId: "missing", name: "Missing", path: missingWorkspace, createdAt: 1, lastOpenedAt: 1, exists: true }
+          ]
+        }),
+        "utf8"
+      );
+
+      const service = new SettingsService(root);
+      await service.init();
+
+      const recent = await service.listRecentWorkspaces();
+      expect(recent.find((workspace) => workspace.workspaceId === "valid")).toMatchObject({ exists: true, availability: "available" });
+      expect(recent.find((workspace) => workspace.workspaceId === "plain")).toMatchObject({ exists: false, availability: "notWorkspace" });
+      expect(recent.find((workspace) => workspace.workspaceId === "missing")).toMatchObject({ exists: false, availability: "missing" });
+    } finally {
+      await rm(root, { recursive: true, force: true });
+      await rm(validWorkspace, { recursive: true, force: true });
+      await rm(plainFolder, { recursive: true, force: true });
+    }
+  });
+
+  it("normalizes AI settings when persisting them", async () => {
+    const root = await makeTempDir();
+    try {
+      const service = new SettingsService(root);
+      await service.init();
+
+      await service.setSetting("ai", {
+        enabled: true,
+        providerId: "openai-compatible",
+        apiMode: "chat-completions",
+        model: "gpt-4.1",
+        baseUrl: "https://api.example.com",
+        allowCurrentNoteContent: true,
+        allowWorkspaceSearch: true
+      });
+
+      const reloaded = new SettingsService(root);
+      await reloaded.init();
+
+      expect(reloaded.getSettings().ai).toEqual({
+        enabled: true,
+        defaultProviderId: "openai-compatible",
+        providers: [
+          {
+            id: "openai-compatible",
+            name: "OpenAI-compatible",
+            providerId: "openai-compatible",
+            model: "gpt-4.1",
+            baseUrl: "https://api.example.com",
+            apiMode: "chat-completions",
+            disabled: false
+          }
+        ],
+        embedding: {
+          enabled: false,
+          providerId: "ollama",
+          model: "",
+          baseUrl: "http://localhost:11434",
+          apiMode: "ollama-native"
+        },
+        conversationHistoryTurns: 3,
+        agentMaxSteps: 12,
+        allowCurrentNoteContent: true,
+        allowWorkspaceSearch: true,
+        allowReadSearchResults: false,
+        allowWorkspaceRead: false,
+        allowWorkspaceOperations: false
+      });
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("disables reading search result notes when note search is disabled", async () => {
+    const root = await makeTempDir();
+    try {
+      const service = new SettingsService(root);
+      await service.init();
+
+      await service.setSetting("ai", {
+        allowWorkspaceSearch: false,
+        allowReadSearchResults: true
+      });
+
+      expect(service.getSettings().ai.allowWorkspaceSearch).toBe(false);
+      expect(service.getSettings().ai.allowReadSearchResults).toBe(false);
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("disables workspace operation proposals when whole-workspace read is disabled", async () => {
+    const root = await makeTempDir();
+    try {
+      const service = new SettingsService(root);
+      await service.init();
+
+      await service.setSetting("ai", {
+        allowWorkspaceRead: false,
+        allowWorkspaceOperations: true
+      });
+
+      expect(service.getSettings().ai.allowWorkspaceRead).toBe(false);
+      expect(service.getSettings().ai.allowWorkspaceOperations).toBe(false);
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
   it("persists plugin enablement and permission acceptance", async () => {
     const root = await makeTempDir();
     try {

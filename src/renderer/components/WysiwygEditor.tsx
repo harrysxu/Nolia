@@ -52,6 +52,7 @@ import { MarkdownInline } from "./MarkdownInline";
 import { MarkdownPreviewBlock } from "./MarkdownPreviewBlock";
 import { EditableImage } from "./EditableImage";
 import { getCodeBlockLanguageSelectOptions } from "./codeBlockLanguageSelect";
+import { exactMatchIndex, findPlainTextMatches, nextMatchIndex, type FindReplaceOptions, type FindReplaceResult, type TextMatch } from "./findReplace";
 import { isModifiedOpenClick } from "./markdownNodeInteraction";
 import type { MarkdownOpenTarget } from "./markdownOpenTarget";
 
@@ -128,6 +129,11 @@ export interface WysiwygEditorHandle {
   undoEdit: () => boolean;
   redoEdit: () => boolean;
   scrollToHeading: (headingIndex: number) => boolean;
+  replaceMarkdownDocument: (content: string) => Promise<boolean>;
+  findText: (query: string, options?: FindReplaceOptions) => FindReplaceResult;
+  replaceCurrent: (query: string, replacement: string, options?: FindReplaceOptions) => FindReplaceResult;
+  replaceAll: (query: string, replacement: string, options?: FindReplaceOptions) => FindReplaceResult;
+  getAiSnapshot: () => { selectionText: string; canReplaceSelection: false } | undefined;
 }
 
 type TableDialogState = {
@@ -847,8 +853,72 @@ export const WysiwygEditor = forwardRef<WysiwygEditorHandle, WysiwygEditorProps>
       markUserEditIntent();
       return editor.chain().focus().redo().run();
     },
-    scrollToHeading: (headingIndex: number) => scrollToEditorHeading(editor, headingIndex)
-  }), [editor]);
+    scrollToHeading: (headingIndex: number) => scrollToEditorHeading(editor, headingIndex),
+    replaceMarkdownDocument: async (content: string) => {
+      if (!editor) {
+        return false;
+      }
+      const renderedHtml = await renderMarkdownToHtml(content);
+      const editableHtml = normalizeRenderedHtmlForWysiwyg(renderedHtml, { workspaceId, documentPathRel });
+      markUserEditIntent();
+      const applied = editor.chain().focus().setMeta("noliaUserEdit", true).setContent(editableHtml, { emitUpdate: true, errorOnInvalidContent: false }).run();
+      if (applied) {
+        const nextHtml = editor.getHTML();
+        lastEmittedHtml.current = nextHtml;
+        onChange(nextHtml);
+      }
+      return applied;
+    },
+    findText: (query: string, options: FindReplaceOptions = {}) => {
+      if (!editor || !query) {
+        return { total: 0, currentIndex: -1 };
+      }
+      return selectWysiwygMatch(editor, query, options);
+    },
+    replaceCurrent: (query: string, replacement: string, options: FindReplaceOptions = {}) => {
+      if (!editor || !query) {
+        return { total: 0, currentIndex: -1, replaced: 0 };
+      }
+      const matches = collectWysiwygTextMatches(editor, query, options);
+      if (!matches.length) {
+        return { total: 0, currentIndex: -1, replaced: 0 };
+      }
+      const selection = editor.state.selection;
+      let index = exactMatchIndex(matches, selection.from, selection.to);
+      if (index < 0) {
+        index = nextMatchIndex(matches, options.backwards ? selection.from : selection.to, Boolean(options.backwards));
+      }
+      const match = matches[index];
+      const transaction = editor.state.tr.insertText(replacement, match.from, match.to);
+      transaction.setMeta("noliaUserEdit", true);
+      editor.view.dispatch(transaction.scrollIntoView());
+      editor.view.focus();
+      return { total: matches.length, currentIndex: index, replaced: 1 };
+    },
+    replaceAll: (query: string, replacement: string, options: FindReplaceOptions = {}) => {
+      if (!editor || !query) {
+        return { total: 0, currentIndex: -1, replaced: 0 };
+      }
+      const matches = collectWysiwygTextMatches(editor, query, options);
+      if (!matches.length) {
+        return { total: 0, currentIndex: -1, replaced: 0 };
+      }
+      const transaction = matches
+        .slice()
+        .sort((a, b) => b.from - a.from || b.to - a.to)
+        .reduce((tr, match) => tr.insertText(replacement, match.from, match.to), editor.state.tr);
+      transaction.setMeta("noliaUserEdit", true);
+      editor.view.dispatch(transaction.scrollIntoView());
+      editor.view.focus();
+      return { total: matches.length, currentIndex: -1, replaced: matches.length };
+    },
+    getAiSnapshot: () => {
+      if (!editor) {
+        return undefined;
+      }
+      return { selectionText: selectedText(editor.state), canReplaceSelection: false };
+    }
+  }), [documentPathRel, editor, onChange, workspaceId]);
 
   useEffect(() => {
     if (!editor) {
@@ -1341,6 +1411,36 @@ function scrollToEditorHeading(editor: Editor | null, headingIndex: number): boo
   editor.view.dispatch(editor.state.tr.setSelection(TextSelection.create(editor.state.doc, targetPosition + 1)).scrollIntoView());
   editor.view.focus();
   return true;
+}
+
+function collectWysiwygTextMatches(editor: Editor, query: string, options: FindReplaceOptions = {}): TextMatch[] {
+  if (!query) {
+    return [];
+  }
+  const matches: TextMatch[] = [];
+  editor.state.doc.descendants((node, position) => {
+    if (!node.isText || !node.text) {
+      return;
+    }
+    const localMatches = findPlainTextMatches(node.text, query, options);
+    for (const match of localMatches) {
+      matches.push({ from: position + match.from, to: position + match.to });
+    }
+  });
+  return matches;
+}
+
+function selectWysiwygMatch(editor: Editor, query: string, options: FindReplaceOptions = {}): FindReplaceResult {
+  const matches = collectWysiwygTextMatches(editor, query, options);
+  if (!matches.length) {
+    return { total: 0, currentIndex: -1 };
+  }
+  const selection = editor.state.selection;
+  const currentIndex = nextMatchIndex(matches, options.backwards ? selection.from : selection.to, Boolean(options.backwards));
+  const match = matches[currentIndex];
+  editor.view.dispatch(editor.state.tr.setSelection(TextSelection.create(editor.state.doc, match.from, match.to)).scrollIntoView());
+  editor.view.focus();
+  return { total: matches.length, currentIndex };
 }
 
 function containsRelatedTarget(event: React.FocusEvent<HTMLElement>): boolean {

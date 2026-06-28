@@ -66,10 +66,11 @@ test("workspace, settings, search, and resource editor layouts stay readable acr
   await page.getByRole("button", { name: /assets/ }).first().click();
   await page.getByRole("button", { name: "config.json", exact: true }).click();
   await page.getByRole("button", { name: "搜索/替换" }).click();
-  await expect(page.locator(".text-resource-codemirror .cm-search")).toBeVisible();
+  await expect(page.locator(".editor-find-replace")).toBeVisible();
+  await expect(page.locator(".text-resource-codemirror .cm-search")).toHaveCount(0);
   await expectReadable(page, ".resource-editor-toolbar");
   await assertToolbarButtonsVisible(page, "JSON 工具");
-  await expectReadable(page, ".text-resource-codemirror .cm-search");
+  await expectReadable(page, ".editor-find-replace");
   await page.screenshot({ path: "test-results/ui-visual-dark-json-editor.png", fullPage: false });
 
   await page.getByRole("navigation", { name: "工作区导航" }).getByRole("button", { name: "设置" }).click();
@@ -85,7 +86,7 @@ test("workspace, settings, search, and resource editor layouts stay readable acr
 
 async function assertWorkspaceLayout(page: Page) {
   const problems = await page.evaluate(() => {
-    const selectors = [".titlebar", ".app-nav", ".sidebar", ".editor-zone", ".right-panel", ".statusbar"];
+    const selectors = [".app-nav", ".sidebar", ".editor-zone", ".right-panel", ".statusbar"];
     const rects = selectors.flatMap((selector) => {
       const element = document.querySelector(selector);
       if (!(element instanceof HTMLElement)) {
@@ -120,7 +121,17 @@ async function assertWorkspaceLayout(page: Page) {
         }
       }
     }
-    return [...viewportProblems, ...overlapProblems, document.body.scrollWidth > document.body.clientWidth + 1 ? "body has horizontal overflow" : ""].filter(Boolean);
+    const chromeProblems: string[] = [];
+    if (document.querySelector(".titlebar")) {
+      chromeProblems.push("app shell should not render a duplicate titlebar");
+    }
+    for (const selector of [".app-nav", ".app-nav-main"]) {
+      const element = document.querySelector(selector);
+      if (element instanceof HTMLElement && element.scrollWidth > element.clientWidth + 1) {
+        chromeProblems.push(`${selector} has horizontal overflow`);
+      }
+    }
+    return [...viewportProblems, ...overlapProblems, ...chromeProblems, document.body.scrollWidth > document.body.clientWidth + 1 ? "body has horizontal overflow" : ""].filter(Boolean);
   });
   expect(problems).toEqual([]);
 }
@@ -204,7 +215,7 @@ async function assertFloatingEditorsStayBelowModal(page: Page) {
       return ["settings dialog missing"];
     }
     const modalRect = modal.getBoundingClientRect();
-    return [...document.querySelectorAll(".cm-search")].flatMap((searchPanel) => {
+    return [...document.querySelectorAll(".editor-find-replace")].flatMap((searchPanel) => {
       if (!(searchPanel instanceof HTMLElement)) {
         return [];
       }

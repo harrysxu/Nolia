@@ -144,6 +144,7 @@ export class WorkspaceService {
     this.active.indexAbortController?.abort();
     await this.active.watcher.stop();
     await this.active.indexTask;
+    await this.active.db.flush();
     this.active.db.close();
     this.active = undefined;
   }
@@ -269,7 +270,7 @@ async function readOrCreateWorkspaceConfig(rootPath: string): Promise<WorkspaceC
   const configPath = path.join(rootPath, WORKSPACE_META_DIR, WORKSPACE_CONFIG_FILE);
   const now = Date.now();
   try {
-    const existing = JSON.parse(await readFile(configPath, "utf8")) as WorkspaceConfig;
+    const existing = parseWorkspaceConfig(await readFile(configPath, "utf8"));
     const updated = {
       ...existing,
       name: existing.name || path.basename(rootPath),
@@ -293,7 +294,7 @@ async function readOrCreateWorkspaceConfig(rootPath: string): Promise<WorkspaceC
 async function readWorkspaceConfig(rootPath: string): Promise<WorkspaceConfig> {
   const configPath = path.join(rootPath, WORKSPACE_META_DIR, WORKSPACE_CONFIG_FILE);
   const now = Date.now();
-  const existing = JSON.parse(await readFile(configPath, "utf8")) as WorkspaceConfig;
+  const existing = parseWorkspaceConfig(await readFile(configPath, "utf8"));
   const updated = {
     ...existing,
     name: existing.name || path.basename(rootPath),
@@ -305,6 +306,10 @@ async function readWorkspaceConfig(rootPath: string): Promise<WorkspaceConfig> {
 
 async function isInitializedWorkspace(rootPath: string): Promise<boolean> {
   return pathExists(path.join(rootPath, WORKSPACE_META_DIR, WORKSPACE_CONFIG_FILE));
+}
+
+function parseWorkspaceConfig(raw: string): WorkspaceConfig {
+  return JSON.parse(raw.replace(/^\uFEFF/, "")) as WorkspaceConfig;
 }
 
 async function readPermissions(rootPath: string): Promise<{ readable: boolean; writable: boolean }> {

@@ -28,6 +28,10 @@ Use `npm run e2e` for workflows that touch editor behavior, IPC, file operations
 - Update docs when behavior, commands, packaging, or plugin APIs change.
 - Do not commit `dist/`, `release/`, `node_modules/`, credentials, workspace data, or local private notes.
 
+## Conduct
+
+All project participation is covered by [CODE_OF_CONDUCT.md](CODE_OF_CONDUCT.md).
+
 ## Code Style
 
 Follow the existing TypeScript style: two-space indentation, semicolons, double quotes, `PascalCase` React components, and `camelCase` functions and variables.

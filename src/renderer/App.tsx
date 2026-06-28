@@ -1,7 +1,10 @@
 /* eslint-disable react-hooks/exhaustive-deps -- The shell coordinates IPC subscriptions and ref-backed debounced document state. */
 import {
+  Component,
+  Suspense,
   useEffect,
   forwardRef,
+  lazy,
   useLayoutEffect,
   useImperativeHandle,
   useMemo,
@@ -13,7 +16,8 @@ import {
   type MouseEvent as ReactMouseEvent,
   type PointerEvent as ReactPointerEvent,
   type ReactNode,
-  type RefObject
+  type RefObject,
+  type ErrorInfo
 } from "react";
 import type { ReactCodeMirrorRef } from "@uiw/react-codemirror";
 import { redo as redoCodeMirror, redoDepth as redoDepthCodeMirror, undo as undoCodeMirror, undoDepth as undoDepthCodeMirror } from "@codemirror/commands";
@@ -25,6 +29,7 @@ import {
   Code,
   ClipboardPaste,
   Copy,
+  Dot,
   ExternalLink,
   FileArchive,
   FileAudio,
@@ -63,6 +68,7 @@ import {
   RefreshCw,
   Search,
   Settings2,
+  Sparkles,
   SquareCheckBig,
   Sigma,
   Star,
@@ -80,13 +86,15 @@ import { DEFAULT_SETTINGS } from "../shared/constants";
 import { getBuiltInExtensionManifests } from "../shared/builtinExtensions";
 import { createTranslator, formatFileSize as formatLocalizedFileSize, resolveLocale, type Translator } from "../shared/i18n";
 import { hasExtensionPermission, type ExtensionContributions, type ExtensionManifest, type ExtensionPermission, type FileEditorContribution, type PluginDescriptor, type SettingContribution, type SidebarPanelContribution } from "../shared/extensions";
-import type { AppSettings, BacklinksResponse, EditorMode, FileBinaryReadResponse, FileReadResponse, FileTreeNode, FileWriteResponse, RecentWorkspace, ResolvedLocale, SearchResultItem, WorkspaceInfo } from "../shared/types";
+import { normalizeAiSettings, normalizeAiSettingsPublic, type AiEmbeddingSettings, type AiPatchOperation, type AiPatchProposal, type AiProviderProfile, type AiProviderTestResult, type AiRunEvent, type AiSelectionActionId, type AiSemanticIndexStatus, type AiSettings, type AiSettingsPublic, type AiSourceRef } from "../shared/ai";
+import type { AppSettings, BacklinksResponse, EditorMode, FileBinaryReadResponse, FileHistoryEntry, FileReadResponse, FileTreeNode, FileWriteResponse, RecentWorkspace, ResolvedLocale, SearchResultItem, WorkspaceInfo } from "../shared/types";
+import type { AiMessageView } from "./ai/AiSidebar";
 import { CommandPalette, type PaletteAction } from "./components/CommandPalette";
-import { MarkdownPreview } from "./components/MarkdownPreview";
-import { SourceEditor } from "./components/SourceEditor";
-import { TextResourceEditor, type TextResourceEditorHandle } from "./components/TextResourceEditor";
-import { WelcomeScreen } from "./components/WelcomeScreen";
-import { WysiwygEditor, type WysiwygEditorHandle } from "./components/WysiwygEditor";
+import type { SourceEditorHandle } from "./components/SourceEditor";
+import type { TextResourceEditorHandle } from "./components/TextResourceEditor";
+import { WelcomeScreen, recentWorkspaceUnavailableReason } from "./components/WelcomeScreen";
+import type { WysiwygEditorHandle } from "./components/WysiwygEditor";
+import type { FindReplaceOptions, FindReplaceResult } from "./components/findReplace";
 import type { MarkdownOpenTarget } from "./components/markdownOpenTarget";
 import noliaIconUrl from "../../build/icon.svg";
 import { RendererI18nProvider, useRendererI18n } from "./app/i18n";
@@ -122,7 +130,6 @@ import {
   findFileTreeNode,
   firstOpenableFileTreeNode,
   joinPath,
-  parentPathFor,
   pathParent,
   sanitizeItemName,
   uniqueCopiedFilePath,
@@ -139,6 +146,13 @@ import {
 } from "./extensions/runtime";
 import { createExtensionRegistry, filterMenuContributions, isExtensionEnabled, isExtensionPermissionAccepted, selectFileEditor, selectFileViewer } from "./extensions/registry";
 
+const AiSettingsPanel = lazy(async () => ({ default: (await import("./ai/AiSettingsPanel")).AiSettingsPanel }));
+const AiSidebar = lazy(async () => ({ default: (await import("./ai/AiSidebar")).AiSidebar }));
+const MarkdownPreview = lazy(async () => ({ default: (await import("./components/MarkdownPreview")).MarkdownPreview }));
+const SourceEditor = lazy(async () => ({ default: (await import("./components/SourceEditor")).SourceEditor }));
+const TextResourceEditor = lazy(async () => ({ default: (await import("./components/TextResourceEditor")).TextResourceEditor }));
+const WysiwygEditor = lazy(async () => ({ default: (await import("./components/WysiwygEditor")).WysiwygEditor }));
+
 const emptyBacklinks: BacklinksResponse = { linked: [], unlinked: [] };
 const FLOATING_MENU_MARGIN = 8;
 type ResolvedThemeId = "light" | "dark" | "paper" | "technical";
@@ -151,6 +165,22 @@ type AppRuntimeInfo = {
   pluginDirectory: string;
   logsDirectory: string;
 };
+type AiRunUiOptions = {
+  displayText?: string;
+  requireCurrentNote?: boolean;
+  patchFallback?: boolean;
+  allowDocumentPatch?: boolean;
+  allowWorkspaceOperations?: boolean;
+  patchApplyMode?: "current-document" | "new-document";
+};
+type AiRunUiState = {
+  textReceived: boolean;
+  patchReceived: boolean;
+  eventReceived: boolean;
+  watchdogTimer?: number;
+  maxWatchdogTimer?: number;
+};
+type AiRunTerminalReason = "done" | "cancelled" | "error" | "watchdog";
 const LEFT_PANEL_WIDTH_STORAGE_KEY = "nolia.leftPanelWidth.v2";
 const RIGHT_PANEL_WIDTH_STORAGE_KEY = "nolia.rightPanelWidth.v1";
 const TOOLBAR_VISIBLE_STORAGE_KEY = "nolia.toolbarVisible.v1";
@@ -167,10 +197,33 @@ const MAX_SPLIT_LEFT_PERCENT = 75;
 const EXTERNAL_PARSE_WORKSPACE_ID = "external";
 const SPLIT_PREVIEW_RENDER_DELAY_MS = 180;
 const USER_STATUS_PROTECT_MS = 1800;
+const AI_RUN_UI_WATCHDOG_MS = Number(import.meta.env.VITE_NOLIA_AI_IDLE_WATCHDOG_MS ?? import.meta.env.VITE_NOLIA_AI_WATCHDOG_MS ?? 120_000);
+const AI_RUN_UI_MAX_WATCHDOG_MS = Number(import.meta.env.VITE_NOLIA_AI_MAX_WATCHDOG_MS ?? 10 * 60_000);
+const AI_RUN_START_WATCHDOG_MS = Math.min(10_000, AI_RUN_UI_WATCHDOG_MS);
+const AI_TERMINAL_EVENT_TTL_MS = 5 * 60_000;
+
+function isAiRunProgressEvent(event: AiRunEvent): boolean {
+  return event.type !== "done" && event.type !== "cancelled" && event.type !== "error";
+}
+
+function isAiRunStateEvent(event: AiRunEvent): boolean {
+  return event.type === "task-updated" || event.type === "task-restored" || event.type === "run-started" || event.type === "text-delta" || event.type === "tool-call" || event.type === "tool-result" || event.type === "source-used" || event.type === "patch-proposal" || event.type === "approval-required" || event.type === "done" || event.type === "cancelled" || event.type === "error";
+}
 
 type MarkdownWorkspaceTarget = {
   pathRel: string;
   fragment?: string;
+};
+
+type WorkspaceDataLoadOptions = {
+  openInitialDocument?: boolean;
+  token?: number;
+};
+
+type WorkspaceLoadingOverlayProps = {
+  loading: boolean;
+  error?: string;
+  onRetry: () => void;
 };
 
 export function App() {
@@ -181,6 +234,8 @@ export function App() {
   const [recentWorkspaces, setRecentWorkspaces] = useState<RecentWorkspace[]>([]);
   const [welcomeOpeningWorkspaceId, setWelcomeOpeningWorkspaceId] = useState<string | undefined>();
   const [welcomeErrorMessage, setWelcomeErrorMessage] = useState<string | undefined>();
+  const [workspaceLoading, setWorkspaceLoading] = useState(false);
+  const [workspaceLoadError, setWorkspaceLoadError] = useState<string | undefined>();
   const [fileTree, setFileTree] = useState<FileTreeNode[]>([]);
   const [searchResults, setSearchResults] = useState<SearchResultItem[]>([]);
   const [favoriteDocs, setFavoriteDocs] = useState<FavoriteDocument[]>([]);
@@ -226,8 +281,32 @@ export function App() {
   const [pluginFileViewers, setPluginFileViewers] = useState<Map<string, RegisteredPluginRenderer<PluginFileViewerContext>>>(new Map());
   const [pluginFileEditors, setPluginFileEditors] = useState<Map<string, RegisteredPluginRenderer<PluginFileEditorContext>>>(new Map());
   const [settingsOpen, setSettingsOpen] = useState(false);
+  const [settingsInitialTab, setSettingsInitialTab] = useState<SettingsTabId>("preferences");
   const [selectedCharCount, setSelectedCharCount] = useState(0);
   const [modifiedOpenCursorActive, setModifiedOpenCursorActive] = useState(false);
+  const [historyEntries, setHistoryEntries] = useState<FileHistoryEntry[]>([]);
+  const [historyLoading, setHistoryLoading] = useState(false);
+  const [historyPreview, setHistoryPreview] = useState<{ entry: FileHistoryEntry; content: string } | undefined>();
+  const [aiSettings, setAiSettings] = useState<AiSettingsPublic | undefined>();
+  const [aiSemanticStatus, setAiSemanticStatus] = useState<AiSemanticIndexStatus | undefined>();
+  const [aiSidebarOpen, setAiSidebarOpen] = useState(false);
+  const [aiSidebarEverOpened, setAiSidebarEverOpened] = useState(false);
+  const [aiMessages, setAiMessages] = useState<AiMessageView[]>([]);
+  const [aiSources, setAiSources] = useState<AiSourceRef[]>([]);
+  const [aiPatchProposal, setAiPatchProposal] = useState<AiPatchProposal | undefined>();
+  const [aiPatchApplyMode, setAiPatchApplyMode] = useState<"current-document" | "new-document">("current-document");
+  const [aiActiveRunId, setAiActiveRunId] = useState<string | undefined>();
+  const [aiRunning, setAiRunning] = useState(false);
+  const [aiCanRetry, setAiCanRetry] = useState(false);
+  const aiLastInstructionRef = useRef<string>("");
+  const aiLastDisplayTextRef = useRef<string>("");
+  const aiLastActionRef = useRef<AiSelectionActionId | undefined>(undefined);
+  const aiLastRunOptionsRef = useRef<AiRunUiOptions | undefined>(undefined);
+  const aiActiveRunIdRef = useRef<string | undefined>(undefined);
+  const aiTerminalRunIdsRef = useRef<Map<string, AiRunTerminalReason>>(new Map());
+  const aiRunStatesRef = useRef<Map<string, AiRunUiState>>(new Map());
+  const aiStartWatchdogRef = useRef<number | undefined>(undefined);
+  const aiStartSequenceRef = useRef(0);
   const openDocsRef = useRef(openDocs);
   const activeResourceRef = useRef(activeResource);
   const suspendedShellRef = useRef<SuspendedShellState | undefined>(undefined);
@@ -235,12 +314,15 @@ export function App() {
   const rightPanelWidthRef = useRef(rightPanelWidth);
   const viewPreferencesLoadedRef = useRef(false);
   const autosaveTimers = useRef<Map<string, number>>(new Map());
+  const autosaveVersionsRef = useRef<Map<string, number>>(new Map());
   const renderToken = useRef(0);
   const sourceParseTokensRef = useRef<Map<string, number>>(new Map());
   const htmlDraftsRef = useRef<Map<string, string>>(new Map());
   const pluginCommandHandlersRef = useRef<Map<string, () => void | Promise<void>>>(new Map());
   const pluginEditorSaveHandlersRef = useRef<Map<string, () => Promise<void>>>(new Map());
   const runCommandRef = useRef<(command: string) => void | Promise<void>>(() => undefined);
+  const workspaceLoadTokenRef = useRef(0);
+  const workspaceIdRef = useRef<string | undefined>(undefined);
   const theme = useUiStore((state) => state.theme);
   const setTheme = useUiStore((state) => state.setTheme);
   const sidebarView = useUiStore((state) => state.sidebarView);
@@ -262,10 +344,9 @@ export function App() {
   const visibleDocument = activeResource ? undefined : currentDocument();
   const visibleResource = activeResource;
   const visibleDocumentFavorite = visibleDocument ? favoriteDocs.some((item) => item.pathRel === visibleDocument.pathRel) : false;
-  const isExternalDocument = visibleDocument?.sourceKind === "external";
   const showWelcome = !workspace && !visibleDocument;
   const showWorkspacePanels = Boolean(workspace) && !immersiveMode;
-  const effectiveSettings = appSettings ?? (DEFAULT_SETTINGS as AppSettings);
+  const effectiveSettings = appSettings ?? defaultAppSettings();
   const languageRestartRequired = appSettings ? resolveLocale(appSettings.language, navigator.language) !== startupLocale : false;
   const builtInExtensionManifests = useMemo(() => getBuiltInExtensionManifests(startupLocale), [startupLocale]);
   const pluginManifests = useMemo(() => pluginDescriptors.map((descriptor) => descriptor.manifest).filter(isExtensionManifest), [pluginDescriptors]);
@@ -284,6 +365,10 @@ export function App() {
   useEffect(() => {
     activeResourceRef.current = activeResource;
   }, [activeResource]);
+
+  useEffect(() => {
+    workspaceIdRef.current = workspace?.workspaceId;
+  }, [workspace?.workspaceId]);
 
   useEffect(() => {
     setStatusMessage((message) => (message === "就绪" || message === "Ready" ? tr("就绪") : message));
@@ -468,18 +553,13 @@ export function App() {
   }, [theme]);
 
   useEffect(() => {
-    if (!workspace) {
-      return;
-    }
-    void loadWorkspaceData(workspace);
-  }, [workspace?.workspaceId]);
-
-  useEffect(() => {
     const indexedUnsub = window.nolia?.events?.onWorkspaceIndexed?.((event) => {
       if (!workspace || event.workspaceId !== workspace.workspaceId) {
         return;
       }
       void loadWorkspaceData(workspace);
+      void refreshOpenWorkspaceDocuments(workspace, event.pathRel, "external");
+      void refreshAiSemanticStatus();
       if (Date.now() > userStatusProtectedUntilRef.current) {
         setStatusMessage(event.pathRel ? tr("已更新文件树：{path}", { path: event.pathRel }) : tr("工作区索引已完成"));
       }
@@ -495,6 +575,41 @@ export function App() {
     });
     return () => {
       commandUnsub();
+    };
+  }, []);
+
+  useEffect(() => {
+    const ai = window.nolia.ai;
+    if (!ai) {
+      return undefined;
+    }
+    const unsubscribe = ai.onRunEvent((event) => {
+      handleAiRunEvent(event);
+    });
+    return () => {
+      unsubscribe();
+    };
+  }, []);
+
+  useEffect(() => {
+    if (aiSidebarOpen) {
+      setAiSidebarEverOpened(true);
+    }
+  }, [aiSidebarOpen]);
+
+  useEffect(() => {
+    return () => {
+      clearAiStartWatchdog();
+      for (const state of aiRunStatesRef.current.values()) {
+        if (state.watchdogTimer) {
+          window.clearTimeout(state.watchdogTimer);
+        }
+        if (state.maxWatchdogTimer) {
+          window.clearTimeout(state.maxWatchdogTimer);
+        }
+      }
+      aiRunStatesRef.current.clear();
+      aiTerminalRunIdsRef.current.clear();
     };
   }, []);
 
@@ -570,6 +685,18 @@ export function App() {
     }
   }, [sidebarView, activePathRel, workspace?.workspaceId]);
 
+  useEffect(() => {
+    const active = currentDocument();
+    if (rightPanelView === "history" && workspace && active && active.sourceKind !== "external") {
+      void refreshHistory(active.pathRel);
+      return;
+    }
+    if (!active || active.sourceKind === "external") {
+      setHistoryEntries([]);
+      setHistoryPreview(undefined);
+    }
+  }, [rightPanelView, activePathRel, workspace?.workspaceId]);
+
   const commandHandlers = useMemo<Record<string, () => void | Promise<void>>>(
     () => ({
       "workspace.open": () => openWorkspace(),
@@ -587,7 +714,13 @@ export function App() {
       "view.search": () => setSidebarView("search"),
       "view.backlinks": () => setSidebarView("backlinks"),
       "view.recent": () => setSidebarView("recent"),
-      "view.settings": () => setSettingsOpen(true),
+      "view.settings": () => openSettings("preferences"),
+      "ai.assistant.open": () => setAiSidebarOpen(true),
+      "ai.currentNote.summarize": () => startAiRun(currentNoteSummaryInstruction(tr), undefined, { displayText: tr("总结当前笔记"), requireCurrentNote: true }),
+      "ai.selection.polish": () => startSelectionAiAction("polish"),
+      "ai.selection.explain": () => startSelectionAiAction("explain"),
+      "ai.selection.translate": () => startSelectionAiAction("translate"),
+      "ai.selection.todo": () => startSelectionAiAction("todo"),
       "view.immersive.toggle": () => toggleImmersiveMode(),
       "view.toolbar.toggle": () => setToolbarVisible(!toolbarVisible),
       "view.lineNumbers.toggle": () => setLineNumbersVisible(!lineNumbersVisible),
@@ -595,7 +728,7 @@ export function App() {
       "mode.source": () => setActiveMode("source"),
       "mode.split": () => setActiveMode("split")
     }),
-    [workspace?.workspaceId, visibleDocument?.pathRel, immersiveMode, toolbarVisible, lineNumbersVisible, setCommandPaletteOpen, setLineNumbersVisible, setSidebarView, setToolbarVisible]
+    [workspace?.workspaceId, visibleDocument?.pathRel, immersiveMode, toolbarVisible, lineNumbersVisible, setCommandPaletteOpen, setLineNumbersVisible, setSidebarView, setToolbarVisible, tr]
   );
 
   useEffect(() => {
@@ -604,7 +737,15 @@ export function App() {
 
   const paletteActions = useMemo<PaletteAction[]>(
     () =>
-      extensionRegistry.commands
+      [
+        ...extensionRegistry.commands,
+        { id: "ai.assistant.open", title: tr("打开 AI Assistant"), keywords: ["ai", "assistant"], order: 20 },
+        { id: "ai.currentNote.summarize", title: tr("总结当前笔记"), keywords: ["ai", "summarize"], order: 21 },
+        { id: "ai.selection.polish", title: tr("润色选中文本"), keywords: ["ai", "polish"], order: 22 },
+        { id: "ai.selection.explain", title: tr("解释选中文本"), keywords: ["ai", "explain"], order: 23 },
+        { id: "ai.selection.translate", title: tr("翻译选中文本"), keywords: ["ai", "translate"], order: 24 },
+        { id: "ai.selection.todo", title: tr("转为待办"), keywords: ["ai", "todo"], order: 25 }
+      ]
         .filter((command) => Boolean(commandHandlers[command.id] ?? pluginCommandIds.includes(command.id)))
         .map((command) => ({
           id: command.id,
@@ -659,18 +800,19 @@ export function App() {
           onOpenWorkspace={() => void openWorkspace()}
           onCreateWorkspace={() => void createWorkspace()}
           onOpenRecent={(item) => void openRecentWorkspace(item)}
+          onRemoveRecent={(item) => void removeRecentWorkspace(item)}
         />
       </RendererI18nProvider>
     );
   }
 
-  const shellTitle = isExternalDocument && visibleDocument ? fileNameFor(visibleDocument.pathRel) : workspace?.name ?? tr("单文件编辑");
-  const shellSubtitle = isExternalDocument && visibleDocument ? visibleDocument.filePath ?? visibleDocument.pathRel : workspace?.rootPath;
   const platformClass = appInfo?.platform ? ` is-platform-${appInfo.platform}` : "";
+  const statusMessageLabel = statusBarMessage(statusMessage, tr);
+  const showStatusMessage = statusMessageLabel !== tr("就绪");
 
   return (
     <RendererI18nProvider locale={startupLocale}>
-    <div className={`app-shell${platformClass}${focusMode ? " is-focus" : ""}${immersiveMode ? " is-immersive" : ""}${modifiedOpenCursorActive ? " is-modified-open-cursor" : ""}`}>
+    <div className={`app-shell${platformClass}${focusMode ? " is-focus" : ""}${immersiveMode ? " is-immersive" : ""}${aiSidebarOpen ? " is-ai-open" : ""}${modifiedOpenCursorActive ? " is-modified-open-cursor" : ""}`}>
       <CommandPalette
         open={commandPaletteOpen}
         query={commandQuery}
@@ -732,34 +874,46 @@ export function App() {
       />
       <SettingsDialog
         open={settingsOpen}
+        initialTab={settingsInitialTab}
         settings={appSettings}
+        aiSettings={aiSettings}
+        workspaceId={workspace?.workspaceId}
+        aiSemanticStatus={aiSemanticStatus}
         extensionManifests={allExtensionManifests}
         pluginDescriptors={pluginDescriptors}
         settingContributions={settingContributions}
         onClose={() => setSettingsOpen(false)}
         onUpdate={updateAppSetting}
+        onUpdateAiSettings={updateAiSettings}
+        onSetAiApiKey={setAiApiKey}
+        onClearAiApiKey={clearAiApiKey}
+        onGetAiApiKey={getAiApiKey}
+        onTestAiProvider={(provider, apiKey) => getAiApi().testProvider({ providerProfileId: provider.id, provider: aiProviderRequest(provider), apiKey })}
+        onListAiModels={(provider, apiKey) => getAiApi().listModels({ providerProfileId: provider.id, provider: aiProviderRequest(provider), apiKey })}
+        onRefreshAiSemanticStatus={refreshAiSemanticStatus}
+        onTestAiEmbedding={testAiEmbedding}
+        onUpdateAiSemanticIndex={updateAiSemanticIndex}
         onSetPluginEnabled={setPluginEnabled}
         onAcceptPluginPermissions={acceptPluginPermissions}
         onReload={() => void bootstrap()}
         languageRestartRequired={languageRestartRequired}
         pluginDirectory={appInfo?.pluginDirectory}
       />
-      <header className="titlebar">
-        <div className="titlebar-left">
-          <button type="button" className="icon-button" title={tr("命令面板")} aria-label={tr("命令面板")} onClick={() => setCommandPaletteOpen(true)}>
-            <Menu size={16} />
-          </button>
-          <div className="workspace-title">
-            <strong>{shellTitle}</strong>
-            <span>{shellSubtitle}</span>
-          </div>
-        </div>
-      </header>
-
       <div
         className={`workspace-grid${leftPanelCollapsed ? " is-left-collapsed" : ""}${rightPanelCollapsed ? " is-right-collapsed" : ""}${immersiveMode ? " is-immersive" : ""}${!showWorkspacePanels ? " is-single-file" : ""}`}
         style={{ "--left-panel-width": `${leftPanelWidth}px`, "--right-panel-width": `${rightPanelWidth}px` } as CSSProperties}
       >
+        {showWorkspacePanels && (workspaceLoading || workspaceLoadError) ? (
+          <WorkspaceLoadingOverlay
+            loading={workspaceLoading}
+            error={workspaceLoadError}
+            onRetry={() => {
+              if (workspace) {
+                void initializeWorkspaceData(workspace);
+              }
+            }}
+          />
+        ) : null}
         {showWorkspacePanels ? (
           <AppNav
             sidebarView={sidebarView}
@@ -772,9 +926,12 @@ export function App() {
               setRightPanelView("outline");
               setRightPanelCollapsed(false);
             }}
+            onOpenCommandPalette={() => setCommandPaletteOpen(true)}
+            onToggleAi={() => setAiSidebarOpen((open) => !open)}
             onToggleSettings={() => {
-              setSettingsOpen(true);
+              openSettings("preferences");
             }}
+            aiOpen={aiSidebarOpen}
             settingsOpen={settingsOpen}
           />
         ) : null}
@@ -845,19 +1002,29 @@ export function App() {
           <EditorTopBar
             document={visibleDocument}
             resource={visibleResource}
-            workspaceName={workspace?.name ?? tr("单文件")}
             mode={visibleDocument?.mode ?? editorModeSetting}
             leftPanelCollapsed={leftPanelCollapsed}
             canToggleLeft={showWorkspacePanels}
             isImmersive={immersiveMode}
             isFavorite={visibleDocumentFavorite}
+            showShellActions={!showWorkspacePanels}
+            aiOpen={aiSidebarOpen}
             onToggleLeft={() => setLeftPanelCollapsed((value) => !value)}
+            onOpenCommandPalette={() => setCommandPaletteOpen(true)}
+            onToggleAi={() => setAiSidebarOpen((open) => !open)}
+            onToggleSettings={() => openSettings("preferences")}
             onOpenOutline={() => {
               setRightPanelView("outline");
               setRightPanelCollapsed(false);
             }}
+            onOpenHistory={() => {
+              setRightPanelView("history");
+              setRightPanelCollapsed(false);
+            }}
             onModeChange={(mode) => void setActiveMode(mode)}
             onToggleFavorite={() => toggleFavoriteDocument()}
+            onOpenFindReplace={() => editorPaneRef.current?.openFindReplace()}
+            onRefresh={() => void refreshWorkspaceTree()}
           />
           <EditorPane
             ref={editorPaneRef}
@@ -902,7 +1069,7 @@ export function App() {
         {showWorkspacePanels ? (
         <aside className={`right-panel ${rightPanelView}`} aria-hidden={rightPanelCollapsed}>
           <PanelHeader
-            title={rightPanelTitle(rightPanelView)}
+            title={rightPanelTitle(rightPanelView, tr)}
             onToggle={() => setRightPanelCollapsed(true)}
           />
           <div className="right-panel-body">
@@ -916,6 +1083,19 @@ export function App() {
               />
             ) : null}
             {rightPanelView === "details" ? <DocumentDetails doc={visibleDocument} backlinks={backlinks} /> : null}
+            {rightPanelView === "history" ? (
+              <HistoryPanel
+                doc={visibleDocument}
+                entries={historyEntries}
+                loading={historyLoading}
+                preview={historyPreview}
+                locale={startupLocale}
+                onRefresh={() => void refreshHistory()}
+                onCreateSnapshot={() => void createManualHistorySnapshot()}
+                onPreview={(entry) => void previewHistoryEntry(entry)}
+                onRestore={(entry) => void restoreHistoryEntry(entry)}
+              />
+            ) : null}
             {rightPanelView === "errors" ? <ErrorPanel statusMessage={statusMessage} /> : null}
           </div>
         </aside>
@@ -925,21 +1105,105 @@ export function App() {
       <footer className="statusbar">
         {visibleResource ? (
           <>
+            <StatusPill label={visibleResource.pathRel} accessibilityLabel={tr("路径")} />
             <StatusPill label={resourceEditorKindLabel(visibleResource, tr)} />
             <StatusPill label={formatFileSize(visibleResource.size, startupLocale)} tone="muted" />
             <StatusPill label={visibleResource.dirty ? tr("未保存") : tr("已保存")} tone={visibleResource.dirty ? "warn" : "ok"} />
-            <StatusPill label={statusBarMessage(statusMessage, tr)} tone="muted" />
+            {showStatusMessage ? <StatusPill label={statusMessageLabel} tone="muted" /> : null}
           </>
         ) : (
           <>
-            <StatusPill label={tr("全文 {count} 字词", { count: visibleDocument?.parsed.wordCount ?? 0 })} />
-            <StatusPill label={tr("选中 {count} 字符", { count: selectedCharCount })} tone={selectedCharCount > 0 ? "ok" : "muted"} />
+            {visibleDocument ? <StatusPill label={visibleDocument.pathRel} accessibilityLabel={tr("路径")} /> : null}
             <StatusPill label={visibleDocument?.dirty ? tr("未保存") : tr("已保存")} tone={visibleDocument?.dirty ? "warn" : "ok"} />
+            <StatusPill label={tr("{count} 字词", { count: visibleDocument?.parsed.wordCount ?? 0 })} />
+            {selectedCharCount > 0 ? <StatusPill label={tr("选中 {count} 字符", { count: selectedCharCount })} tone="ok" /> : null}
             <StatusPill label={editorModeLabel(visibleDocument?.mode ?? editorModeSetting, tr)} />
-            <StatusPill label={statusBarMessage(statusMessage, tr)} tone="muted" />
+            {showStatusMessage ? <StatusPill label={statusMessageLabel} tone="muted" /> : null}
           </>
         )}
       </footer>
+      {aiSidebarEverOpened ? (
+        <Suspense fallback={aiSidebarOpen ? <div className="ai-sidebar ai-sidebar-loading"><EditorLoadingState label={tr("加载中。")} /></div> : null}>
+          <AiSidebar
+            open={aiSidebarOpen}
+            settings={aiSettings}
+            activeRunId={aiActiveRunId}
+            running={aiRunning}
+            messages={aiMessages}
+            sources={aiSources}
+            patchProposal={aiPatchProposal}
+            patchApplyMode={aiPatchApplyMode}
+            contextSummary={aiContextSummary(visibleDocument, selectedCharCount, aiSettings, tr)}
+            onClose={() => setAiSidebarOpen(false)}
+            onOpenSettings={() => openSettings("ai")}
+            onUpdateDefaultProvider={(patch) => void updateDefaultAiProvider(patch)}
+            onSend={(message, intent) => {
+          if (isRegenerateLastAiRequest(message) && retryLastAiRun(message)) {
+            return;
+          }
+          if (isWritePreviousAiResponseToExistingDocumentRequest(message) && proposeExistingDocumentAppendFromLastAiResponse(message)) {
+            return;
+          }
+          if (isWritePreviousAiResponseToNewDirectoryRequest(message) && proposeDirectoryDocumentFromLastAiResponse(message)) {
+            return;
+          }
+          if (isWritePreviousAiResponseToNewDocumentRequest(message) && proposeNewDocumentFromLastAiResponse(message)) {
+            return;
+          }
+          const workspaceOperation = isWorkspaceOperationRequest(message);
+          const workspaceOnlyOperation = workspaceOperation && isWorkspaceOperationOnlyRequest(message);
+          const createDocument = !workspaceOperation && isDocumentGenerationRequest(message);
+          const workspaceMarkdownTarget = requestedMarkdownPath(message);
+          const workspaceDocumentGeneration = workspaceOperation && !workspaceMarkdownTarget && isDocumentGenerationRequest(message);
+          const workspaceDocumentEdit = workspaceOperation && !workspaceDocumentGeneration && Boolean(workspaceMarkdownTarget) && isWorkspaceMarkdownFileWriteRequest(message);
+          const editInstruction = workspaceDocumentGeneration
+            ? workspaceDocumentGenerationInstruction(message)
+            : workspaceDocumentEdit
+              ? workspaceDocumentEditInstruction(message)
+            : !workspaceOnlyOperation && isDocumentEditRequest(message)
+              ? (createDocument ? documentGenerationInstruction(message, tr) : documentEditInstruction(message, tr))
+              : undefined;
+          if (!editInstruction) {
+            setAiPatchProposal(undefined);
+            setAiPatchApplyMode("current-document");
+          }
+          const requiresCurrentNote = intent === "summarize-current-note" || Boolean(editInstruction) || isCurrentNoteBodyRequest(message);
+          void startAiRun(
+            intent === "summarize-current-note" ? currentNoteSummaryInstruction(tr) : editInstruction ?? message,
+            undefined,
+            requiresCurrentNote && intent === "summarize-current-note"
+              ? { displayText: message, requireCurrentNote: true }
+              : editInstruction
+                ? {
+                    displayText: message,
+                    requireCurrentNote: !(workspaceDocumentGeneration || workspaceDocumentEdit),
+                    patchFallback: !(workspaceDocumentGeneration || workspaceDocumentEdit),
+                    allowDocumentPatch: !(workspaceDocumentGeneration || workspaceDocumentEdit),
+                    allowWorkspaceOperations: workspaceOperation,
+                    patchApplyMode: createDocument ? "new-document" : "current-document"
+                  }
+                : requiresCurrentNote
+                  ? { displayText: message, requireCurrentNote: true }
+                : workspaceOperation
+                  ? { displayText: message, allowWorkspaceOperations: true }
+                  : undefined
+          );
+        }}
+        onCancel={() => {
+          if (aiActiveRunId) {
+            void getAiApi().cancelRun({ runId: aiActiveRunId });
+          }
+        }}
+        canRetry={aiCanRetry}
+        onRetry={() => {
+          retryLastAiRun(aiLastDisplayTextRef.current || tr("重新生成"));
+        }}
+        onCopy={(text) => void window.nolia.clipboard.writeRich({ text, html: `<pre>${escapeHtml(text)}</pre>` })}
+        onApplyPatch={applyAiPatch}
+            onDiscardPatch={discardAiPatchProposal}
+          />
+        </Suspense>
+      ) : null}
     </div>
     </RendererI18nProvider>
   );
@@ -1056,10 +1320,27 @@ export function App() {
     });
   }
 
+  function updateOpenDocument(pathRel: string, updater: (doc: OpenDocumentTab) => OpenDocumentTab) {
+    updateOpenDocs((docs) =>
+      docs.map((doc) => {
+        if (doc.pathRel !== pathRel) {
+          return doc;
+        }
+        return updater(doc);
+      })
+    );
+  }
+
+  function clearEditorDraftState(pathRel: string) {
+    htmlDraftsRef.current.delete(pathRel);
+    sourceParseTokensRef.current.delete(pathRel);
+  }
+
   async function bootstrap() {
-    const [state, plugins] = await Promise.all([
+    const [state, plugins, aiState] = await Promise.all([
       window.nolia.workspace.bootstrap(),
-      window.nolia.plugins?.list?.() ?? Promise.resolve([])
+      window.nolia.plugins?.list?.() ?? Promise.resolve([]),
+      window.nolia.ai?.getSettings?.() ?? Promise.resolve(undefined)
     ]);
     if (!startupLocaleInitializedRef.current) {
       startupLocaleInitializedRef.current = true;
@@ -1068,6 +1349,7 @@ export function App() {
     setRecentWorkspaces(state.recentWorkspaces);
     setPluginDescriptors(plugins);
     setAppSettings(state.settings);
+    setAiSettings(normalizeAiSettingsPublic(aiState));
     setAppInfo(state.appInfo);
     setTheme(state.settings.theme);
     setEditorModeSetting(state.settings.editorMode);
@@ -1080,21 +1362,849 @@ export function App() {
     }
   }
 
-  async function loadWorkspaceData(workspaceInfo: WorkspaceInfo) {
+  async function loadWorkspaceData(workspaceInfo: WorkspaceInfo, options: WorkspaceDataLoadOptions = {}) {
+    const { openInitialDocument = false, token } = options;
     const [tree, recentDocs] = await Promise.all([
       window.nolia.file.listTree({ workspaceId: workspaceInfo.workspaceId, root: "", sortBy: "name", showHidden: false }),
       window.nolia.search.query({ workspaceId: workspaceInfo.workspaceId, query: "", limit: 30 })
     ]);
+    if (token !== undefined && (token !== workspaceLoadTokenRef.current || workspaceIdRef.current !== workspaceInfo.workspaceId)) {
+      return;
+    }
     setFileTree(tree.nodes);
     setSearchResults(recentDocs.items);
-    if (openDocsRef.current.length === 0 && !activeResourceRef.current) {
+    if (openInitialDocument && openDocsRef.current.length === 0 && !activeResourceRef.current) {
       const firstOpenableNode =
         recentDocs.items.map((item) => findFileTreeNode(tree.nodes, item.pathRel)).find((node) => node && node.kind !== "directory") ??
         firstOpenableFileTreeNode(tree.nodes);
       if (firstOpenableNode) {
-        void openTreeNode(firstOpenableNode, workspaceInfo);
+        await openTreeNode(firstOpenableNode, workspaceInfo);
+        if (token !== undefined && (token !== workspaceLoadTokenRef.current || workspaceIdRef.current !== workspaceInfo.workspaceId)) {
+          return;
+        }
       }
     }
+  }
+
+  function handleAiRunEvent(event: AiRunEvent) {
+    if (aiTerminalRunIdsRef.current.has(event.runId)) {
+      return;
+    }
+    if (isAiRunProgressEvent(event)) {
+      clearAiStartWatchdog();
+    }
+    if (isAiRunStateEvent(event)) {
+      ensureAiRunState(event.runId);
+    }
+    if (isAiRunProgressEvent(event)) {
+      resetAiRunWatchdog(event.runId);
+    }
+    if (event.type === "task-updated") {
+      if (aiStartWatchdogRef.current && !aiActiveRunIdRef.current && (event.task.status === "queued" || event.task.status === "running")) {
+        clearAiStartWatchdog();
+        aiActiveRunIdRef.current = event.runId;
+        setAiActiveRunId(event.runId);
+      }
+      return;
+    }
+    if (event.type === "task-restored") {
+      return;
+    }
+    if (event.type === "run-started") {
+      aiActiveRunIdRef.current = event.runId;
+      setAiRunning(true);
+      setAiActiveRunId(event.runId);
+      return;
+    }
+    if (event.type === "text-delta") {
+      markAiRunOutput(event.runId, "text");
+      setAiMessages((messages) => appendAiDelta(messages, event.runId, event.text));
+      return;
+    }
+    if (event.type === "tool-call") {
+      markAiRunOutput(event.runId, "event");
+      setAiMessages((messages) => [...messages, { id: `${event.runId}:${event.callId}:call`, role: "event", text: tr("调用工具：{tool}", { tool: event.toolName }) }]);
+      return;
+    }
+    if (event.type === "tool-result") {
+      markAiRunOutput(event.runId, "event");
+      setAiMessages((messages) => [...messages, { id: `${event.runId}:${event.callId}:result`, role: "event", text: event.resultSummary }]);
+      if (event.sourceRefs?.length) {
+        setAiSources((sources) => dedupeAiSources([...sources, ...(event.sourceRefs ?? [])]));
+      }
+      return;
+    }
+    if (event.type === "source-used") {
+      markAiRunOutput(event.runId, "event");
+      setAiSources((sources) => dedupeAiSources([...sources, event.source]));
+      return;
+    }
+    if (event.type === "approval-required") {
+      markAiRunOutput(event.runId, "patch");
+      setAiPatchProposal(event.proposal);
+      return;
+    }
+    if (event.type === "patch-proposal") {
+      markAiRunOutput(event.runId, "patch");
+      setAiPatchProposal(event.proposal);
+      return;
+    }
+    if (event.type === "error") {
+      markAiRunTerminal(event.runId, "error");
+      finishAiRun(event.runId);
+      if (event.code === "run_cancelled") {
+        return;
+      }
+      setAiMessages((messages) => [
+        ...messages,
+        {
+          id: `${event.runId}:error:${messages.length}`,
+          role: "error",
+          text: event.message,
+          errorCode: event.code,
+          retryable: event.retryable
+        }
+      ]);
+      return;
+    }
+    if (event.type === "done" || event.type === "cancelled") {
+      markAiRunTerminal(event.runId, event.type);
+      const runState = finishAiRun(event.runId);
+      if (event.type === "done" && runState && !runState.textReceived && !runState.patchReceived && !runState.eventReceived) {
+        setAiMessages((messages) => [...messages, { id: `${event.runId}:empty`, role: "error", text: tr("AI 本轮请求已结束，但没有收到任何文本、工具结果或修改建议。请检查模型服务日志、接口模式和模型是否支持流式输出。"), errorCode: "provider_empty_response", retryable: true }]);
+      }
+      return;
+    }
+  }
+
+  function ensureAiRunState(runId: string): void {
+    if (aiRunStatesRef.current.has(runId)) {
+      return;
+    }
+    const state: AiRunUiState = {
+      textReceived: false,
+      patchReceived: false,
+      eventReceived: false
+    };
+    aiRunStatesRef.current.set(runId, state);
+    resetAiRunWatchdog(runId);
+    state.maxWatchdogTimer = window.setTimeout(() => {
+      timeoutAiRun(runId, tr("AI 请求运行时间过长，已自动释放输入框。请缩小任务范围后重试。"));
+    }, AI_RUN_UI_MAX_WATCHDOG_MS);
+  }
+
+  function resetAiRunWatchdog(runId: string): void {
+    const state = aiRunStatesRef.current.get(runId);
+    if (!state) {
+      return;
+    }
+    if (state.watchdogTimer) {
+      window.clearTimeout(state.watchdogTimer);
+    }
+    state.watchdogTimer = window.setTimeout(() => {
+      timeoutAiRun(runId, tr("AI 请求长时间没有新的输出或工具进展，已自动释放输入框。请检查模型服务或网络后重试。"));
+    }, AI_RUN_UI_WATCHDOG_MS);
+  }
+
+  function timeoutAiRun(runId: string, text: string): void {
+    if (!aiRunStatesRef.current.has(runId)) {
+      return;
+    }
+    markAiRunTerminal(runId, "watchdog");
+    void getAiApi().cancelRun({ runId });
+    finishAiRun(runId);
+    setAiMessages((messages) => [...messages, { id: `${runId}:watchdog`, role: "error", text, errorCode: "run_timeout", retryable: true }]);
+  }
+
+  function clearAiRunState(runId: string): AiRunUiState | undefined {
+    const state = aiRunStatesRef.current.get(runId);
+    if (state?.watchdogTimer) {
+      window.clearTimeout(state.watchdogTimer);
+    }
+    if (state?.maxWatchdogTimer) {
+      window.clearTimeout(state.maxWatchdogTimer);
+    }
+    aiRunStatesRef.current.delete(runId);
+    return state;
+  }
+
+  function markAiRunOutput(runId: string, kind: "text" | "patch" | "event"): void {
+    const state = aiRunStatesRef.current.get(runId);
+    if (!state) {
+      return;
+    }
+    if (kind === "text") {
+      state.textReceived = true;
+    } else if (kind === "patch") {
+      state.patchReceived = true;
+    } else {
+      state.eventReceived = true;
+    }
+  }
+
+  function markAiRunTerminal(runId: string, reason: AiRunTerminalReason): void {
+    aiTerminalRunIdsRef.current.set(runId, reason);
+    window.setTimeout(() => {
+      if (aiTerminalRunIdsRef.current.get(runId) === reason) {
+        aiTerminalRunIdsRef.current.delete(runId);
+      }
+    }, AI_TERMINAL_EVENT_TTL_MS);
+  }
+
+  function finishAiRun(runId: string): AiRunUiState | undefined {
+    const state = clearAiRunState(runId);
+    if (!aiActiveRunIdRef.current || aiActiveRunIdRef.current === runId) {
+      aiActiveRunIdRef.current = undefined;
+      setAiRunning(false);
+      setAiActiveRunId(undefined);
+    }
+    return state;
+  }
+
+  async function updateAiSettings(next: Partial<AiSettings>) {
+    const settings = await getAiApi().setSettings({ settings: next });
+    setAiSettings(normalizeAiSettingsPublic(settings));
+  }
+
+  async function updateDefaultAiProvider(patch: Partial<AiProviderProfile> & { defaultProviderId?: string }) {
+    if (!aiSettings?.activeProvider) {
+      return;
+    }
+    const targetProviderId = patch.defaultProviderId ?? aiSettings.activeProvider.id;
+    const providers = aiSettings.providers.map((provider) =>
+      provider.id === targetProviderId
+        ? {
+            id: provider.id,
+            name: patch.name ?? provider.name,
+            alias: patch.alias ?? provider.alias,
+            providerId: patch.providerId ?? provider.providerId,
+            model: patch.model ?? provider.model,
+            baseUrl: patch.baseUrl ?? provider.baseUrl,
+            apiMode: patch.apiMode ?? provider.apiMode,
+            disabled: provider.disabled
+          }
+        : {
+            id: provider.id,
+            name: provider.name,
+            alias: provider.alias,
+            providerId: provider.providerId,
+            model: provider.model,
+            baseUrl: provider.baseUrl,
+            apiMode: provider.apiMode,
+            disabled: provider.disabled
+          }
+    );
+    await updateAiSettings({ defaultProviderId: targetProviderId, providers });
+  }
+
+  async function setAiApiKey(providerProfileId: string, apiKey: string) {
+    const settings = await getAiApi().setApiKey({ providerProfileId, apiKey });
+    setAiSettings(normalizeAiSettingsPublic(settings));
+  }
+
+  async function clearAiApiKey(providerProfileId: string) {
+    const settings = await getAiApi().clearApiKey({ providerProfileId });
+    setAiSettings(normalizeAiSettingsPublic(settings));
+  }
+
+  async function getAiApiKey(providerProfileId: string): Promise<string | undefined> {
+    return (await getAiApi().getApiKey({ providerProfileId })).apiKey;
+  }
+
+  async function refreshAiSemanticStatus(settings?: AiEmbeddingSettings, apiKey?: string): Promise<void> {
+    if (!workspace) {
+      setAiSemanticStatus(undefined);
+      return;
+    }
+    setAiSemanticStatus(await getAiApi().semanticIndexStatus({ workspaceId: workspace.workspaceId, settings, apiKey }));
+  }
+
+  async function testAiEmbedding(settings: AiEmbeddingSettings, apiKey?: string): Promise<AiProviderTestResult> {
+    const result = await getAiApi().testEmbedding({ settings, apiKey });
+    await refreshAiSemanticStatus();
+    return result;
+  }
+
+  async function updateAiSemanticIndex(reset = false, settings?: AiEmbeddingSettings, apiKey?: string): Promise<AiSemanticIndexStatus | undefined> {
+    if (!workspace) {
+      return undefined;
+    }
+    const ai = getAiApi();
+    const handler = reset ? ai.resetSemanticIndex : ai.updateSemanticIndex;
+    const result = await handler({ workspaceId: workspace.workspaceId, settings, apiKey });
+    setAiSemanticStatus(result.status);
+    return result.status;
+  }
+
+  async function startAiRun(instruction: string, actionId?: AiSelectionActionId, options: AiRunUiOptions = {}) {
+    if (!window.nolia.ai) {
+      setAiSidebarOpen(true);
+      setAiMessages((messages) => [...messages, { id: `ai-unavailable:${Date.now()}`, role: "error", text: tr("AI API 不可用"), retryable: true }]);
+      return;
+    }
+    const displayText = options.displayText ?? instruction;
+    const clientContext = buildAiClientContext();
+    const conversation = aiConversationHistory(aiMessages, aiSettings?.conversationHistoryTurns ?? 0);
+    setAiSidebarOpen(true);
+    setAiMessages((messages) => [...messages, { id: `user:${Date.now()}`, role: "user", text: displayText }]);
+    setAiSources([]);
+    setAiPatchProposal(undefined);
+    setAiPatchApplyMode(options.patchApplyMode ?? "current-document");
+    aiLastInstructionRef.current = instruction;
+    aiLastDisplayTextRef.current = displayText;
+    aiLastActionRef.current = actionId;
+    aiLastRunOptionsRef.current = options;
+    setAiCanRetry(true);
+    const validationError = validateAiRunRequest(clientContext, options);
+    if (validationError) {
+      setAiMessages((messages) => [...messages, validationError]);
+      return;
+    }
+    setAiRunning(true);
+    const startSequence = ++aiStartSequenceRef.current;
+    clearAiStartWatchdog();
+    aiStartWatchdogRef.current = window.setTimeout(() => {
+      if (aiStartSequenceRef.current === startSequence && !aiActiveRunIdRef.current) {
+        aiStartSequenceRef.current += 1;
+        aiStartWatchdogRef.current = undefined;
+        setAiRunning(false);
+        setAiActiveRunId(undefined);
+        setAiMessages((messages) => [...messages, { id: `start-watchdog:${Date.now()}`, role: "error", text: tr("AI 请求长时间没有返回结果，已自动释放输入框。请检查模型服务或网络后重试。"), errorCode: "run_timeout", retryable: true }]);
+      }
+    }, AI_RUN_START_WATCHDOG_MS);
+    try {
+      const runRequest = {
+        entryPoint: actionId ? "selection-action" : "chat",
+        instruction,
+        title: displayText.slice(0, 80),
+        actionId,
+        conversation,
+        clientContext,
+        options: {
+          includeCurrentNote: true,
+          requireCurrentNote: options.requireCurrentNote,
+          includeSelection: true,
+          allowWorkspaceSearch: true,
+          allowWorkspaceRead: true,
+          allowDocumentPatch: Boolean(options.allowDocumentPatch),
+          allowWorkspaceOperations: Boolean(options.allowWorkspaceOperations),
+          allowTools: true,
+          patchFallback: options.patchFallback,
+          maxToolRounds: aiSettings?.agentMaxSteps ?? 12
+        }
+      } as const;
+      const response = await getAiApi().startTask(runRequest);
+      if (aiStartSequenceRef.current !== startSequence) {
+        markAiRunTerminal(response.runId, "cancelled");
+        void getAiApi().cancelRun({ runId: response.runId });
+        return;
+      }
+      clearAiStartWatchdog();
+      const terminalReason = aiTerminalRunIdsRef.current.get(response.runId);
+      if (terminalReason) {
+        aiActiveRunIdRef.current = undefined;
+        setAiActiveRunId(undefined);
+        setAiRunning(false);
+      } else {
+        ensureAiRunState(response.runId);
+        aiActiveRunIdRef.current = response.runId;
+        setAiActiveRunId(response.runId);
+      }
+    } catch (error) {
+      if (aiStartSequenceRef.current !== startSequence) {
+        return;
+      }
+      clearAiStartWatchdog();
+      aiActiveRunIdRef.current = undefined;
+      setAiActiveRunId(undefined);
+      setAiRunning(false);
+      setAiMessages((messages) => [...messages, { id: `start-error:${Date.now()}`, role: "error", text: errorMessageFor(error, tr("AI API 不可用")), retryable: true }]);
+    }
+  }
+
+  function validateAiRunRequest(clientContext: import("../shared/ai").AiClientContext, options: AiRunUiOptions): AiMessageView | undefined {
+    if (options.allowWorkspaceOperations && (!aiSettings?.allowWorkspaceRead || !aiSettings.allowWorkspaceOperations)) {
+      return {
+        id: `workspace-operation-permission:${Date.now()}`,
+        role: "error",
+        text: "当前请求需要创建目录或文件。请在 AI 设置中开启“允许读取整个工作区”和“允许提出工作区操作”后重试。",
+        errorCode: "tool_permission_denied",
+        retryable: true
+      };
+    }
+    if (!options.requireCurrentNote) {
+      return undefined;
+    }
+    if (!clientContext.activeDocument) {
+      return {
+        id: `current-note-missing:${Date.now()}`,
+        role: "error",
+        text: tr("当前请求需要读取当前笔记正文，但当前没有打开可读取的 Markdown 笔记。"),
+        errorCode: "tool_permission_denied",
+        retryable: false
+      };
+    }
+    if (!aiSettings?.allowCurrentNoteContent) {
+      return {
+        id: `current-note-permission:${Date.now()}`,
+        role: "error",
+        text: tr("当前请求需要读取当前笔记正文，但 AI 设置未允许发送当前笔记正文。请在 AI 设置中开启“允许发送当前笔记正文”后重试。"),
+        errorCode: "tool_permission_denied",
+        retryable: true
+      };
+    }
+    return undefined;
+  }
+
+  function clearAiStartWatchdog(): void {
+    if (aiStartWatchdogRef.current) {
+      window.clearTimeout(aiStartWatchdogRef.current);
+      aiStartWatchdogRef.current = undefined;
+    }
+  }
+
+  function startSelectionAiAction(actionId: AiSelectionActionId) {
+    const snapshot = editorPaneRef.current?.getAiSnapshot();
+    if (!snapshot?.selectionText) {
+      setAiSidebarOpen(true);
+      setAiMessages((messages) => [...messages, { id: `selection-empty:${Date.now()}`, role: "error", text: tr("请先选择文本。") }]);
+      return;
+    }
+    void startAiRun(selectionInstruction(actionId, tr), actionId);
+  }
+
+  function retryLastAiRun(displayText: string): boolean {
+    if (!aiLastInstructionRef.current || aiRunning) {
+      return false;
+    }
+    void startAiRun(aiLastInstructionRef.current, aiLastActionRef.current, {
+      ...aiLastRunOptionsRef.current,
+      displayText
+    });
+    return true;
+  }
+
+  function proposeExistingDocumentAppendFromLastAiResponse(request: string): boolean {
+    if (!workspace) {
+      return false;
+    }
+    const targetPath = resolveRequestedExistingMarkdownPath(request, fileTree);
+    if (!targetPath) {
+      return false;
+    }
+    const content = lastAssistantDocumentContent(aiMessages);
+    if (!content) {
+      showMissingPreviousAiResponseMessage(request);
+      return true;
+    }
+    const proposal: AiPatchProposal = {
+      id: `local-existing-document-append:${Date.now()}`,
+      runId: `local-existing-document-append:${Date.now()}`,
+      workspaceId: workspace.workspaceId,
+      pathRel: targetPath,
+      title: targetPath,
+      summary: `将上一条 AI 回复合并到 ${targetPath}`,
+      sourceSnapshotHash: "workspace",
+      baseHash: "workspace",
+      operations: [
+        {
+          type: "append",
+          pathRel: targetPath,
+          afterText: content
+        }
+      ]
+    };
+    setAiSidebarOpen(true);
+    setAiMessages((messages) => [...messages, { id: `user:${Date.now()}`, role: "user", text: request }]);
+    setAiSources([]);
+    setAiPatchProposal(proposal);
+    setAiPatchApplyMode("current-document");
+    setAiCanRetry(false);
+    aiLastInstructionRef.current = "";
+    aiLastDisplayTextRef.current = "";
+    aiLastActionRef.current = undefined;
+    aiLastRunOptionsRef.current = {};
+    return true;
+  }
+
+  function proposeNewDocumentFromLastAiResponse(request: string): boolean {
+    const document = currentDocumentFromRef();
+    if (!workspace) {
+      return false;
+    }
+    const content = lastAssistantDocumentContent(aiMessages);
+    if (!content) {
+      return false;
+    }
+    const proposal: AiPatchProposal = {
+      id: `local-new-document:${Date.now()}`,
+      runId: `local-new-document:${Date.now()}`,
+      workspaceId: workspace.workspaceId,
+      pathRel: document?.pathRel ?? "ai-generated.md",
+      title: document?.parsed.title || document?.title || tr("AI 生成"),
+      summary: tr("将上一条 AI 回复写入新文档"),
+      sourceSnapshotHash: document?.baseHash ?? "new",
+      baseHash: document?.baseHash ?? "new",
+      operations: [
+        {
+          type: "replaceDocument",
+          beforeText: document?.sourceText ?? "",
+          afterText: content
+        }
+      ]
+    };
+    setAiSidebarOpen(true);
+    setAiMessages((messages) => [...messages, { id: `user:${Date.now()}`, role: "user", text: request }]);
+    setAiSources([]);
+    setAiPatchProposal(proposal);
+    setAiPatchApplyMode("new-document");
+    setAiCanRetry(false);
+    aiLastInstructionRef.current = "";
+    aiLastDisplayTextRef.current = "";
+    aiLastActionRef.current = undefined;
+    aiLastRunOptionsRef.current = {};
+    return true;
+  }
+
+  function proposeDirectoryDocumentFromLastAiResponse(request: string): boolean {
+    const document = currentDocumentFromRef();
+    if (!workspace) {
+      return false;
+    }
+    const content = lastAssistantDocumentContent(aiMessages);
+    if (!content) {
+      showMissingPreviousAiResponseMessage(request);
+      return true;
+    }
+    const existingPaths = collectPathSet(fileTree);
+    const directoryPath = uniqueAiDirectoryPath(request, content, existingPaths, document?.pathRel);
+    const filePath = generatedDocumentFilePathInDirectory(directoryPath, content, existingPaths, tr);
+    const proposal: AiPatchProposal = {
+      id: `local-directory-document:${Date.now()}`,
+      runId: `local-directory-document:${Date.now()}`,
+      workspaceId: workspace.workspaceId,
+      pathRel: directoryPath,
+      title: directoryPath,
+      summary: "创建目录并保存上一条 AI 回复",
+      sourceSnapshotHash: "new",
+      baseHash: "new",
+      operations: [
+        {
+          type: "createDirectory",
+          pathRel: directoryPath
+        },
+        {
+          type: "createFile",
+          pathRel: filePath,
+          afterText: content
+        }
+      ]
+    };
+    setAiSidebarOpen(true);
+    setAiMessages((messages) => [...messages, { id: `user:${Date.now()}`, role: "user", text: request }]);
+    setAiSources([]);
+    setAiPatchProposal(proposal);
+    setAiPatchApplyMode("current-document");
+    setAiCanRetry(false);
+    aiLastInstructionRef.current = "";
+    aiLastDisplayTextRef.current = "";
+    aiLastActionRef.current = undefined;
+    aiLastRunOptionsRef.current = {};
+    return true;
+  }
+
+  function showMissingPreviousAiResponseMessage(request: string): void {
+    setAiSidebarOpen(true);
+    setAiMessages((messages) => [
+      ...messages,
+      { id: `user:${Date.now()}`, role: "user", text: request },
+      {
+        id: `previous-ai-response-missing:${Date.now()}`,
+        role: "error",
+        text: "没有找到可保存的上一条 AI 回复。请先生成内容，或直接指定要写入的新内容。",
+        retryable: false
+      }
+    ]);
+    setAiSources([]);
+    setAiPatchProposal(undefined);
+    setAiPatchApplyMode("current-document");
+    setAiCanRetry(false);
+  }
+
+  function buildAiClientContext(): import("../shared/ai").AiClientContext {
+    const doc = visibleDocument;
+    const snapshot = editorPaneRef.current?.getAiSnapshot();
+    return {
+      workspaceId: doc?.sourceKind === "external" ? undefined : workspace?.workspaceId,
+      activeDocument: doc
+        ? {
+            pathRel: doc.pathRel,
+            title: doc.title,
+            mode: doc.mode,
+            sourceText: doc.sourceText,
+            baseHash: doc.baseHash,
+            dirty: doc.dirty,
+            parsedTitle: doc.parsed.title,
+            headings: doc.parsed.headings.map((heading) => ({ text: heading.text, depth: heading.depth, line: heading.line }))
+          }
+        : undefined,
+      selection: snapshot?.selectionText
+        ? {
+            text: snapshot.selectionText,
+            range: snapshot.selectionRange,
+            source: snapshot.source
+          }
+        : undefined,
+      cursor: snapshot
+        ? {
+            offset: snapshot.cursorOffset,
+            line: snapshot.line,
+            column: snapshot.column
+          }
+        : undefined
+    };
+  }
+
+  async function applyAiPatch(proposal: AiPatchProposal, mode: "replace" | "insert" | "append" | "new-document") {
+    if (isWorkspacePatchProposal(proposal)) {
+      await applyWorkspacePatchProposal(proposal);
+      return;
+    }
+    const savingAsNewDocument = mode === "new-document" || (aiPatchApplyMode === "new-document" && mode === "replace");
+    if (savingAsNewDocument) {
+      const content = standalonePatchDocumentContent(proposal);
+      if (!content) {
+        const message = tr("只能应用到当前打开的笔记。");
+        setAiMessages((messages) => [...messages, { id: `patch-error:${Date.now()}`, role: "error", text: message }]);
+        throw new Error(message);
+      }
+      await createDocumentFromAiPatch(proposal, content);
+      return;
+    }
+    const document = currentDocumentFromRef();
+    if (!document || document.pathRel !== proposal.pathRel) {
+      const message = tr("只能应用到当前打开的笔记。");
+      setAiMessages((messages) => [...messages, { id: `patch-error:${Date.now()}`, role: "error", text: message }]);
+      throw new Error(message);
+    }
+    const next = applyPatchOperations(document.sourceText, proposal.operations, mode);
+    if (!next.ok) {
+      setAiMessages((messages) => [...messages, { id: `patch-error:${Date.now()}`, role: "error", text: next.message }]);
+      throw new Error(next.message);
+    }
+    if (workspace && document.sourceKind !== "external") {
+      void window.nolia.file.createHistorySnapshot?.({ workspaceId: workspace.workspaceId, pathRel: document.pathRel, reason: "manual", content: document.sourceText });
+    }
+    await applyAiPatchContentToDocument(document, next.content);
+    setAiPatchProposal(undefined);
+    setUserStatusMessage(tr("已应用 AI 修改，可撤销或从历史版本恢复。"));
+    queueAutosave(document.pathRel);
+  }
+
+  async function applyWorkspacePatchProposal(proposal: AiPatchProposal) {
+    if (!workspace) {
+      const message = tr("未打开工作区");
+      setAiMessages((messages) => [...messages, { id: `patch-error:${Date.now()}`, role: "error", text: message }]);
+      throw new Error(message);
+    }
+    try {
+      if (proposal.taskId && proposal.approvalId) {
+        await getAiApi().approveProposal({ taskId: proposal.taskId, approvalId: proposal.approvalId });
+        setAiPatchProposal(undefined);
+        await loadWorkspaceData(workspace);
+        const firstPath = firstOpenableWorkspaceOperationPath(proposal.operations, proposal.pathRel);
+        if (firstPath && isMarkdownPath(firstPath)) {
+          await openDocument(firstPath);
+          setRightPanelView("history");
+          setRightPanelCollapsed(false);
+          await refreshHistory(firstPath);
+        }
+        setUserStatusMessage(tr("已应用 AI 工作区操作，可从历史版本恢复。"));
+        return;
+      }
+      for (const operation of proposal.operations) {
+        const targetPath = operationTargetPath(operation, proposal.pathRel);
+        if (operation.type === "createDirectory") {
+          if (!targetPath) {
+            throw new Error("AI workspace operation is missing a target path.");
+          }
+          await window.nolia.file.create({
+            workspaceId: workspace.workspaceId,
+            pathRel: targetPath,
+            kind: "directory"
+          });
+          continue;
+        }
+        if (operation.type === "movePath") {
+          await window.nolia.file.rename({
+            workspaceId: workspace.workspaceId,
+            sourcePathRel: operation.sourcePathRel,
+            targetPathRel: operation.targetPathRel
+          });
+          closeOpenDocumentsUnderPath(operation.sourcePathRel);
+          continue;
+        }
+        if (!targetPath || !isMarkdownPath(targetPath)) {
+          throw new Error(tr("AI 工作区操作只能修改 Markdown 文件。"));
+        }
+        if (operation.type === "createFile") {
+          await window.nolia.file.create({
+            workspaceId: workspace.workspaceId,
+            pathRel: targetPath,
+            kind: "file",
+            content: operation.afterText
+          });
+          await window.nolia.file.createHistorySnapshot?.({ workspaceId: workspace.workspaceId, pathRel: targetPath, reason: "manual", content: operation.afterText });
+          continue;
+        }
+        const current = await window.nolia.file.read({ workspaceId: workspace.workspaceId, pathRel: targetPath });
+        const next = applyPatchOperations(current.content, [{ ...operation, pathRel: targetPath }], operation.type === "append" ? "append" : "replace");
+        if (!next.ok) {
+          throw new Error(`${targetPath}: ${next.message}`);
+        }
+        const result = await window.nolia.file.writeAtomic({
+          workspaceId: workspace.workspaceId,
+          pathRel: targetPath,
+          content: next.content,
+          baseHash: current.sha256,
+          createSnapshot: true
+        });
+        if (result.status !== "saved") {
+          throw new Error(`${targetPath}: ${result.status === "conflict" ? tr("保存冲突") : tr("保存失败")}`);
+        }
+        await syncOpenDocumentAfterWorkspacePatch(targetPath, next.content, result.sha256 ?? current.sha256);
+      }
+      setAiPatchProposal(undefined);
+      await loadWorkspaceData(workspace);
+      const firstPath = firstOpenableWorkspaceOperationPath(proposal.operations, proposal.pathRel);
+      if (firstPath && isMarkdownPath(firstPath)) {
+        await openDocument(firstPath);
+        setRightPanelView("history");
+        setRightPanelCollapsed(false);
+        await refreshHistory(firstPath);
+      }
+      setUserStatusMessage(tr("已应用 AI 工作区操作，可从历史版本恢复。"));
+    } catch (error) {
+      const message = tr("应用 AI 工作区操作失败：{message}", { message: errorMessageFor(error, tr("未知错误")) });
+      setAiMessages((messages) => [...messages, { id: `patch-error:${Date.now()}`, role: "error", text: message }]);
+      throw new Error(message, { cause: error });
+    }
+  }
+
+  async function syncOpenDocumentAfterWorkspacePatch(pathRel: string, content: string, sha256: string) {
+    const existing = openDocsRef.current.find((doc) => doc.pathRel === pathRel);
+    if (!existing) {
+      return;
+    }
+    const parsed = await window.nolia.document.parse({ workspaceId: workspace?.workspaceId ?? EXTERNAL_PARSE_WORKSPACE_ID, pathRel, content, mode: "full" });
+    htmlDraftsRef.current.delete(pathRel);
+    updateOpenDocs((docs) =>
+      docs.map((doc) =>
+        doc.pathRel === pathRel
+          ? {
+              ...doc,
+              sourceText: content,
+              baseHash: sha256,
+              lastSavedHash: sha256,
+              dirty: false,
+              pendingHtml: undefined,
+              parsed,
+              title: parsed.title,
+              lastSavedAt: Date.now()
+            }
+          : doc
+      )
+    );
+  }
+
+  function closeOpenDocumentsUnderPath(pathRel: string) {
+    const normalized = pathRel.replace(/\\/g, "/").replace(/\/+$/, "");
+    updateOpenDocs((docs) => docs.filter((doc) => doc.pathRel !== normalized && !doc.pathRel.startsWith(`${normalized}/`)));
+    if (activePathRel === normalized || activePathRel?.startsWith(`${normalized}/`)) {
+      setActivePathRel(undefined);
+    }
+  }
+
+  async function applyAiPatchContentToDocument(document: OpenDocumentTab, content: string) {
+    const replacedInEditor = await (editorPaneRef.current?.replaceSourceText(content) ?? Promise.resolve(false));
+    htmlDraftsRef.current.delete(document.pathRel);
+    if (!replacedInEditor) {
+      updateOpenDocs((docs) =>
+        docs.map((doc) =>
+          doc.pathRel === document.pathRel
+            ? {
+                ...doc,
+                sourceText: content,
+                dirty: true,
+                pendingHtml: undefined
+              }
+            : doc
+        )
+      );
+    }
+  }
+
+  async function createDocumentFromAiPatch(proposal: AiPatchProposal, content: string) {
+    if (!workspace) {
+      const message = tr("未打开工作区");
+      setAiMessages((messages) => [...messages, { id: `patch-error:${Date.now()}`, role: "error", text: message }]);
+      throw new Error(message);
+    }
+    const pathRel = generatedDocumentPath(proposal, content, collectPathSet(fileTree), tr);
+    setUserStatusMessage(tr("正在创建 AI 文档 {path}", { path: pathRel }));
+    try {
+      await window.nolia.file.create({
+        workspaceId: workspace.workspaceId,
+        pathRel,
+        kind: "file",
+        content
+      });
+      await window.nolia.file.createHistorySnapshot?.({ workspaceId: workspace.workspaceId, pathRel, reason: "manual", content });
+    } catch (error) {
+      const message = tr("创建 AI 文档失败：{message}", { message: errorMessageFor(error, tr("未知错误")) });
+      setAiMessages((messages) => [...messages, { id: `patch-error:${Date.now()}`, role: "error", text: message }]);
+      setUserStatusMessage(message);
+      throw new Error(message, { cause: error });
+    }
+    setUserStatusMessage(tr("已创建 AI 文档 {path}，正在打开...", { path: pathRel }));
+    setAiPatchProposal(undefined);
+    try {
+      await loadWorkspaceData(workspace);
+      setTreeSelection({ pathRel, kind: "file" });
+      await openDocument(pathRel);
+      setRightPanelView("history");
+      setRightPanelCollapsed(false);
+      await refreshHistory(pathRel);
+      setUserStatusMessage(tr("已创建 AI 文档 {path}", { path: pathRel }));
+    } catch (error) {
+      const message = tr("已创建 AI 文档 {path}，但打开失败：{message}", { path: pathRel, message: errorMessageFor(error, tr("未知错误")) });
+      setAiMessages((messages) => [...messages, { id: `patch-open-error:${Date.now()}`, role: "error", text: message }]);
+      setUserStatusMessage(message);
+      throw new Error(message, { cause: error });
+    }
+  }
+
+  async function discardAiPatchProposal() {
+    const proposal = aiPatchProposal;
+    if (!proposal) {
+      return;
+    }
+    if (proposal.taskId && proposal.approvalId) {
+      try {
+        await getAiApi().rejectProposal({ taskId: proposal.taskId, approvalId: proposal.approvalId, reason: tr("用户放弃了本次 AI 建议。") });
+      } catch (error) {
+        const message = tr("放弃 AI 建议失败：{message}", { message: errorMessageFor(error, tr("未知错误")) });
+        setAiMessages((messages) => [...messages, { id: `patch-discard-error:${Date.now()}`, role: "error", text: message }]);
+        throw new Error(message, { cause: error });
+      }
+    }
+    setAiPatchProposal(undefined);
+    setUserStatusMessage(tr("已放弃 AI 建议"));
+  }
+
+  function openSettings(tab: SettingsTabId = "preferences") {
+    setSettingsInitialTab(tab);
+    setSettingsOpen(true);
   }
 
   function setUserStatusMessage(message: string): void {
@@ -1107,7 +2217,56 @@ export function App() {
       return;
     }
     await loadWorkspaceData(workspaceInfo);
+    await refreshOpenWorkspaceDocuments(workspaceInfo);
     setStatusMessage(tr("已刷新文件树"));
+  }
+
+  async function refreshOpenWorkspaceDocuments(workspaceInfo = workspace, pathRel?: string, reason: "external" | "refresh" = "refresh") {
+    if (!workspaceInfo) {
+      return;
+    }
+    const targets = openDocsRef.current.filter((doc) => doc.sourceKind === "workspace" && (!pathRel || doc.pathRel === pathRel));
+    if (!targets.length) {
+      return;
+    }
+    for (const doc of targets) {
+      await reloadOpenDocumentFromDisk(doc.pathRel, workspaceInfo, { reason });
+    }
+  }
+
+  async function reloadOpenDocumentFromDisk(pathRel: string, workspaceInfo = workspace, options: { reason?: "external" | "refresh"; force?: boolean } = {}) {
+    if (!workspaceInfo) {
+      return false;
+    }
+    const active = openDocsRef.current.find((doc) => doc.pathRel === pathRel && doc.sourceKind === "workspace");
+    if (!active) {
+      return false;
+    }
+    if (active.dirty && !options.force) {
+      setStatusMessage(options.reason === "external" ? tr("文件已在磁盘更新，但当前文档有未保存修改") : tr("当前文档有未保存修改，未重新读取"));
+      return false;
+    }
+    const file = await window.nolia.file.read({ workspaceId: workspaceInfo.workspaceId, pathRel });
+    const parsed = await window.nolia.document.parse({ workspaceId: workspaceInfo.workspaceId, pathRel, content: file.content, mode: "full" });
+    clearEditorDraftState(pathRel);
+    updateOpenDocument(pathRel, (doc) => ({
+      ...doc,
+      title: parsed.title,
+      sourceText: file.content,
+      baseHash: file.sha256,
+      lastSavedHash: file.sha256,
+      dirty: false,
+      pendingHtml: undefined,
+      parsed
+    }));
+    setStatusMessage(options.reason === "external" ? tr("已同步外部修改：{path}", { path: pathRel }) : tr("已重新读取 {path}", { path: pathRel }));
+    if (rightPanelView === "history") {
+      await refreshHistory(pathRel, workspaceInfo);
+    }
+    if (sidebarView === "backlinks" || activePathRel === pathRel) {
+      await refreshBacklinks(pathRel, workspaceInfo);
+    }
+    return true;
   }
 
   async function openWorkspacePath(pathRel: string, workspaceInfo = workspace, nodes = fileTree) {
@@ -1228,6 +2387,79 @@ export function App() {
       return;
     }
     setBacklinks(await window.nolia.graph.getBacklinks({ workspaceId: workspaceInfo.workspaceId, pathRel, includeUnlinkedMentions: true }));
+  }
+
+  async function refreshHistory(pathRel = currentDocumentFromRef()?.pathRel, workspaceInfo = workspace) {
+    if (!workspaceInfo || !pathRel || !window.nolia.file.listHistory) {
+      setHistoryEntries([]);
+      return;
+    }
+    setHistoryLoading(true);
+    try {
+      const response = await window.nolia.file.listHistory({ workspaceId: workspaceInfo.workspaceId, pathRel, limit: 80 });
+      setHistoryEntries(response.entries);
+      setHistoryPreview((preview) => preview && response.entries.some((entry) => entry.id === preview.entry.id) ? preview : undefined);
+    } catch (error) {
+      setStatusMessage(tr("读取历史版本失败：{message}", { message: errorMessageFor(error, tr("未知错误")) }));
+    } finally {
+      setHistoryLoading(false);
+    }
+  }
+
+  async function createManualHistorySnapshot() {
+    const doc = currentDocumentFromRef();
+    if (!workspace || !doc || doc.sourceKind === "external" || !window.nolia.file.createHistorySnapshot) {
+      return;
+    }
+    const response = await window.nolia.file.createHistorySnapshot({ workspaceId: workspace.workspaceId, pathRel: doc.pathRel, reason: "manual", content: doc.sourceText });
+    setStatusMessage(response.entry ? tr("已创建历史版本") : tr("创建历史版本失败"));
+    await refreshHistory(doc.pathRel);
+  }
+
+  async function previewHistoryEntry(entry: FileHistoryEntry) {
+    if (!workspace || !window.nolia.file.readHistory) {
+      return;
+    }
+    try {
+      const response = await window.nolia.file.readHistory({ workspaceId: workspace.workspaceId, snapshotId: entry.id });
+      if (response) {
+        setHistoryPreview(response);
+      }
+    } catch (error) {
+      setStatusMessage(tr("读取历史版本失败：{message}", { message: errorMessageFor(error, tr("未知错误")) }));
+    }
+  }
+
+  async function restoreHistoryEntry(entry: FileHistoryEntry) {
+    const doc = currentDocumentFromRef();
+    if (!workspace || !doc || doc.sourceKind === "external" || !window.nolia.file.readHistory) {
+      return;
+    }
+    const response = await window.nolia.file.readHistory({ workspaceId: workspace.workspaceId, snapshotId: entry.id });
+    if (!response) {
+      setStatusMessage(tr("历史版本不存在"));
+      return;
+    }
+    const replacedInEditor = await (editorPaneRef.current?.replaceSourceText(response.content) ?? Promise.resolve(false));
+    htmlDraftsRef.current.delete(doc.pathRel);
+    if (!replacedInEditor) {
+      updateOpenDocs((docs) =>
+        docs.map((item) =>
+          item.pathRel === doc.pathRel
+            ? {
+                ...item,
+                sourceText: response.content,
+                dirty: true,
+                pendingHtml: undefined
+              }
+            : item
+        )
+      );
+    }
+    setHistoryPreview(response);
+    setUserStatusMessage(tr("已恢复历史版本，保存后写入文件。"));
+    queueAutosave(doc.pathRel);
+    await refreshHistory(doc.pathRel);
   }
 
   async function runSearch(query: string) {
@@ -1360,11 +2592,8 @@ export function App() {
   async function openRecentWorkspace(item: RecentWorkspace) {
     setWelcomeErrorMessage(undefined);
     if (!item.exists) {
-      const next =
-        (await window.nolia.workspace.removeRecent?.({ workspaceId: item.workspaceId })) ??
-        recentWorkspaces.filter((workspaceItem) => workspaceItem.workspaceId !== item.workspaceId);
-      setRecentWorkspaces(next);
-      setStatusMessage(tr("已移除不可用工作区 {name}", { name: item.name }));
+      setWelcomeErrorMessage(tr("无法打开「{name}」：{reason}。", { name: item.name, reason: recentWorkspaceUnavailableReason(item, tr) }));
+      setStatusMessage(tr("最近工作区打开失败"));
       return;
     }
     setWelcomeOpeningWorkspaceId(item.workspaceId);
@@ -1382,6 +2611,15 @@ export function App() {
     } finally {
       setWelcomeOpeningWorkspaceId(undefined);
     }
+  }
+
+  async function removeRecentWorkspace(item: RecentWorkspace) {
+    setWelcomeErrorMessage(undefined);
+    const next =
+      (await window.nolia.workspace.removeRecent?.({ workspaceId: item.workspaceId })) ??
+      recentWorkspaces.filter((workspaceItem) => workspaceItem.workspaceId !== item.workspaceId);
+    setRecentWorkspaces(next);
+    setStatusMessage(tr("已删除工作区记录 {name}", { name: item.name }));
   }
 
   async function closeWorkspace() {
@@ -1408,9 +2646,13 @@ export function App() {
   }
 
   function clearWorkspaceState() {
+    workspaceLoadTokenRef.current += 1;
     suspendedShellRef.current = undefined;
     setImmersiveMode(false);
     setWorkspace(undefined);
+    workspaceIdRef.current = undefined;
+    setWorkspaceLoading(false);
+    setWorkspaceLoadError(undefined);
     setFileTree([]);
     setSearchResults([]);
     setFavoriteDocs([]);
@@ -1425,6 +2667,9 @@ export function App() {
     setActiveHtml("");
     setTreeSelection(undefined);
     setBacklinks(emptyBacklinks);
+    setHistoryEntries([]);
+    setHistoryPreview(undefined);
+    setHistoryLoading(false);
     setNoteFilterQuery("");
     setWorkspaceSearchQuery("");
     setCreateMenu(undefined);
@@ -1434,14 +2679,21 @@ export function App() {
       window.clearTimeout(timer);
     }
     autosaveTimers.current.clear();
+    autosaveVersionsRef.current.clear();
   }
 
   async function setWorkspaceState(info: WorkspaceInfo) {
+    workspaceLoadTokenRef.current += 1;
     suspendedShellRef.current = undefined;
     setWelcomeErrorMessage(undefined);
     setWelcomeOpeningWorkspaceId(undefined);
     setImmersiveMode(false);
+    workspaceIdRef.current = info.workspaceId;
     setWorkspace(info);
+    setWorkspaceLoading(false);
+    setWorkspaceLoadError(undefined);
+    setFileTree([]);
+    setSearchResults([]);
     setOpenDocs([]);
     openDocsRef.current = [];
     htmlDraftsRef.current.clear();
@@ -1456,8 +2708,37 @@ export function App() {
     setNoteFilterQuery("");
     setWorkspaceSearchQuery("");
     setBacklinks(emptyBacklinks);
+    setHistoryEntries([]);
+    setHistoryPreview(undefined);
+    setHistoryLoading(false);
+    setAiSemanticStatus(undefined);
     setStatusMessage(tr("工作区已加载"));
-    void loadWorkspaceData(info);
+    await initializeWorkspaceData(info);
+    window.setTimeout(() => void refreshAiSemanticStatus(), 0);
+  }
+
+  async function initializeWorkspaceData(info: WorkspaceInfo) {
+    const token = ++workspaceLoadTokenRef.current;
+    setWorkspaceLoading(true);
+    setWorkspaceLoadError(undefined);
+    setStatusMessage(tr("正在加载工作区..."));
+    try {
+      await loadWorkspaceData(info, { openInitialDocument: true, token });
+      if (workspaceLoadTokenRef.current !== token || workspaceIdRef.current !== info.workspaceId) {
+        return;
+      }
+      setWorkspaceLoading(false);
+      setWorkspaceLoadError(undefined);
+      setStatusMessage(tr("工作区已加载"));
+    } catch (error) {
+      if (workspaceLoadTokenRef.current !== token || workspaceIdRef.current !== info.workspaceId) {
+        return;
+      }
+      const message = tr("工作区加载失败：{message}", { message: errorMessageFor(error, tr("未知错误")) });
+      setWorkspaceLoading(false);
+      setWorkspaceLoadError(message);
+      setStatusMessage(message);
+    }
   }
 
   async function runCommand(command: string) {
@@ -1593,10 +2874,14 @@ export function App() {
     }
     const existing = openDocsRef.current.find((doc) => doc.pathRel === pathRel);
     if (existing) {
+      if (existing.sourceKind === "workspace" && !existing.dirty) {
+        await reloadOpenDocumentFromDisk(pathRel, workspaceInfo, { reason: "refresh" });
+      }
+      const reopened = openDocsRef.current.find((doc) => doc.pathRel === pathRel);
       setActiveResource(undefined);
       setActivePathRel(pathRel);
       setTreeSelection({ pathRel, kind: "file" });
-      rememberViewedDocument(existing.pathRel, existing.title, workspaceInfo.workspaceId);
+      rememberViewedDocument(existing.pathRel, reopened?.title ?? existing.title, workspaceInfo.workspaceId);
       return;
     }
     const active = currentDocumentFromRef();
@@ -1969,6 +3254,13 @@ export function App() {
         setUserStatusMessage(tr("正在编辑 {path}", { path: pathRel }));
       }
       queueAutosave(pathRel);
+    } else {
+      const existing = autosaveTimers.current.get(pathRel);
+      if (existing) {
+        window.clearTimeout(existing);
+        autosaveTimers.current.delete(pathRel);
+      }
+      autosaveVersionsRef.current.set(pathRel, (autosaveVersionsRef.current.get(pathRel) ?? 0) + 1);
     }
   }
 
@@ -1993,6 +3285,12 @@ export function App() {
           }
         : resource
     );
+    const existing = autosaveTimers.current.get(pathRel);
+    if (existing) {
+      window.clearTimeout(existing);
+      autosaveTimers.current.delete(pathRel);
+    }
+    autosaveVersionsRef.current.set(pathRel, (autosaveVersionsRef.current.get(pathRel) ?? 0) + 1);
     rememberEditedResource(pathRel);
     if (workspace) {
       void loadWorkspaceData(workspace);
@@ -2538,11 +3836,19 @@ export function App() {
     if (existing) {
       window.clearTimeout(existing);
     }
+    const version = (autosaveVersionsRef.current.get(pathRel) ?? 0) + 1;
+    autosaveVersionsRef.current.set(pathRel, version);
     autosaveTimers.current.set(
       pathRel,
       window.setTimeout(() => {
         autosaveTimers.current.delete(pathRel);
+        if (autosaveVersionsRef.current.get(pathRel) !== version) {
+          return;
+        }
         if (activeResourceRef.current?.editorId && activeResourceRef.current.pathRel === pathRel) {
+          if (!activeResourceRef.current.dirty) {
+            return;
+          }
           void saveActivePluginEditorResource(pathRel);
           return;
         }
@@ -2552,10 +3858,12 @@ export function App() {
   }
 }
 
-function rightPanelTitle(view: "outline" | "details" | "errors", tr = createTranslator("zh-CN")): string {
+function rightPanelTitle(view: "outline" | "details" | "history" | "errors", tr = createTranslator("zh-CN")): string {
   switch (view) {
     case "details":
       return tr("详情");
+    case "history":
+      return tr("历史版本");
     case "errors":
       return tr("诊断");
     case "outline":
@@ -2584,9 +3892,20 @@ function errorMessageFor(error: unknown, fallback: string): string {
   return error instanceof Error && error.message ? error.message : fallback;
 }
 
+function getAiApi(): NonNullable<typeof window.nolia.ai> {
+  if (!window.nolia.ai) {
+    throw new Error("AI API 不可用");
+  }
+  return window.nolia.ai;
+}
+
 function containsRelatedTarget(event: Pick<ReactDragEvent<HTMLElement>, "currentTarget" | "relatedTarget">): boolean {
   const relatedTarget = event.relatedTarget;
   return relatedTarget instanceof Node && event.currentTarget.contains(relatedTarget);
+}
+
+function isFindKeyboardShortcut(event: KeyboardEvent | ReactKeyboardEvent<HTMLElement>): boolean {
+  return event.key.toLowerCase() === "f" && (event.metaKey || event.ctrlKey) && !event.altKey && !event.shiftKey;
 }
 
 function resourceCategoryFor(pathRel: string): ResourceCategory {
@@ -2659,6 +3978,15 @@ function binaryDataToArrayBuffer(data: ArrayBuffer | ArrayBufferView): ArrayBuff
   const copy = new Uint8Array(source.byteLength);
   copy.set(source);
   return copy.buffer;
+}
+
+function arrayBuffersEqual(left?: ArrayBuffer, right?: ArrayBuffer): boolean {
+  if (!left || !right || left.byteLength !== right.byteLength) {
+    return false;
+  }
+  const leftBytes = new Uint8Array(left);
+  const rightBytes = new Uint8Array(right);
+  return leftBytes.every((value, index) => value === rightBytes[index]);
 }
 
 function resourcePreviewIcon(category: ResourceCategory) {
@@ -3021,6 +4349,123 @@ function formatFileSize(size: number, locale?: ResolvedLocale): string {
   return `${(size / 1024 / 1024).toFixed(1)} MB`;
 }
 
+function formatHistoryTime(value: number, locale: ResolvedLocale): string {
+  return new Intl.DateTimeFormat(locale, {
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit"
+  }).format(value);
+}
+
+function historyReasonLabel(reason: string, tr = createTranslator("zh-CN")): string {
+  switch (reason) {
+    case "autosave":
+      return tr("自动保存");
+    case "manual":
+      return tr("手动版本");
+    case "restore":
+      return tr("恢复前版本");
+    case "conflict":
+      return tr("冲突备份");
+    default:
+      return reason;
+  }
+}
+
+const HISTORY_DIFF_MAX_INPUT_LINES = 180;
+const HISTORY_DIFF_MAX_OUTPUT_LINES = 240;
+
+type HistoryDiffLine = {
+  key: string;
+  type: "same" | "added" | "removed";
+  text: string;
+};
+
+function buildHistoryDiff(historyContent: string, currentContent: string): {
+  lines: HistoryDiffLine[];
+  addedCount: number;
+  removedCount: number;
+  changed: boolean;
+  truncated: boolean;
+} {
+  const historyLines = splitDocumentLines(historyContent);
+  const currentLines = splitDocumentLines(currentContent);
+  const inputTruncated = historyLines.length > HISTORY_DIFF_MAX_INPUT_LINES || currentLines.length > HISTORY_DIFF_MAX_INPUT_LINES;
+  const oldLines = historyLines.slice(0, HISTORY_DIFF_MAX_INPUT_LINES);
+  const newLines = currentLines.slice(0, HISTORY_DIFF_MAX_INPUT_LINES);
+  const table = Array.from({ length: oldLines.length + 1 }, () => Array<number>(newLines.length + 1).fill(0));
+  for (let oldIndex = oldLines.length - 1; oldIndex >= 0; oldIndex -= 1) {
+    for (let newIndex = newLines.length - 1; newIndex >= 0; newIndex -= 1) {
+      table[oldIndex][newIndex] = oldLines[oldIndex] === newLines[newIndex]
+        ? table[oldIndex + 1][newIndex + 1] + 1
+        : Math.max(table[oldIndex + 1][newIndex], table[oldIndex][newIndex + 1]);
+    }
+  }
+
+  const lines: HistoryDiffLine[] = [];
+  let addedCount = 0;
+  let removedCount = 0;
+  let oldIndex = 0;
+  let newIndex = 0;
+  const pushLine = (type: HistoryDiffLine["type"], text: string) => {
+    if (lines.length >= HISTORY_DIFF_MAX_OUTPUT_LINES) {
+      return;
+    }
+    lines.push({ key: `${type}:${oldIndex}:${newIndex}:${lines.length}`, type, text });
+  };
+
+  while (oldIndex < oldLines.length && newIndex < newLines.length) {
+    if (oldLines[oldIndex] === newLines[newIndex]) {
+      pushLine("same", oldLines[oldIndex]);
+      oldIndex += 1;
+      newIndex += 1;
+      continue;
+    }
+    if (table[oldIndex + 1][newIndex] >= table[oldIndex][newIndex + 1]) {
+      pushLine("removed", oldLines[oldIndex]);
+      removedCount += 1;
+      oldIndex += 1;
+      continue;
+    }
+    pushLine("added", newLines[newIndex]);
+    addedCount += 1;
+    newIndex += 1;
+  }
+  while (oldIndex < oldLines.length) {
+    pushLine("removed", oldLines[oldIndex]);
+    removedCount += 1;
+    oldIndex += 1;
+  }
+  while (newIndex < newLines.length) {
+    pushLine("added", newLines[newIndex]);
+    addedCount += 1;
+    newIndex += 1;
+  }
+
+  return {
+    lines,
+    addedCount,
+    removedCount,
+    changed: historyContent !== currentContent,
+    truncated: inputTruncated || lines.length >= HISTORY_DIFF_MAX_OUTPUT_LINES
+  };
+}
+
+function splitDocumentLines(content: string): string[] {
+  return content.length ? content.replace(/\r\n/g, "\n").split("\n") : [];
+}
+
+function historyDiffMarker(type: HistoryDiffLine["type"]): string {
+  if (type === "added") {
+    return "+";
+  }
+  if (type === "removed") {
+    return "-";
+  }
+  return " ";
+}
+
 function editorWidthToCss(width: AppSettings["editorWidth"]): string {
   switch (width) {
     case "narrow":
@@ -3124,7 +4569,29 @@ function statusBarMessage(message: string, tr = createTranslator("zh-CN")): stri
   if (/^已保存\s+/.test(message) || /^Saved\s+/.test(message)) {
     return tr("已保存");
   }
+  if (/^已同步外部修改[：:].+/.test(message) || /^External changes synced:\s+/.test(message)) {
+    return tr("已同步外部修改");
+  }
   return message;
+}
+
+function defaultAppSettings(): AppSettings {
+  return {
+    ...DEFAULT_SETTINGS,
+    ai: normalizeAiSettings(DEFAULT_SETTINGS.ai)
+  };
+}
+
+function aiProviderRequest(provider: AiProviderProfile): AiProviderProfile {
+  return {
+    id: provider.id,
+    name: provider.name,
+    alias: provider.alias,
+    providerId: provider.providerId,
+    model: provider.model,
+    baseUrl: provider.baseUrl,
+    apiMode: provider.apiMode
+  };
 }
 
 function commandLabel(commandId: string, fallback: string, state: { immersiveMode: boolean; toolbarVisible: boolean; lineNumbersVisible: boolean }, tr = createTranslator("zh-CN")): string {
@@ -3574,6 +5041,443 @@ function useFloatingMenuPosition(
   return [menuRef, style];
 }
 
+function appendAiDelta(messages: AiMessageView[], runId: string, text: string): AiMessageView[] {
+  const targetId = `${runId}:assistant`;
+  const existing = messages.find((message) => message.id === targetId);
+  if (!existing) {
+    return [...messages, { id: targetId, role: "assistant", text }];
+  }
+  return messages.map((message) => (message.id === targetId ? { ...message, text: `${message.text}${text}` } : message));
+}
+
+function aiConversationHistory(messages: AiMessageView[], turns: number): Array<{ role: "user" | "assistant"; content: string }> {
+  if (turns <= 0) {
+    return [];
+  }
+  const history = messages
+    .filter((message): message is AiMessageView & { role: "user" | "assistant" } => (message.role === "user" || message.role === "assistant") && Boolean(message.text.trim()))
+    .map((message) => ({ role: message.role, content: message.text.trim() }));
+  let userTurns = 0;
+  let startIndex = history.length;
+  for (let index = history.length - 1; index >= 0; index -= 1) {
+    if (history[index].role === "user") {
+      userTurns += 1;
+      if (userTurns === turns) {
+        startIndex = index;
+        break;
+      }
+    }
+  }
+  if (userTurns < turns) {
+    startIndex = 0;
+  }
+  return history.slice(startIndex);
+}
+
+function dedupeAiSources(sources: AiSourceRef[]): AiSourceRef[] {
+  const seen = new Set<string>();
+  const result: AiSourceRef[] = [];
+  for (const source of sources) {
+    const key = `${source.kind}:${source.pathRel ?? source.title ?? source.snippet ?? ""}`;
+    if (seen.has(key)) {
+      continue;
+    }
+    seen.add(key);
+    result.push(source);
+  }
+  return result;
+}
+
+function applyPatchOperations(sourceText: string, operations: AiPatchOperation[], mode: "replace" | "insert" | "append"): { ok: true; content: string } | { ok: false; message: string } {
+  if (mode === "append") {
+    const appended = operations.map((operation) => ("afterText" in operation ? operation.afterText : "")).filter(Boolean).join("\n\n");
+    return { ok: true, content: `${sourceText}${sourceText.endsWith("\n") ? "" : "\n\n"}${appended}` };
+  }
+  const first = operations[0];
+  if (!first) {
+    return { ok: false, message: "No patch operation." };
+  }
+  if (first.type === "createFile") {
+    return { ok: true, content: first.afterText };
+  }
+  if (first.type === "createDirectory" || first.type === "movePath") {
+    return { ok: false, message: "This workspace operation does not edit text content." };
+  }
+  if (mode === "insert") {
+    const text = "afterText" in first ? first.afterText : "";
+    if (first.type === "insertAt") {
+      return { ok: true, content: `${sourceText.slice(0, first.offset)}${text}${sourceText.slice(first.offset)}` };
+    }
+    if (first.type === "replaceRange") {
+      return { ok: true, content: `${sourceText.slice(0, first.range.to)}\n${text}${sourceText.slice(first.range.to)}` };
+    }
+    return { ok: true, content: `${sourceText}${sourceText.endsWith("\n") ? "" : "\n"}${text}` };
+  }
+  if (first.type === "replaceDocument") {
+    if (sourceText !== first.beforeText) {
+      return { ok: false, message: "The note changed after the suggestion was generated." };
+    }
+    return { ok: true, content: first.afterText };
+  }
+  if (first.type === "replaceRange") {
+    const before = sourceText.slice(first.range.from, first.range.to);
+    if (before !== first.beforeText) {
+      return { ok: false, message: "The selected text changed after the suggestion was generated." };
+    }
+    return { ok: true, content: `${sourceText.slice(0, first.range.from)}${first.afterText}${sourceText.slice(first.range.to)}` };
+  }
+  return { ok: false, message: "This suggestion cannot replace text safely." };
+}
+
+function standalonePatchDocumentContent(proposal: AiPatchProposal): string | undefined {
+  const first = proposal.operations[0];
+  if (!first || !("afterText" in first)) {
+    return undefined;
+  }
+  return first.afterText;
+}
+
+function isWorkspacePatchProposal(proposal: AiPatchProposal): boolean {
+  return proposal.operations.some((operation) => operation.type === "createFile" || operation.type === "createDirectory" || operation.type === "movePath" || Boolean(operationTargetPath(operation, "")));
+}
+
+function operationTargetPath(operation: AiPatchOperation | undefined, fallbackPath: string): string | undefined {
+  if (!operation) {
+    return fallbackPath;
+  }
+  if (operation.type === "movePath") {
+    return operation.targetPathRel;
+  }
+  if ("pathRel" in operation && operation.pathRel) {
+    return operation.pathRel;
+  }
+  return fallbackPath;
+}
+
+function firstOpenableWorkspaceOperationPath(operations: AiPatchOperation[], fallbackPath: string): string | undefined {
+  for (const operation of operations) {
+    const pathRel = operationTargetPath(operation, fallbackPath);
+    if (pathRel && isMarkdownPath(pathRel)) {
+      return pathRel;
+    }
+  }
+  return undefined;
+}
+
+function selectionInstruction(actionId: AiSelectionActionId, tr = createTranslator("zh-CN")): string {
+  switch (actionId) {
+    case "polish":
+      return tr("润色选中文本，保持原意，保留 Markdown 结构，输出可直接替换的文本。");
+    case "summarize":
+      return tr("总结选中文本，保留关键信息，用简洁中文输出。");
+    case "translate":
+      return tr("翻译选中文本。中文翻译为英文，英文翻译为中文，保留 Markdown 结构。");
+    case "todo":
+      return tr("从选中文本中提取可执行事项，输出 Markdown 待办列表。");
+    case "explain":
+      return tr("解释选中文本的含义和关键点。");
+    default:
+      return tr("处理选中文本。");
+  }
+}
+
+function currentNoteSummaryInstruction(tr = createTranslator("zh-CN")): string {
+  return tr("请直接基于当前笔记正文输出一份简洁中文总结，覆盖主要主题、关键结论和可执行事项；不要只说明你将查看文档。");
+}
+
+function documentEditInstruction(request: string, tr = createTranslator("zh-CN")): string {
+  return tr("请基于当前笔记正文完成这个编辑请求：{request}\n\n只输出完整的目标 Markdown 文档内容，不要解释计划，不要说将会生成，也不要包含代码围栏。", { request });
+}
+
+function documentGenerationInstruction(request: string, tr = createTranslator("zh-CN")): string {
+  return tr("请基于当前笔记正文生成一篇新的 Markdown 文档，满足这个请求：{request}\n\n应用会自动创建文件名和路径；不要向用户追问目标路径或文件名。只输出完整的新文档 Markdown 内容，不要解释计划，不要说将会生成，也不要包含代码围栏。", { request });
+}
+
+function workspaceDocumentGenerationInstruction(request: string): string {
+  return `完成这个多步骤请求：${request}
+
+要求：
+1. 先生成用户需要的完整 Markdown 文档内容。
+2. 如果用户要求创建目录、文件夹、保存到目录、保存为文件，必须调用 proposeWorkspacePatch，提出 createDirectory 和 createFile 操作。
+3. createFile.afterText 必须是完整 Markdown 文档正文。
+4. 不要只在聊天里输出目录规划或文档内容；需要让用户看到可确认的工作区操作提案。`;
+}
+
+function workspaceDocumentEditInstruction(request: string): string {
+  const targetPath = requestedMarkdownPath(request);
+  return `完成这个工作区 Markdown 文件修改请求：${request}
+
+要求：
+1. 必须先定位并读取目标 Markdown 文件${targetPath ? ` ${targetPath}` : ""}，确认现有内容和路径。
+2. 必须调用 proposeWorkspacePatch，提出 append 或 replaceDocument 操作；不要只在聊天里说明计划，也不要声称已经写入。
+3. 如果用户说“合并”“追加”“加入”“保存到已有文件”，优先使用 append，把新增内容作为 afterText。
+4. 如果用户明确要求重写、替换全文或覆盖，使用 replaceDocument，并确保 beforeText 与当前文件内容一致。
+5. 如果目标文件不存在，说明无法合并到不存在的文件，并改为提出 createFile 操作，除非用户明确不希望新建。`;
+}
+
+function isDocumentEditRequest(value: string): boolean {
+  const normalized = value.toLowerCase().replace(/\s+/g, "");
+  if (isDocumentGenerationRequest(value)) {
+    return true;
+  }
+  if (isExplicitNonWriteRequest(normalized)) {
+    return false;
+  }
+  if (isPlainChatTransformRequest(normalized)) {
+    return false;
+  }
+  return /(修改|改写|重写|去掉|去除|删除|整理|更新|替换|应用|覆盖|插入|追加|写回|写入当前|保存到当前|更新当前|替换全文|替换选区|提案|patch|proposal)/i.test(normalized);
+}
+
+function isDocumentGenerationRequest(value: string): boolean {
+  const normalized = stripExplicitNonWriteClauses(value.toLowerCase().replace(/\s+/g, ""));
+  const documentLike = "(文档|笔记|markdown|md|总结|报告|文章|材料|方案|summary|report|article|note)";
+  return (
+    new RegExp(`(新建|创建|生成|重新生成|另存|保存|写入|输出|整理).*(新|新的|单独|另一个|一份|一个)?${documentLike}`, "i").test(normalized) ||
+    new RegExp(`${documentLike}.*(新建|创建|生成|保存|另存|写入|输出|整理)`, "i").test(normalized) ||
+    new RegExp(`(写入|保存|输出).*(到|至|为)?(新|新的|单独|另一个)?${documentLike}`, "i").test(normalized) ||
+    new RegExp(`(总结|summary|报告|report).*${documentLike}.*(新建|创建|生成|保存|另存|写入|输出)`, "i").test(normalized)
+  );
+}
+
+function isWorkspaceOperationRequest(value: string): boolean {
+  const normalized = stripExplicitNonWriteClauses(value.toLowerCase().replace(/\s+/g, ""));
+  return /(\u5de5\u4f5c\u533a|\u591a\u6587\u4ef6|\u6574\u4e2a\u4ed3\u5e93|\u9879\u76ee|workspace|multi-file|multiple files|project|repository|repo)/i.test(normalized) ||
+    /(创建|新建|生成|保存|写入|放到|存到|另存).{0,24}(目录|文件夹|文件|路径|folder|directory|file)/i.test(normalized) ||
+    /(目录|文件夹|文件|路径|folder|directory|file).{0,24}(创建|新建|生成|保存|写入|放到|存到|另存)/i.test(normalized) ||
+    (Boolean(requestedMarkdownPath(value)) && /(合并|追加|加入|插入|写入|保存|放到|存到|更新|修改|替换|覆盖|merge|append|insert|write|save|update|replace)/i.test(normalized));
+}
+
+function isWorkspaceOperationOnlyRequest(value: string): boolean {
+  const normalized = stripExplicitNonWriteClauses(value.toLowerCase().replace(/\s+/g, ""));
+  return /^(请|帮我|帮忙|麻烦)?(生成|创建|提出|给出|制作)?(复杂)?(\d+个|[一二三四五六七八九十百]+个)?(工作区操作提案|工作区提案|workspaceoperationproposal|workspaceproposal)$/i.test(normalized);
+}
+
+function isExplicitNonWriteRequest(normalized: string): boolean {
+  const noWritePattern = /(不要|别|请勿|无需|不用|不需要|禁止|只|仅).{0,12}(修改|改写|重写|删除|更新|替换|应用|覆盖|插入|追加|写入|保存|生成|提案|patch|proposal|文件|文档|笔记)/i;
+  if (!noWritePattern.test(normalized)) {
+    return false;
+  }
+  const explicitProposalPattern = /(提案|patch|proposal|写入当前|保存到当前|更新当前|替换全文|替换选区)/i;
+  return !splitInstructionClauses(normalized).some((part) => explicitProposalPattern.test(part) && !noWritePattern.test(part));
+}
+
+function stripExplicitNonWriteClauses(normalized: string): string {
+  return splitInstructionClauses(normalized)
+    .filter((part) => !isExplicitNonWriteRequest(part))
+    .join("");
+}
+
+function splitInstructionClauses(value: string): string[] {
+  return value.split(/[，,。.;；!?！？\n\r]+/).filter(Boolean);
+}
+
+function isWritePreviousAiResponseToNewDocumentRequest(value: string): boolean {
+  const normalized = value.toLowerCase().replace(/\s+/g, "");
+  const mentionsPreviousResponse = /(刚才|刚刚|上一条|上条|上一次|上次|上面|前面|前一条|最近).{0,12}(内容|回复|回答|结果|文档|文本|文章)|ai(回复|回答|结果)|last(response|answer|message)/i.test(normalized);
+  const asksToSave = /(写入|保存|另存|输出|放到|存到|新建|创建|生成|整理成)/i.test(normalized);
+  const targetIsDocumentLike = /(目录|文件|文档|笔记|markdown|md|note)/i.test(normalized);
+  if (mentionsPreviousResponse && asksToSave && targetIsDocumentLike) {
+    return true;
+  }
+  return (
+    /(写入|保存|输出|放到|存到).*(新|新的|单独|另一个)(文档|笔记|markdown|md|note)/i.test(normalized) ||
+    /(新|新的|单独|另一个)(文档|笔记|markdown|md|note).*(写入|保存|输出|放到|存到)/i.test(normalized)
+  );
+}
+
+function isWritePreviousAiResponseToExistingDocumentRequest(value: string): boolean {
+  const normalized = value.toLowerCase().replace(/\s+/g, "");
+  const mentionsPreviousResponse = /(刚才|刚刚|上一条|上条|上一次|上次|上面|前面|前一条|最近|这个|这些|此).{0,12}(内容|回复|回答|结果|文档|文本|文章)|ai(回复|回答|结果)|last(response|answer|message)/i.test(normalized);
+  const asksToMerge = /(合并|追加|加入|插入|写入|保存|放到|存到|merge|append|insert|write|save)/i.test(normalized);
+  return Boolean(requestedMarkdownPath(value)) && mentionsPreviousResponse && asksToMerge && !/(新建|创建|另存|新的|新文档|新笔记|newdocument|newnote)/i.test(normalized);
+}
+
+function isWorkspaceMarkdownFileWriteRequest(value: string): boolean {
+  const normalized = stripExplicitNonWriteClauses(value.toLowerCase().replace(/\s+/g, ""));
+  if (!requestedMarkdownPath(value) || isExplicitNonWriteRequest(normalized)) {
+    return false;
+  }
+  if (/(删除|移除|重命名|改名|移动|搬到|迁移|delete|remove|rename|move)/i.test(normalized)) {
+    return false;
+  }
+  return /(合并|追加|加入|插入|写入|保存|放到|存到|补充|更新|修改|替换|覆盖|改写|重写|merge|append|insert|write|save|update|replace|rewrite)/i.test(normalized);
+}
+
+function isPlainChatTransformRequest(normalized: string): boolean {
+  return (
+    /^(翻译|译成|翻成|translate|解释|说明|总结|概括|润色|校对|分析)/i.test(normalized) &&
+    !/(写入|保存|输出|新建|创建|生成|另存|替换|更新|修改|改写|重写|插入|追加|文档|笔记|markdown|md|note)/i.test(normalized)
+  );
+}
+
+function isCurrentNoteBodyRequest(value: string): boolean {
+  const normalized = value.toLowerCase().replace(/\s+/g, "");
+  return (
+    /(当前|这篇|本文|这个|此)(文档|笔记|markdown|md|note)/i.test(normalized) ||
+    /(文档|笔记|markdown|md|note).*(内容|正文|全文)/i.test(normalized)
+  );
+}
+
+function isRegenerateLastAiRequest(value: string): boolean {
+  const normalized = value.toLowerCase().replace(/\s+/g, "");
+  return /^(重新生成|再生成|再生成一次|重试|retry|regenerate)$/.test(normalized);
+}
+
+function lastAssistantDocumentContent(messages: AiMessageView[]): string | undefined {
+  for (let index = messages.length - 1; index >= 0; index -= 1) {
+    const message = messages[index];
+    if (message.role !== "assistant") {
+      continue;
+    }
+    const text = message.text.trim();
+    if (text) {
+      return text;
+    }
+  }
+  return undefined;
+}
+
+function requestedMarkdownPath(value: string): string | undefined {
+  const matches = [...value.matchAll(/[^\s`'"“”‘’「」『』《》,，。;；!！?？:：()（）<>]+\.m(?:arkdown|down|d)\b/giu)];
+  for (const match of matches) {
+    const raw = match[0] ?? "";
+    const cleaned = raw
+      .replace(/^[\s`'"“”‘’「」『』《》]+|[\s`'"“”‘’「」『』《》]+$/g, "")
+      .replace(/^.*?(?:到|至|进|入|为|成|在|to|into|as|file|path|文件|路径)(?=[^/\\]*\.m(?:arkdown|down|d)\b)/i, "");
+    const normalized = normalizeRequestedWorkspacePath(cleaned);
+    if (normalized && isMarkdownPath(normalized)) {
+      return normalized;
+    }
+  }
+  return undefined;
+}
+
+function resolveRequestedExistingMarkdownPath(request: string, nodes: FileTreeNode[]): string | undefined {
+  const requested = requestedMarkdownPath(request);
+  if (!requested) {
+    return undefined;
+  }
+  const requestedKey = requested.toLowerCase();
+  const exact = findFileTreeNode(nodes, requested);
+  if (exact?.kind === "markdown") {
+    return exact.pathRel;
+  }
+  const notes = collectMarkdownNotes(nodes);
+  const exactMatch = notes.find((item) => item.pathRel.toLowerCase() === requestedKey);
+  if (exactMatch) {
+    return exactMatch.pathRel;
+  }
+  const requestedName = fileNameFor(requested).toLowerCase();
+  const nameMatches = notes.filter((item) => item.name.toLowerCase() === requestedName || fileNameFor(item.pathRel).toLowerCase() === requestedName);
+  return nameMatches.length === 1 ? nameMatches[0].pathRel : undefined;
+}
+
+function normalizeRequestedWorkspacePath(value: string): string | undefined {
+  const trimmed = value.trim().replace(/\\/g, "/").replace(/^\.\/+/, "");
+  if (!trimmed) {
+    return undefined;
+  }
+  const parts: string[] = [];
+  for (const part of trimmed.split("/")) {
+    if (!part || part === ".") {
+      continue;
+    }
+    if (part === "..") {
+      if (!parts.length) {
+        return undefined;
+      }
+      parts.pop();
+      continue;
+    }
+    parts.push(part);
+  }
+  return parts.join("/");
+}
+
+function uniqueAiDirectoryPath(request: string, content: string, existingPaths: Set<string>, sourcePathRel?: string): string {
+  const requestedName = requestedDirectoryName(request);
+  const headingName = content.match(/^#\s+(.+)$/m)?.[1]?.trim();
+  const sourceName = sourcePathRel ? fileNameFor(sourcePathRel).replace(/\.md(?:own|arkdown)?$/i, "") : "";
+  const stem = sanitizeItemName(requestedName || headingName || sourceName || "AI 生成内容").replace(/\.md(?:own|arkdown)?$/i, "").slice(0, 72) || "AI-生成内容";
+  let candidate = stem;
+  let index = 2;
+  while (existingPaths.has(candidate)) {
+    candidate = `${stem} ${index}`;
+    index += 1;
+  }
+  return candidate;
+}
+
+function requestedDirectoryName(request: string): string | undefined {
+  const normalized = request.replace(/[“”"']/g, "").trim();
+  const quoted = request.match(/[「『《](.+?)[」』》]/)?.[1]?.trim();
+  if (quoted) {
+    return quoted;
+  }
+  const patterns = [
+    /(?:目录|文件夹)(?:叫|名为|命名为|为)([^，,。.;；!?！？\n\r]+)/,
+    /(?:创建|新建|生成)(?:一个|1个)?([^，,。.;；!?！？\n\r]{1,40}?)(?:目录|文件夹)/,
+    /(?:保存|放到|存到|写入)([^，,。.;；!?！？\n\r]{1,40}?)(?:目录|文件夹)/
+  ];
+  for (const pattern of patterns) {
+    const value = normalized.match(pattern)?.[1]?.trim();
+    if (value) {
+      return value.replace(/^(叫|名为|命名为|为|到|进|进去|一个|1个)/, "").trim();
+    }
+  }
+  return undefined;
+}
+
+function WorkspaceLoadingOverlay({ loading, error, onRetry }: WorkspaceLoadingOverlayProps) {
+  const { tr } = useRendererI18n();
+  return (
+    <div className="workspace-loading-overlay" role={error ? "alert" : "status"} aria-live="polite" aria-busy={loading}>
+      <div className={`workspace-loading-panel${error ? " is-error" : ""}`}>
+        {loading ? <RefreshCw className="workspace-loading-spinner" size={22} aria-hidden="true" /> : null}
+        <strong className="workspace-loading-title">{error ? tr("工作区加载失败") : tr("正在加载工作区...")}</strong>
+        <p className="workspace-loading-detail">{error ?? tr("正在读取文件树和最近文档。")}</p>
+        {error ? (
+          <button type="button" className="secondary-button" onClick={onRetry}>
+            <RefreshCw size={16} aria-hidden="true" />
+            {tr("重试")}
+          </button>
+        ) : null}
+      </div>
+    </div>
+  );
+}
+
+function isWritePreviousAiResponseToNewDirectoryRequest(value: string): boolean {
+  const normalized = value.toLowerCase().replace(/\s+/g, "");
+  return isWritePreviousAiResponseToNewDocumentRequest(value) && /(目录|文件夹|folder|directory)/i.test(normalized);
+}
+
+function generatedDocumentPath(proposal: AiPatchProposal, content: string, existingPaths: Set<string>, tr = createTranslator("zh-CN")): string {
+  const title = content.match(/^#\s+(.+)$/m)?.[1]?.trim() || `${fileNameFor(proposal.pathRel).replace(/\.md(?:own|arkdown)?$/i, "")}-${tr("AI 生成")}`;
+  const safeStem = sanitizeItemName(title).replace(/\/+/g, "-").replace(/\.md(?:own|arkdown)?$/i, "").slice(0, 72) || "ai-document";
+  const parent = pathParent(proposal.pathRel);
+  let candidate = joinPath(parent, `${safeStem}.md`);
+  let index = 2;
+  while (existingPaths.has(candidate)) {
+    candidate = joinPath(parent, `${safeStem} ${index}.md`);
+    index += 1;
+  }
+  return candidate;
+}
+
+function generatedDocumentFilePathInDirectory(directoryPath: string, content: string, existingPaths: Set<string>, tr = createTranslator("zh-CN")): string {
+  const title = content.match(/^#\s+(.+)$/m)?.[1]?.trim() || tr("AI 生成");
+  const safeStem = sanitizeItemName(title).replace(/\/+/g, "-").replace(/\.md(?:own|arkdown)?$/i, "").slice(0, 72) || "ai-document";
+  let candidate = joinPath(directoryPath, `${safeStem}.md`);
+  let index = 2;
+  while (existingPaths.has(candidate)) {
+    candidate = joinPath(directoryPath, `${safeStem} ${index}.md`);
+    index += 1;
+  }
+  return candidate;
+}
+
 function floatingMenuStyle(x: number, y: number, size: { width: number; height: number }): CSSProperties {
   if (typeof window === "undefined") {
     return { left: x, top: y };
@@ -3591,14 +5495,20 @@ function AppNav({
   panels,
   onChange,
   onOpenOutline,
+  onOpenCommandPalette,
+  onToggleAi,
   onToggleSettings,
+  aiOpen,
   settingsOpen
 }: {
   sidebarView: SidebarView;
   panels: SidebarPanelContribution[];
   onChange: (view: SidebarView) => void;
   onOpenOutline: () => void;
+  onOpenCommandPalette: () => void;
+  onToggleAi: () => void;
   onToggleSettings: () => void;
+  aiOpen: boolean;
   settingsOpen: boolean;
 }) {
   const { tr } = useRendererI18n();
@@ -3620,6 +5530,7 @@ function AppNav({
           >
             {sidebarPanelIcon(item)}
             <span>{item.title}</span>
+            {sidebarView === item.id ? <Dot className="nav-active-dot" size={18} aria-hidden="true" /> : null}
           </button>
         ))}
         <button type="button" className="nav-item" title={tr("目录")} aria-label={tr("目录")} onClick={onOpenOutline}>
@@ -3628,6 +5539,12 @@ function AppNav({
         </button>
       </div>
       <div className="app-nav-bottom">
+        <button type="button" className="nav-icon-button" title={tr("命令面板")} aria-label={tr("命令面板")} onClick={onOpenCommandPalette}>
+          <Menu size={18} />
+        </button>
+        <button type="button" className={`nav-icon-button${aiOpen ? " is-active" : ""}`} title={tr("Nolia AI")} aria-label={tr("Nolia AI")} onClick={onToggleAi}>
+          <Sparkles size={18} />
+        </button>
         <button type="button" className={`nav-icon-button${settingsOpen ? " is-active" : ""}`} title={tr("设置")} aria-label={tr("设置")} onClick={onToggleSettings}>
           <Settings2 size={18} />
         </button>
@@ -3639,32 +5556,45 @@ function AppNav({
 function EditorTopBar({
   document,
   resource,
-  workspaceName,
   mode,
   leftPanelCollapsed,
   canToggleLeft,
   isImmersive,
   isFavorite,
+  showShellActions,
+  aiOpen,
   onToggleLeft,
+  onOpenCommandPalette,
+  onToggleAi,
+  onToggleSettings,
   onOpenOutline,
+  onOpenHistory,
   onModeChange,
-  onToggleFavorite
+  onToggleFavorite,
+  onOpenFindReplace,
+  onRefresh
 }: {
   document?: OpenDocumentTab;
   resource?: ActiveResource;
-  workspaceName: string;
   mode: OpenDocumentTab["mode"];
   leftPanelCollapsed: boolean;
   canToggleLeft: boolean;
   isImmersive: boolean;
   isFavorite: boolean;
+  showShellActions: boolean;
+  aiOpen: boolean;
   onToggleLeft: () => void;
+  onOpenCommandPalette: () => void;
+  onToggleAi: () => void;
+  onToggleSettings: () => void;
   onOpenOutline: () => void;
+  onOpenHistory: () => void;
   onModeChange: (mode: OpenDocumentTab["mode"]) => void;
   onToggleFavorite: () => void;
+  onOpenFindReplace: () => void;
+  onRefresh: () => void;
 }) {
   const { tr } = useRendererI18n();
-  const activePath = document?.pathRel ?? resource?.pathRel;
   if (isImmersive && document) {
     const fileName = fileNameFor(document.pathRel);
     return (
@@ -3683,19 +5613,21 @@ function EditorTopBar({
             {leftPanelCollapsed ? <PanelLeftOpen size={15} /> : <PanelLeftClose size={15} />}
           </button>
         ) : null}
-        <div className="breadcrumb" aria-label={tr("路径")}>
-          <span>{workspaceName}</span>
-          <ChevronRight size={14} />
-          <span>{activePath ? parentPathFor(activePath, tr) : tr("未打开笔记")}</span>
-          {activePath ? (
-            <>
-              <ChevronRight size={14} />
-              <strong>{fileNameFor(activePath)}</strong>
-            </>
-          ) : null}
-        </div>
       </div>
       <div className="editor-topbar-right">
+        {showShellActions ? (
+          <div className="editor-shell-actions" aria-label="Nolia">
+            <button type="button" className="icon-button compact" title={tr("命令面板")} aria-label={tr("命令面板")} onClick={onOpenCommandPalette}>
+              <Menu size={15} />
+            </button>
+            <button type="button" className={`icon-button compact${aiOpen ? " is-active" : ""}`} title={tr("Nolia AI")} aria-label={tr("Nolia AI")} onClick={onToggleAi}>
+              <Sparkles size={15} />
+            </button>
+            <button type="button" className="icon-button compact" title={tr("设置")} aria-label={tr("设置")} onClick={onToggleSettings}>
+              <Settings2 size={15} />
+            </button>
+          </div>
+        ) : null}
         {document ? (
           <>
             {document.sourceKind !== "external" ? (
@@ -3709,11 +5641,25 @@ function EditorTopBar({
               <Star size={15} fill={isFavorite ? "currentColor" : "none"} />
             </button>
             ) : null}
+            <button type="button" className="icon-button compact" title={tr("查找和替换")} aria-label={tr("查找和替换")} onClick={onOpenFindReplace}>
+              <Search size={15} />
+            </button>
+            {document.sourceKind !== "external" ? (
+              <button type="button" className="icon-button compact" title={tr("重新读取")} aria-label={tr("重新读取")} onClick={onRefresh}>
+                <RefreshCw size={15} />
+              </button>
+            ) : null}
             <div className="editor-topbar-outline-slot">
               <button type="button" className="outline-toggle-button" title={tr("目录")} aria-label={tr("目录")} onClick={onOpenOutline}>
                 <List size={15} />
                 <span>{tr("目录")}</span>
               </button>
+              {document.sourceKind !== "external" ? (
+                <button type="button" className="outline-toggle-button" title={tr("历史版本")} aria-label={tr("历史版本")} onClick={onOpenHistory}>
+                  <Clock3 size={15} />
+                  <span>{tr("历史")}</span>
+                </button>
+              ) : null}
             </div>
             <div className="segmented-control" aria-label={tr("编辑模式")}>
               {(["wysiwyg", "source", "split"] as const).map((item) => (
@@ -3740,9 +5686,24 @@ type EditorScrollSnapshot = {
 type EditorPaneHandle = {
   undoEdit: () => boolean;
   redoEdit: () => boolean;
+  openFindReplace: () => void;
+  replaceSourceText: (content: string) => Promise<boolean>;
   captureScrollForModeSwitch: () => void;
   jumpToHeading: (line: number, headingIndex: number) => boolean;
+  getAiSnapshot: () => EditorAiSnapshot | undefined;
 };
+
+type EditorAiSnapshot = {
+  selectionText: string;
+  selectionRange?: { from: number; to: number };
+  source: "source" | "wysiwyg";
+  cursorOffset?: number;
+  line?: number;
+  column?: number;
+  canReplaceSelection: boolean;
+};
+
+type SourceEditorViewRef = RefObject<Pick<SourceEditorHandle, "view"> | null>;
 
 const EditorPane = forwardRef<EditorPaneHandle, {
   document?: OpenDocumentTab;
@@ -3798,14 +5759,21 @@ const EditorPane = forwardRef<EditorPaneHandle, {
 ) {
   const { tr } = useRendererI18n();
   const editorPaneRootRef = useRef<HTMLDivElement>(null);
-  const sourceEditorRef = useRef<ReactCodeMirrorRef>(null);
+  const sourceEditorRef = useRef<SourceEditorHandle>(null);
   const wysiwygEditorRef = useRef<WysiwygEditorHandle>(null);
   const textResourceEditorRef = useRef<TextResourceEditorHandle>(null);
   const splitPreviewRef = useRef<HTMLDivElement>(null);
   const splitScrollSyncLock = useRef<"source" | "preview" | undefined>(undefined);
   const pendingScrollRestoreRef = useRef<EditorScrollSnapshot | undefined>(undefined);
+  const findQueryInputRef = useRef<HTMLInputElement>(null);
   const [splitLeftPercent, setSplitLeftPercent] = useState(DEFAULT_SPLIT_LEFT_PERCENT);
   const [sourceTableDialog, setSourceTableDialog] = useState<TableDialogState | undefined>();
+  const [findReplaceOpen, setFindReplaceOpen] = useState(false);
+  const [findQuery, setFindQuery] = useState("");
+  const [replaceText, setReplaceText] = useState("");
+  const [findCaseSensitive, setFindCaseSensitive] = useState(false);
+  const [findResult, setFindResult] = useState<FindReplaceResult>({ total: 0, currentIndex: -1 });
+  const [findTargetReady, setFindTargetReady] = useState(false);
   const sourceToolsActive = document?.mode === "source" || document?.mode === "split";
   const sourceEditorKey = document ? `${document.sourceKind ?? "workspace"}:${document.filePath ?? document.pathRel}` : "empty";
   const insertSourceSnippet = (snippet: MarkdownSnippet) => insertSnippetIntoSourceEditor(sourceEditorRef, snippet);
@@ -3879,9 +5847,104 @@ const EditorPane = forwardRef<EditorPaneHandle, {
     }
     return false;
   };
+  const findOptions = (backwards = false): FindReplaceOptions => ({ caseSensitive: findCaseSensitive, backwards });
+  const activeFindTarget = () => {
+    if (resource && (resource.editorId === "json.editor.fileEditor" || resource.editorId === "text.editor.fileEditor")) {
+      return textResourceEditorRef.current;
+    }
+    if (!document) {
+      return undefined;
+    }
+    if (document.mode === "wysiwyg") {
+      return wysiwygEditorRef.current;
+    }
+    if (document.mode === "source" || document.mode === "split") {
+      return sourceEditorRef.current;
+    }
+    return undefined;
+  };
+  useEffect(() => {
+    let cancelled = false;
+    let attempts = 0;
+    const update = () => {
+      if (cancelled) {
+        return;
+      }
+      const ready = Boolean(activeFindTarget());
+      setFindTargetReady(ready);
+      if (!ready && attempts < 60) {
+        attempts += 1;
+        window.requestAnimationFrame(update);
+      }
+    };
+    setFindTargetReady(false);
+    update();
+    return () => {
+      cancelled = true;
+    };
+  }, [document?.mode, document?.pathRel, resource?.pathRel, resource?.editorId]);
+  const focusFindQuery = () => {
+    window.requestAnimationFrame(() => {
+      findQueryInputRef.current?.focus();
+      findQueryInputRef.current?.select();
+    });
+  };
+  const openFindReplace = () => {
+    setFindReplaceOpen(true);
+    focusFindQuery();
+  };
+  const closeFindReplace = () => {
+    setFindReplaceOpen(false);
+    setFindResult({ total: 0, currentIndex: -1 });
+  };
+  const runFind = (query = findQuery, backwards = false) => {
+    const result = activeFindTarget()?.findText(query, findOptions(backwards)) ?? { total: 0, currentIndex: -1 };
+    setFindResult(result);
+    return result;
+  };
+  const handleFindShortcut = (event: ReactKeyboardEvent<HTMLDivElement>) => {
+    if (!isFindKeyboardShortcut(event)) {
+      return;
+    }
+    event.preventDefault();
+    event.stopPropagation();
+    openFindReplace();
+  };
+  const replaceCurrentMatch = () => {
+    const result = activeFindTarget()?.replaceCurrent(findQuery, replaceText, findOptions()) ?? { total: 0, currentIndex: -1, replaced: 0 };
+    setFindResult(result);
+  };
+  const replaceAllMatches = () => {
+    const result = activeFindTarget()?.replaceAll(findQuery, replaceText, findOptions()) ?? { total: 0, currentIndex: -1, replaced: 0 };
+    setFindResult(result);
+  };
+  useEffect(() => {
+    if (!findReplaceOpen) {
+      return;
+    }
+    focusFindQuery();
+  }, [findReplaceOpen, document?.pathRel, document?.mode, resource?.pathRel, resource?.editorId]);
+
+  useEffect(() => {
+    if (!findReplaceOpen) {
+      return;
+    }
+    setFindResult({ total: 0, currentIndex: -1 });
+  }, [findReplaceOpen, document?.pathRel, document?.mode, resource?.pathRel, resource?.editorId, findQuery, findCaseSensitive]);
+
   useImperativeHandle(ref, () => ({
     undoEdit: () => runHistoryCommand("undo"),
     redoEdit: () => runHistoryCommand("redo"),
+    openFindReplace,
+    replaceSourceText: async (content: string) => {
+      if (!document) {
+        return false;
+      }
+      if (document.mode === "wysiwyg") {
+        return wysiwygEditorRef.current?.replaceMarkdownDocument(content) ?? false;
+      }
+      return sourceEditorRef.current?.replaceDocument(content) ?? false;
+    },
     captureScrollForModeSwitch: () => {
       if (!document) {
         return;
@@ -3902,8 +5965,32 @@ const EditorPane = forwardRef<EditorPaneHandle, {
         return focusSourceEditorLine(sourceEditorRef, line);
       }
       return false;
+    },
+    getAiSnapshot: () => {
+      if (!document) {
+        return undefined;
+      }
+      if (document.mode === "source" || document.mode === "split") {
+        const snapshot = sourceEditorRef.current?.getAiSnapshot();
+        return snapshot
+          ? {
+              selectionText: snapshot.selectionText,
+              selectionRange: snapshot.selectionRange,
+              source: "source",
+              cursorOffset: snapshot.cursorOffset,
+              line: snapshot.line,
+              column: snapshot.column,
+              canReplaceSelection: Boolean(snapshot.selectionRange)
+            }
+          : undefined;
+      }
+      if (document.mode === "wysiwyg") {
+        const snapshot = wysiwygEditorRef.current?.getAiSnapshot();
+        return snapshot ? { selectionText: snapshot.selectionText, source: "wysiwyg", canReplaceSelection: false } : undefined;
+      }
+      return undefined;
     }
-  }), [document?.mode, document?.pathRel, resource?.pathRel]);
+  }), [document?.mode, document?.pathRel, resource?.pathRel, findCaseSensitive, findQuery, replaceText]);
 
   useLayoutEffect(() => {
     if (!document) {
@@ -3925,7 +6012,14 @@ const EditorPane = forwardRef<EditorPaneHandle, {
       const scrollers = editorScrollElementsForMode(document.mode, editorPaneRootRef.current, sourceEditorRef.current?.view?.scrollDOM, splitPreviewRef.current);
       if (!scrollers.length) {
         attempts += 1;
-        if (attempts < 10) {
+        if (attempts < 60) {
+          frame = window.requestAnimationFrame(restore);
+        }
+        return;
+      }
+      if (scrollers.some((scroller) => scroller.scrollHeight <= scroller.clientHeight)) {
+        attempts += 1;
+        if (attempts < 60) {
           frame = window.requestAnimationFrame(restore);
         }
         return;
@@ -3934,7 +6028,7 @@ const EditorPane = forwardRef<EditorPaneHandle, {
         restoreEditorScroll(scroller, snapshot);
       }
       attempts += 1;
-      if (attempts < 5) {
+      if (attempts < 8) {
         frame = window.requestAnimationFrame(restore);
         return;
       }
@@ -4124,6 +6218,72 @@ const EditorPane = forwardRef<EditorPaneHandle, {
     onSourceChange(nextSource);
   };
 
+  const findMatchLabel = findQuery
+    ? findResult.total > 0
+      ? tr("{current}/{total}", { current: String(findResult.currentIndex + 1), total: String(findResult.total) })
+      : tr("无匹配")
+    : tr("输入关键字");
+  const findReplaceBar = findReplaceOpen ? (
+    <div className="editor-find-replace" role="search" aria-label={tr("查找和替换")}>
+      <label className="editor-find-input">
+        <Search size={14} />
+        <input
+          ref={findQueryInputRef}
+          className="editor-find-query"
+          value={findQuery}
+          aria-label={tr("查找")}
+          placeholder={tr("查找")}
+          onChange={(event) => setFindQuery(event.target.value)}
+          onKeyDown={(event) => {
+            if (event.key === "Enter") {
+              event.preventDefault();
+              runFind(findQuery, event.shiftKey);
+            }
+            if (event.key === "Escape") {
+              event.preventDefault();
+              closeFindReplace();
+            }
+          }}
+        />
+      </label>
+      <label className="editor-find-input">
+        <input
+          className="editor-replace-input"
+          value={replaceText}
+          aria-label={tr("替换为")}
+          placeholder={tr("替换为")}
+          onChange={(event) => setReplaceText(event.target.value)}
+          onKeyDown={(event) => {
+            if (event.key === "Enter") {
+              event.preventDefault();
+              replaceCurrentMatch();
+            }
+            if (event.key === "Escape") {
+              event.preventDefault();
+              closeFindReplace();
+            }
+          }}
+        />
+      </label>
+      <span className="editor-find-count" aria-live="polite">{findMatchLabel}</span>
+      <button type="button" className="toolbar-icon-button" title={tr("上一个")} aria-label={tr("上一个")} disabled={!findQuery || !findTargetReady} onClick={() => runFind(findQuery, true)}>
+        <ChevronDown size={15} className="icon-rotate-180" />
+      </button>
+      <button type="button" className="toolbar-icon-button" title={tr("下一个")} aria-label={tr("下一个")} disabled={!findQuery || !findTargetReady} onClick={() => runFind(findQuery)}>
+        <ChevronDown size={15} />
+      </button>
+      <button type="button" className="secondary-button editor-find-action" disabled={!findQuery || !findTargetReady} onClick={replaceCurrentMatch}>{tr("替换")}</button>
+      <button type="button" className="secondary-button editor-find-action" disabled={!findQuery || !findTargetReady} onClick={replaceAllMatches}>{tr("全部替换")}</button>
+      <label className="editor-find-toggle" title={tr("区分大小写")}>
+        <input type="checkbox" checked={findCaseSensitive} onChange={(event) => setFindCaseSensitive(event.target.checked)} />
+        <span>Aa</span>
+      </label>
+      <button type="button" className="toolbar-icon-button" title={tr("关闭")} aria-label={tr("关闭")} onClick={closeFindReplace}>
+        <X size={15} />
+      </button>
+    </div>
+  ) : null;
+
   if (resource) {
     const pluginEditor = resource.editorId ? pluginFileEditors.get(resource.editorId) : undefined;
     if (pluginEditor) {
@@ -4147,28 +6307,36 @@ const EditorPane = forwardRef<EditorPaneHandle, {
     }
     if (resource.editorId === "json.editor.fileEditor") {
       return (
-        <BuiltInJsonEditor
-          ref={textResourceEditorRef}
-          resource={resource}
-          workspaceId={workspaceId}
-          onDirtyChange={onPluginEditorDirtyChange}
-          onSaved={onPluginEditorSaved}
-          onStatus={onPluginEditorStatus}
-          onRegisterSaveHandler={onRegisterPluginEditorSaveHandler}
-        />
+        <div ref={editorPaneRootRef} className={`editor-pane mode-resource${findReplaceOpen ? " has-find-replace" : ""}`} onKeyDownCapture={handleFindShortcut}>
+          {findReplaceBar}
+          <BuiltInJsonEditor
+            ref={textResourceEditorRef}
+            resource={resource}
+            workspaceId={workspaceId}
+            onDirtyChange={onPluginEditorDirtyChange}
+            onSaved={onPluginEditorSaved}
+            onStatus={onPluginEditorStatus}
+            onOpenFindReplace={openFindReplace}
+            onRegisterSaveHandler={onRegisterPluginEditorSaveHandler}
+          />
+        </div>
       );
     }
     if (resource.editorId === "text.editor.fileEditor") {
       return (
-        <BuiltInTextEditor
-          ref={textResourceEditorRef}
-          resource={resource}
-          workspaceId={workspaceId}
-          onDirtyChange={onPluginEditorDirtyChange}
-          onSaved={onPluginEditorSaved}
-          onStatus={onPluginEditorStatus}
-          onRegisterSaveHandler={onRegisterPluginEditorSaveHandler}
-        />
+        <div ref={editorPaneRootRef} className={`editor-pane mode-resource${findReplaceOpen ? " has-find-replace" : ""}`} onKeyDownCapture={handleFindShortcut}>
+          {findReplaceBar}
+          <BuiltInTextEditor
+            ref={textResourceEditorRef}
+            resource={resource}
+            workspaceId={workspaceId}
+            onDirtyChange={onPluginEditorDirtyChange}
+            onSaved={onPluginEditorSaved}
+            onStatus={onPluginEditorStatus}
+            onOpenFindReplace={openFindReplace}
+            onRegisterSaveHandler={onRegisterPluginEditorSaveHandler}
+          />
+        </div>
       );
     }
     if (resource.editorId) {
@@ -4186,7 +6354,8 @@ const EditorPane = forwardRef<EditorPaneHandle, {
   }
 
   return (
-    <div ref={editorPaneRootRef} className={`editor-pane mode-${document.mode}`}>
+    <div ref={editorPaneRootRef} className={`editor-pane mode-${document.mode}${findReplaceOpen ? " has-find-replace" : ""}`} onKeyDownCapture={handleFindShortcut}>
+      {findReplaceBar}
       {document.mode === "source" ? (
         <div className="source-shell">
           {toolbarVisible ? (
@@ -4202,25 +6371,37 @@ const EditorPane = forwardRef<EditorPaneHandle, {
               onRedo={redoSourceEdit}
             />
           ) : null}
-          <SourceEditor key={sourceEditorKey} ref={sourceEditorRef} value={document.sourceText} onChange={onSourceChange} onSelectionLengthChange={onSelectionLengthChange} showLineNumbers={lineNumbersVisible} />
+          <Suspense fallback={<EditorLoadingState label={tr("加载中。")} />}>
+            <SourceEditor
+              key={sourceEditorKey}
+              ref={sourceEditorRef}
+              value={document.sourceText}
+              onChange={onSourceChange}
+              onSelectionLengthChange={onSelectionLengthChange}
+              onOpenFindReplace={openFindReplace}
+              showLineNumbers={lineNumbersVisible}
+            />
+          </Suspense>
         </div>
       ) : null}
       {document.mode === "wysiwyg" ? (
-        <WysiwygEditor
-          ref={wysiwygEditorRef}
-          html={html}
-          sourceText={document.pendingHtml ? undefined : document.sourceText}
-          workspaceId={workspaceId}
-          documentPathRel={document.pathRel}
-          onChange={onHtmlChange}
-          onMarkdownPaste={onMarkdownPaste}
-          onSelectionLengthChange={onSelectionLengthChange}
-          onOpenMarkdownTarget={onOpenMarkdownTarget}
-          onInsertToc={(currentHtml) => {
-            void insertOrUpdateWysiwygToc(currentHtml);
-          }}
-          showToolbar={toolbarVisible}
-        />
+        <Suspense fallback={<EditorLoadingState label={tr("加载中。")} />}>
+          <WysiwygEditor
+            ref={wysiwygEditorRef}
+            html={html}
+            sourceText={document.pendingHtml ? undefined : document.sourceText}
+            workspaceId={workspaceId}
+            documentPathRel={document.pathRel}
+            onChange={onHtmlChange}
+            onMarkdownPaste={onMarkdownPaste}
+            onSelectionLengthChange={onSelectionLengthChange}
+            onOpenMarkdownTarget={onOpenMarkdownTarget}
+            onInsertToc={(currentHtml) => {
+              void insertOrUpdateWysiwygToc(currentHtml);
+            }}
+            showToolbar={toolbarVisible}
+          />
+        </Suspense>
       ) : null}
       {document.mode === "split" ? (
         <div className="split-pane" style={{ gridTemplateColumns: `minmax(0, ${splitLeftPercent}fr) 10px minmax(0, ${100 - splitLeftPercent}fr)` }}>
@@ -4239,7 +6420,17 @@ const EditorPane = forwardRef<EditorPaneHandle, {
                   onRedo={redoSourceEdit}
                 />
               ) : null}
-              <SourceEditor key={sourceEditorKey} ref={sourceEditorRef} value={document.sourceText} onChange={onSourceChange} onSelectionLengthChange={onSelectionLengthChange} showLineNumbers={lineNumbersVisible} />
+              <Suspense fallback={<EditorLoadingState label={tr("加载中。")} />}>
+                <SourceEditor
+                  key={sourceEditorKey}
+                  ref={sourceEditorRef}
+                  value={document.sourceText}
+                  onChange={onSourceChange}
+                  onSelectionLengthChange={onSelectionLengthChange}
+                  onOpenFindReplace={openFindReplace}
+                  showLineNumbers={lineNumbersVisible}
+                />
+              </Suspense>
             </div>
           </div>
           <button
@@ -4252,7 +6443,9 @@ const EditorPane = forwardRef<EditorPaneHandle, {
             onDoubleClick={() => updateSplitLeftPercent(DEFAULT_SPLIT_LEFT_PERCENT)}
           />
           <div ref={splitPreviewRef} className="split-preview">
-            <MarkdownPreview html={html} onMermaidClick={focusSplitMermaidSource} onCodeLanguageChange={updateSplitCodeLanguage} />
+            <Suspense fallback={<EditorLoadingState label={tr("加载中。")} />}>
+              <MarkdownPreview html={html} onMermaidClick={focusSplitMermaidSource} onCodeLanguageChange={updateSplitCodeLanguage} />
+            </Suspense>
           </div>
         </div>
       ) : null}
@@ -4285,26 +6478,37 @@ type BuiltInResourceEditorProps = {
   onDirtyChange: (pathRel: string, dirty: boolean) => void;
   onSaved: (pathRel: string, result: FileWriteResponse) => void;
   onStatus: (message: string) => void;
+  onOpenFindReplace: () => void;
   onRegisterSaveHandler: (pathRel: string, handler: () => Promise<void>) => () => void;
 };
 
 const BuiltInJsonEditor = forwardRef<TextResourceEditorHandle, BuiltInResourceEditorProps>(function BuiltInJsonEditor(
-  { resource, workspaceId, onDirtyChange, onSaved, onStatus, onRegisterSaveHandler },
+  { resource, workspaceId, onDirtyChange, onSaved, onStatus, onOpenFindReplace, onRegisterSaveHandler },
   ref
 ) {
+  const { tr } = useRendererI18n();
   return (
-    <TextResourceEditor ref={ref} resource={resource} workspaceId={workspaceId} editorKind="json" onDirtyChange={onDirtyChange} onSaved={onSaved} onStatus={onStatus} onRegisterSaveHandler={onRegisterSaveHandler} />
+    <Suspense fallback={<EditorLoadingState label={tr("加载中。")} />}>
+      <TextResourceEditor ref={ref} resource={resource} workspaceId={workspaceId} editorKind="json" onDirtyChange={onDirtyChange} onSaved={onSaved} onStatus={onStatus} onOpenFindReplace={onOpenFindReplace} onRegisterSaveHandler={onRegisterSaveHandler} />
+    </Suspense>
   );
 });
 
 const BuiltInTextEditor = forwardRef<TextResourceEditorHandle, BuiltInResourceEditorProps>(function BuiltInTextEditor(
-  { resource, workspaceId, onDirtyChange, onSaved, onStatus, onRegisterSaveHandler },
+  { resource, workspaceId, onDirtyChange, onSaved, onStatus, onOpenFindReplace, onRegisterSaveHandler },
   ref
 ) {
+  const { tr } = useRendererI18n();
   return (
-    <TextResourceEditor ref={ref} resource={resource} workspaceId={workspaceId} editorKind="text" onDirtyChange={onDirtyChange} onSaved={onSaved} onStatus={onStatus} onRegisterSaveHandler={onRegisterSaveHandler} />
+    <Suspense fallback={<EditorLoadingState label={tr("加载中。")} />}>
+      <TextResourceEditor ref={ref} resource={resource} workspaceId={workspaceId} editorKind="text" onDirtyChange={onDirtyChange} onSaved={onSaved} onStatus={onStatus} onOpenFindReplace={onOpenFindReplace} onRegisterSaveHandler={onRegisterSaveHandler} />
+    </Suspense>
   );
 });
+
+function EditorLoadingState({ label }: { label: string }) {
+  return <div className="empty-state editor-loading-state">{label}</div>;
+}
 
 function ResourcePreview({ resource, workspaceId, platform }: { resource: ActiveResource; workspaceId?: string; platform?: NodeJS.Platform }) {
   const { tr, locale } = useRendererI18n();
@@ -4558,6 +6762,9 @@ function PluginResourceEditor({
   const binaryRef = useRef<ArrayBuffer | undefined>(resource.initialBytes);
   const baseHashRef = useRef(resource.baseHash);
   const dirtyRef = useRef(Boolean(resource.dirty));
+  const editVersionRef = useRef(0);
+  const lastSavedTextRef = useRef(resource.initialText ?? "");
+  const lastSavedBinaryRef = useRef<ArrayBuffer | undefined>(resource.initialBytes);
   const [output, setOutput] = useState<PluginRenderResult>();
   const [error, setError] = useState<string>();
   const openExternal = async () => {
@@ -4578,51 +6785,87 @@ function PluginResourceEditor({
   };
   const updateText = (content: string, options?: { dirty?: boolean }) => {
     contentRef.current = content;
+    if (options?.dirty === false) {
+      lastSavedTextRef.current = content;
+    } else {
+      editVersionRef.current += 1;
+    }
     setDirtyState(options?.dirty ?? true);
   };
   const updateBinary = (data: ArrayBuffer | ArrayBufferView, options?: { dirty?: boolean }) => {
-    binaryRef.current = binaryDataToArrayBuffer(data);
+    const nextData = binaryDataToArrayBuffer(data);
+    binaryRef.current = nextData;
+    if (options?.dirty === false) {
+      lastSavedBinaryRef.current = nextData;
+    } else {
+      editVersionRef.current += 1;
+    }
     setDirtyState(options?.dirty ?? true);
   };
   const readText = async () => {
     const file = await onReadText(pluginId, resource.pathRel);
     contentRef.current = file.content;
     baseHashRef.current = file.sha256;
+    lastSavedTextRef.current = file.content;
+    editVersionRef.current += 1;
     return file.content;
   };
   const readBinary = async () => {
     const file = await onReadBinary(pluginId, resource.pathRel);
     binaryRef.current = file.data;
     baseHashRef.current = file.sha256;
+    lastSavedBinaryRef.current = file.data;
+    editVersionRef.current += 1;
     return file;
   };
   const saveText = async (content = contentRef.current) => {
+    if (!dirtyRef.current && content === lastSavedTextRef.current) {
+      return;
+    }
     contentRef.current = content;
+    const savedVersion = editVersionRef.current;
     const result = await onWriteText(pluginId, resource.pathRel, content, baseHashRef.current);
     if (result.status !== "saved") {
       throw new Error(result.status === "conflict" ? tr("保存冲突") : tr("保存失败"));
     }
     baseHashRef.current = result.sha256 ?? baseHashRef.current;
-    dirtyRef.current = false;
-    onDirtyChange(resource.pathRel, false);
-    onSaved(resource.pathRel, result);
-    onStatus(tr("已保存 {path}", { path: resource.pathRel }));
+    lastSavedTextRef.current = content;
+    const savedCurrentRevision = editVersionRef.current === savedVersion && contentRef.current === content;
+    if (savedCurrentRevision) {
+      dirtyRef.current = false;
+      onDirtyChange(resource.pathRel, false);
+      onSaved(resource.pathRel, result);
+      onStatus(tr("已保存 {path}", { path: resource.pathRel }));
+    } else {
+      onStatus(tr("已保存 {path}，仍有未保存更改", { path: resource.pathRel }));
+    }
   };
   const saveBinary = async (data?: ArrayBuffer | ArrayBufferView) => {
     data ??= binaryRef.current;
     if (!data) {
       throw new Error("Missing binary content");
     }
+    const binaryData = binaryDataToArrayBuffer(data);
+    if (!dirtyRef.current && arrayBuffersEqual(binaryData, lastSavedBinaryRef.current)) {
+      return;
+    }
+    const savedVersion = editVersionRef.current;
     const result = await onWriteBinary(pluginId, resource.pathRel, data, baseHashRef.current);
     if (result.status !== "saved") {
       throw new Error(result.status === "conflict" ? tr("保存冲突") : tr("保存失败"));
     }
-    binaryRef.current = binaryDataToArrayBuffer(data);
+    binaryRef.current = binaryData;
     baseHashRef.current = result.sha256 ?? baseHashRef.current;
-    dirtyRef.current = false;
-    onDirtyChange(resource.pathRel, false);
-    onSaved(resource.pathRel, result);
-    onStatus(tr("已保存 {path}", { path: resource.pathRel }));
+    lastSavedBinaryRef.current = binaryData;
+    const savedCurrentRevision = editVersionRef.current === savedVersion && arrayBuffersEqual(binaryRef.current, binaryData);
+    if (savedCurrentRevision) {
+      dirtyRef.current = false;
+      onDirtyChange(resource.pathRel, false);
+      onSaved(resource.pathRel, result);
+      onStatus(tr("已保存 {path}", { path: resource.pathRel }));
+    } else {
+      onStatus(tr("已保存 {path}，仍有未保存更改", { path: resource.pathRel }));
+    }
   };
 
   useEffect(() => {
@@ -4630,6 +6873,9 @@ function PluginResourceEditor({
     binaryRef.current = resource.initialBytes;
     baseHashRef.current = resource.baseHash;
     dirtyRef.current = Boolean(resource.dirty);
+    editVersionRef.current = 0;
+    lastSavedTextRef.current = resource.initialText ?? "";
+    lastSavedBinaryRef.current = resource.initialBytes;
   }, [resource.pathRel]);
 
   useEffect(
@@ -5089,7 +7335,7 @@ function restoreEditorScroll(scroller: HTMLElement, snapshot: EditorScrollSnapsh
   scroller.scrollTop = top || Math.min(maxScrollTop, snapshot.top);
 }
 
-function insertSnippetIntoSourceEditor(ref: RefObject<ReactCodeMirrorRef | null>, snippet: MarkdownSnippet) {
+function insertSnippetIntoSourceEditor(ref: SourceEditorViewRef, snippet: MarkdownSnippet) {
   const view = ref.current?.view;
   if (!view) {
     return;
@@ -5117,7 +7363,7 @@ interface MermaidSourceLocation {
   markdown: string;
 }
 
-function focusSourceEditorAt(ref: RefObject<ReactCodeMirrorRef | null>, position: number) {
+function focusSourceEditorAt(ref: SourceEditorViewRef, position: number) {
   const view = ref.current?.view;
   if (!view) {
     return;
@@ -5130,7 +7376,7 @@ function focusSourceEditorAt(ref: RefObject<ReactCodeMirrorRef | null>, position
   view.focus();
 }
 
-function focusSourceEditorLine(ref: RefObject<ReactCodeMirrorRef | null>, line: number): boolean {
+function focusSourceEditorLine(ref: SourceEditorViewRef, line: number): boolean {
   const view = ref.current?.view;
   if (!view) {
     return false;
@@ -5737,7 +7983,7 @@ function DocumentSimpleList({
   );
 }
 
-type SettingsTabId = "preferences" | "plugins";
+type SettingsTabId = "preferences" | "ai" | "plugins";
 
 function settingsTabs(tr: Translator): Array<{
   id: SettingsTabId;
@@ -5757,6 +8003,14 @@ function settingsTabs(tr: Translator): Array<{
       icon: Settings2
     },
     {
+      id: "ai",
+      label: "AI",
+      title: tr("AI 设置"),
+      description: tr("AI Assistant"),
+      help: tr("配置 Provider、模型、上下文权限和写入确认。"),
+      icon: Sparkles
+    },
+    {
       id: "plugins",
       label: tr("插件管理"),
       title: tr("插件管理"),
@@ -5769,11 +8023,24 @@ function settingsTabs(tr: Translator): Array<{
 
 function SettingsDialog({
   open,
+  initialTab,
   settings,
+  aiSettings,
+  workspaceId,
+  aiSemanticStatus,
   extensionManifests,
   pluginDescriptors,
   settingContributions,
   onUpdate,
+  onUpdateAiSettings,
+  onSetAiApiKey,
+  onClearAiApiKey,
+  onGetAiApiKey,
+  onTestAiProvider,
+  onListAiModels,
+  onRefreshAiSemanticStatus,
+  onTestAiEmbedding,
+  onUpdateAiSemanticIndex,
   onSetPluginEnabled,
   onAcceptPluginPermissions,
   onClose,
@@ -5782,11 +8049,24 @@ function SettingsDialog({
   pluginDirectory
 }: {
   open: boolean;
+  initialTab: SettingsTabId;
   settings?: AppSettings;
+  aiSettings?: AiSettingsPublic;
+  workspaceId?: string;
+  aiSemanticStatus?: AiSemanticIndexStatus;
   extensionManifests: ExtensionManifest[];
   pluginDescriptors: PluginDescriptor[];
   settingContributions: SettingContribution[];
   onUpdate: (key: string, value: unknown) => Promise<void>;
+  onUpdateAiSettings: (settings: Partial<AiSettings>) => Promise<void>;
+  onSetAiApiKey: (providerProfileId: string, apiKey: string) => Promise<void>;
+  onClearAiApiKey: (providerProfileId: string) => Promise<void>;
+  onGetAiApiKey: (providerProfileId: string) => Promise<string | undefined>;
+  onTestAiProvider: (provider: AiProviderProfile, apiKey?: string) => Promise<import("../shared/ai").AiProviderTestResult>;
+  onListAiModels: (provider: AiProviderProfile, apiKey?: string) => Promise<import("../shared/ai").AiModelDescriptor[]>;
+  onRefreshAiSemanticStatus: (settings?: AiEmbeddingSettings, apiKey?: string) => Promise<void>;
+  onTestAiEmbedding: (settings: AiEmbeddingSettings, apiKey?: string) => Promise<AiProviderTestResult>;
+  onUpdateAiSemanticIndex: (reset?: boolean, settings?: AiEmbeddingSettings, apiKey?: string) => Promise<AiSemanticIndexStatus | undefined>;
   onSetPluginEnabled: (pluginId: string, enabled: boolean) => Promise<void>;
   onAcceptPluginPermissions: (pluginId: string) => Promise<void>;
   onClose: () => void;
@@ -5800,8 +8080,15 @@ function SettingsDialog({
   const activeTabItem = settingsTabs(tr).find((tab) => tab.id === activeTab) ?? settingsTabs(tr)[0];
 
   useEffect(() => {
-    if (!open) {
+    if (open) {
+      setActiveTab(initialTab);
+    } else {
       setPermissionReviewManifest(undefined);
+    }
+  }, [initialTab, open]);
+
+  useEffect(() => {
+    if (!open) {
       return;
     }
     const onKeyDown = (event: KeyboardEvent) => {
@@ -5884,39 +8171,59 @@ function SettingsDialog({
               <h2>{activeTabItem.title}</h2>
               <p>{activeTabItem.help}</p>
             </div>
-            {activeTab === "preferences" ? (
-              <div className="settings-tab-content">
-                {languageRestartRequired ? (
-                  <div className="plugin-empty-state is-warning">
-                    <strong>{tr("重启后生效")}</strong>
-                    <span>{tr("语言更改将在重启 Nolia 后生效。")}</span>
-                  </div>
-                ) : null}
-                <div className="settings-form">
-                  {preferenceSettingContributions.map((setting) => (
-                    <SettingContributionControl key={setting.id} setting={setting} settings={settings} onUpdate={onUpdate} />
-                  ))}
-                </div>
-              </div>
-            ) : (
-              <div className="settings-tab-content settings-tab-content-plugins">
-                {pluginSettingContributions.length ? (
-                  <div className="settings-form plugin-control-form">
-                    {pluginSettingContributions.map((setting) => (
+            <SettingsPanelErrorBoundary key={activeTab} title={tr("设置页面加载失败")} reloadLabel={tr("重新加载")} onReload={onReload}>
+              {activeTab === "preferences" ? (
+                <div className="settings-tab-content">
+                  {languageRestartRequired ? (
+                    <div className="plugin-empty-state is-warning">
+                      <strong>{tr("重启后生效")}</strong>
+                      <span>{tr("语言更改将在重启 Nolia 后生效。")}</span>
+                    </div>
+                  ) : null}
+                  <div className="settings-form">
+                    {preferenceSettingContributions.map((setting) => (
                       <SettingContributionControl key={setting.id} setting={setting} settings={settings} onUpdate={onUpdate} />
                     ))}
                   </div>
-                ) : null}
-                <PluginSettingsList
-                  settings={settings}
-                  manifests={dedupeExtensionManifests(extensionManifests)}
-                  pluginDescriptors={pluginDescriptors}
-                  pluginDirectory={pluginDirectory}
-                  onSetPluginEnabled={onSetPluginEnabled}
-                  onRequestAcceptPluginPermissions={setPermissionReviewManifest}
-                />
-              </div>
-            )}
+                </div>
+              ) : activeTab === "ai" && aiSettings ? (
+                <Suspense fallback={<div className="settings-tab-content"><EditorLoadingState label={tr("加载中。")} /></div>}>
+                  <AiSettingsPanel
+                    settings={aiSettings}
+                    onUpdate={onUpdateAiSettings}
+                    onSetApiKey={onSetAiApiKey}
+                    onClearApiKey={onClearAiApiKey}
+                    onGetApiKey={onGetAiApiKey}
+                    onTestProvider={onTestAiProvider}
+                    onListModels={onListAiModels}
+                    workspaceId={workspaceId}
+                    semanticStatus={aiSemanticStatus}
+                    onRefreshSemanticStatus={onRefreshAiSemanticStatus}
+                    onTestEmbedding={onTestAiEmbedding}
+                    onUpdateSemanticIndex={(settings, apiKey) => onUpdateAiSemanticIndex(false, settings, apiKey)}
+                    onResetSemanticIndex={(settings, apiKey) => onUpdateAiSemanticIndex(true, settings, apiKey)}
+                  />
+                </Suspense>
+              ) : (
+                <div className="settings-tab-content settings-tab-content-plugins">
+                  {pluginSettingContributions.length ? (
+                    <div className="settings-form plugin-control-form">
+                      {pluginSettingContributions.map((setting) => (
+                        <SettingContributionControl key={setting.id} setting={setting} settings={settings} onUpdate={onUpdate} />
+                      ))}
+                    </div>
+                  ) : null}
+                  <PluginSettingsList
+                    settings={settings}
+                    manifests={dedupeExtensionManifests(extensionManifests)}
+                    pluginDescriptors={pluginDescriptors}
+                    pluginDirectory={pluginDirectory}
+                    onSetPluginEnabled={onSetPluginEnabled}
+                    onRequestAcceptPluginPermissions={setPermissionReviewManifest}
+                  />
+                </div>
+              )}
+            </SettingsPanelErrorBoundary>
           </section>
         </div>
       </section>
@@ -5943,6 +8250,38 @@ function SettingsDialog({
     />
     </>
   );
+}
+
+class SettingsPanelErrorBoundary extends Component<
+  { children: ReactNode; title: string; reloadLabel: string; onReload: () => void },
+  { error?: Error }
+> {
+  static getDerivedStateFromError(error: Error) {
+    return { error };
+  }
+
+  override state: { error?: Error } = {};
+
+  override componentDidCatch(error: Error, info: ErrorInfo) {
+    console.error("[SettingsPanelErrorBoundary]", error, info.componentStack);
+  }
+
+  override render() {
+    if (!this.state.error) {
+      return this.props.children;
+    }
+    return (
+      <div className="settings-tab-content">
+        <div className="plugin-empty-state is-warning" role="alert">
+          <strong>{this.props.title}</strong>
+          <span>{this.state.error.message}</span>
+          <button type="button" className="secondary-button" onClick={this.props.onReload}>
+            <Wrench size={14} /> {this.props.reloadLabel}
+          </button>
+        </div>
+      </div>
+    );
+  }
 }
 
 function SettingContributionControl({
@@ -6141,6 +8480,34 @@ function formatPermissionList(permissions: ExtensionPermission[] | undefined, tr
   return permissions.map((permission) => formatExtensionPermission(permission, tr)).join(tr("权限分隔符"));
 }
 
+function escapeHtml(value: string): string {
+  return value
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;");
+}
+
+function aiContextSummary(doc: OpenDocumentTab | undefined, selectedCharCount: number, settings: AiSettingsPublic | undefined, tr = createTranslator("zh-CN")): string[] {
+  const items: string[] = [];
+  if (doc) {
+    items.push(settings?.allowCurrentNoteContent ? tr("当前笔记正文：{title}", { title: doc.title || fileNameFor(doc.pathRel) }) : tr("当前笔记标题：{title}", { title: doc.title || fileNameFor(doc.pathRel) }));
+  }
+  if (selectedCharCount > 0) {
+    items.push(tr("已选择 {count} 字符", { count: selectedCharCount }));
+  }
+  if (settings?.allowWorkspaceSearch) {
+    items.push(tr("允许搜索笔记"));
+  }
+  if (settings?.allowWorkspaceRead) {
+    items.push(tr("允许读取整个工作区"));
+  }
+  if (settings?.allowWorkspaceOperations) {
+    items.push(tr("允许提出工作区操作"));
+  }
+  return items;
+}
+
 function documentListKindLabel(pathRel: string, kind: "file" | "resource", tr = createTranslator("zh-CN")): string {
   if (kind === "file") {
     return tr("笔记");
@@ -6201,6 +8568,84 @@ function DocumentDetails({
   );
 }
 
+function HistoryPanel({
+  doc,
+  entries,
+  loading,
+  preview,
+  locale,
+  onRefresh,
+  onCreateSnapshot,
+  onPreview,
+  onRestore
+}: {
+  doc?: OpenDocumentTab;
+  entries: FileHistoryEntry[];
+  loading: boolean;
+  preview?: { entry: FileHistoryEntry; content: string };
+  locale: ResolvedLocale;
+  onRefresh: () => void;
+  onCreateSnapshot: () => void;
+  onPreview: (entry: FileHistoryEntry) => void;
+  onRestore: (entry: FileHistoryEntry) => void;
+}) {
+  const { tr } = useRendererI18n();
+  if (!doc || doc.sourceKind === "external") {
+    return <div className="panel-empty">{tr("当前文档没有历史版本。")}</div>;
+  }
+  const diff = preview ? buildHistoryDiff(preview.content, doc.sourceText) : undefined;
+  return (
+    <div className={`history-panel${preview ? " has-preview" : ""}`}>
+      <div className="history-toolbar">
+        <button type="button" className="secondary-button" onClick={onCreateSnapshot}>{tr("创建版本")}</button>
+        <button type="button" className="secondary-button" disabled={loading} onClick={onRefresh}>{tr("重新加载")}</button>
+      </div>
+      <div className="history-list">
+        {loading ? <div className="panel-empty">{tr("正在读取历史版本...")}</div> : null}
+        {!loading && entries.length === 0 ? <div className="panel-empty">{tr("暂无历史版本。")}</div> : null}
+        {entries.map((entry) => (
+          <article key={entry.id} className={`history-item${preview?.entry.id === entry.id ? " is-active" : ""}`}>
+            <button type="button" onClick={() => onPreview(entry)}>
+              <strong>{formatHistoryTime(entry.createdAt, locale)}</strong>
+              <span>{historyReasonLabel(entry.reason, tr)} · {formatFileSize(entry.size, locale)}</span>
+            </button>
+            <button type="button" className="secondary-button" onClick={() => onRestore(entry)}>{tr("恢复")}</button>
+          </article>
+        ))}
+      </div>
+      {preview ? (
+        <section className="history-preview">
+          <header>
+            <strong>{formatHistoryTime(preview.entry.createdAt, locale)}</strong>
+            <span>{historyReasonLabel(preview.entry.reason, tr)}</span>
+          </header>
+          {diff ? (
+            <section className="history-compare" aria-label={tr("历史版本与当前版本对比")}>
+              <header>
+                <strong>{tr("历史版本与当前版本对比")}</strong>
+                <span>{diff.changed ? tr("新增 {added} 行，删除 {removed} 行", { added: diff.addedCount, removed: diff.removedCount }) : tr("内容一致")}</span>
+              </header>
+              <div className="history-diff" role="list">
+                {diff.lines.map((line) => (
+                  <div key={line.key} className={`history-diff-line is-${line.type}`} role="listitem">
+                    <span className="history-diff-marker">{historyDiffMarker(line.type)}</span>
+                    <span className="history-diff-text">{line.text || " "}</span>
+                  </div>
+                ))}
+              </div>
+              {diff.truncated ? <p className="history-diff-note">{tr("仅显示前 {count} 行对比。", { count: diff.lines.length })}</p> : null}
+            </section>
+          ) : null}
+          <details className="history-raw-preview">
+            <summary>{tr("查看历史原文")}</summary>
+            <pre>{preview.content}</pre>
+          </details>
+        </section>
+      ) : null}
+    </div>
+  );
+}
+
 function OutlinePanel({
   doc,
   onJump
@@ -6232,8 +8677,12 @@ function ErrorPanel({ statusMessage }: { statusMessage: string }) {
   return <div className="panel-empty">{statusMessage}</div>;
 }
 
-function StatusPill({ label, tone = "normal" }: { label: string; tone?: "normal" | "warn" | "ok" | "muted" }) {
-  return <span className={`status-pill tone-${tone}`}>{label}</span>;
+function StatusPill({ label, tone = "normal", accessibilityLabel }: { label: string; tone?: "normal" | "warn" | "ok" | "muted"; accessibilityLabel?: string }) {
+  return (
+    <span className={`status-pill tone-${tone}`} aria-label={accessibilityLabel} title={accessibilityLabel ? label : undefined}>
+      {label}
+    </span>
+  );
 }
 
 function SettingToggle({

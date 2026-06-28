@@ -2,7 +2,7 @@
 
 Effective date: 2026-05-31
 
-These terms are a draft for the current Nolia project. Before public release, the distributor should review them for the actual legal entity, distribution channel, pricing model, and jurisdiction.
+These terms apply to publicly distributed Nolia app builds, source code, documentation, and related project materials. By using, copying, modifying, or redistributing Nolia, you agree to comply with these terms and the project open-source license.
 
 ## License
 
@@ -17,7 +17,7 @@ Users may install and use Nolia on their own macOS, Windows, or Linux devices to
 When using or redistributing Nolia, users must comply with GPLv3 and applicable law. Users may not:
 
 - Remove copyright, license, or third-party notices.
-- distribute modified versions or binaries as proprietary software in violation of GPLv3.
+- Distribute modified versions or binaries as proprietary software in violation of GPLv3.
 - Use the app for unlawful, infringing, or destructive activity.
 
 ## Local Data Responsibility

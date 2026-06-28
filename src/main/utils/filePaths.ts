@@ -104,6 +104,22 @@ export function isAlwaysIgnoredWorkspacePath(pathRel: string): boolean {
   return normalized.split("/").some((segment) => segment === ".git" || segment === "node_modules" || segment === ".DS_Store");
 }
 
+export function normalizeWorkspaceUserPath(pathRel: string, options: { allowEmpty?: boolean } = {}): string {
+  const normalized = normalizePathRel(pathRel);
+  if (!normalized && !options.allowEmpty) {
+    throw new Error("Workspace path is required");
+  }
+  if (isAlwaysIgnoredWorkspacePath(normalized)) {
+    throw new Error("Workspace path is ignored");
+  }
+  return normalized;
+}
+
+export function resolveWorkspaceUserPath(rootPath: string, pathRel: string, options: { allowEmpty?: boolean } = {}): string {
+  const normalized = normalizeWorkspaceUserPath(pathRel, options);
+  return resolveWorkspacePath(rootPath, normalized);
+}
+
 export function isMarkdownPath(filePath: string): boolean {
   return MARKDOWN_EXTENSIONS.includes(path.extname(filePath).toLowerCase());
 }

@@ -2,6 +2,27 @@
 
 本文记录 Nolia 的用户可见变更。格式参考 Keep a Changelog，但按项目当前节奏保持简洁。
 
+## 1.0.0 - 2026-06-28
+
+### Added
+
+- AI Assistant runtime，支持 OpenAI-compatible、OpenAI Responses 和 Ollama provider。
+- AI 多模型配置、连接测试、模型刷新、API key 本地保存和独立 embedding 配置。
+- AI 权限控制、工具调用、当前文档 patch proposal、工作区 Markdown proposal、任务历史和撤销写入。
+- Semantic index 与 RAG 检索入口，支持手动创建、更新、清空索引，并在不可用时降级全文检索。
+- 更完整的资源编辑体验，覆盖 JSON、文本资源、图片和多媒体预览。
+
+### Changed
+
+- 版本号提升到 `1.0.0`。
+- OpenAI-compatible Chat Completions 的正式运行路径与连接测试统一到 `/v1` API root，避免测试通过但聊天空响应。
+- QA、AI、发布和架构文档合并为稳定入口，移除开发过程和历史打包记录。
+- 发布检查清单和 macOS 签名指南更新为 1.0.0 产物命名。
+
+### Fixed
+
+- 修复 OpenAI-compatible 裸 Base URL 在 AI SDK 正式聊天中未补 `/v1` 导致服务返回空流的问题。
+
 ## 0.1.0 - 2026-05-31
 
 ### Added

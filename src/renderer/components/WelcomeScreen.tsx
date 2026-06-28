@@ -1,7 +1,8 @@
-import { ArrowRight, CircleAlert, Clock3, FilePlus2, FolderOpen } from "lucide-react";
+import { ArrowRight, CircleAlert, Clock3, FilePlus2, FolderOpen, Trash2 } from "lucide-react";
 import type { RecentWorkspace, ResolvedLocale } from "../../shared/types";
 import { formatDate } from "../../shared/i18n";
 import { useRendererI18n } from "../app/i18n";
+import noliaIconUrl from "../../../build/icon.svg";
 
 interface WelcomeScreenProps {
   recentWorkspaces: RecentWorkspace[];
@@ -10,18 +11,42 @@ interface WelcomeScreenProps {
   onOpenWorkspace: () => void;
   onCreateWorkspace: () => void;
   onOpenRecent: (workspace: RecentWorkspace) => void;
+  onRemoveRecent: (workspace: RecentWorkspace) => void;
 }
 
-export function WelcomeScreen({ recentWorkspaces, openingWorkspaceId, errorMessage, onOpenWorkspace, onCreateWorkspace, onOpenRecent }: WelcomeScreenProps) {
+export function WelcomeScreen({ recentWorkspaces, openingWorkspaceId, errorMessage, onOpenWorkspace, onCreateWorkspace, onOpenRecent, onRemoveRecent }: WelcomeScreenProps) {
   const { locale, tr } = useRendererI18n();
+  const availableCount = recentWorkspaces.filter((workspace) => workspace.exists).length;
+  const unavailableCount = recentWorkspaces.length - availableCount;
   return (
     <div className="welcome-screen">
       <main className="welcome-content" aria-label="Nolia">
         <section className="welcome-intro">
-          <div className="welcome-eyebrow">{tr("本地 Markdown 工作台")}</div>
-          <div className="welcome-hero">
-            <h1>Nolia</h1>
-            <p>{tr("选择一个工作区继续整理文档。")}</p>
+          <div className="welcome-brand-lockup">
+            <img className="welcome-logo" src={noliaIconUrl} alt="" aria-hidden="true" />
+            <div>
+              <div className="welcome-eyebrow">{tr("本地 Markdown 工作台")}</div>
+              <div className="welcome-hero">
+                <h1>Nolia</h1>
+                <p>{tr("打开一个工作区，继续写作、整理和检索。")}</p>
+              </div>
+            </div>
+          </div>
+          <div className="welcome-summary">
+            <div className="welcome-snapshot" aria-label={tr("启动状态")}>
+              <span>
+                <strong>{recentWorkspaces.length}</strong>
+                <em>{tr("最近记录")}</em>
+              </span>
+              <span>
+                <strong>{availableCount}</strong>
+                <em>{tr("可打开")}</em>
+              </span>
+              <span className={unavailableCount ? "is-warning" : ""}>
+                <strong>{unavailableCount}</strong>
+                <em>{tr("需定位")}</em>
+              </span>
+            </div>
           </div>
           <div className="welcome-actions" aria-label={tr("工作区操作")}>
             <button type="button" className="primary-button" onClick={onOpenWorkspace}>
@@ -51,30 +76,44 @@ export function WelcomeScreen({ recentWorkspaces, openingWorkspaceId, errorMessa
             {recentWorkspaces.map((workspace) => {
               const unavailable = !workspace.exists;
               const opening = openingWorkspaceId === workspace.workspaceId;
+              const unavailableReason = recentWorkspaceUnavailableReason(workspace, tr);
               return (
-                <button
+                <div
                   key={workspace.workspaceId}
-                  type="button"
                   className={`welcome-recent-item${unavailable ? " is-unavailable" : ""}`}
-                  aria-label={`${unavailable ? tr("无法打开") : tr("打开最近工作区")} ${workspace.name}, ${tr("路径 {path}", { path: workspace.path })}`}
-                  title={unavailable ? tr("路径不可用：{path}", { path: workspace.path }) : tr("打开 {path}", { path: workspace.path })}
-                  disabled={opening}
-                  onClick={() => onOpenRecent(workspace)}
                 >
-                  <span className="welcome-recent-icon">
-                    {unavailable ? <CircleAlert size={15} /> : <Clock3 size={15} />}
-                  </span>
-                  <span className="welcome-recent-meta">
-                    <strong>{workspace.name}</strong>
-                    <span>{workspace.path}</span>
-                    <em>{unavailable ? tr("路径不可用") : opening ? tr("正在打开...") : formatRecentTime(workspace.lastOpenedAt, locale, tr)}</em>
-                  </span>
-                  {!unavailable ? (
-                    <span className="welcome-recent-open">
-                      {tr("打开")} <ArrowRight className="welcome-recent-arrow" size={16} aria-hidden="true" />
+                  <button
+                    type="button"
+                    className="welcome-recent-main"
+                    aria-label={`${unavailable ? tr("无法打开") : tr("打开最近工作区")} ${workspace.name}, ${tr("路径 {path}", { path: workspace.path })}`}
+                    title={unavailable ? tr("{reason}：{path}", { reason: unavailableReason, path: workspace.path }) : tr("打开 {path}", { path: workspace.path })}
+                    disabled={opening}
+                    onClick={() => onOpenRecent(workspace)}
+                  >
+                    <span className="welcome-recent-icon">
+                      {unavailable ? <CircleAlert size={15} /> : <Clock3 size={15} />}
                     </span>
-                  ) : null}
-                </button>
+                    <span className="welcome-recent-meta">
+                      <strong>{workspace.name}</strong>
+                      <span>{workspace.path}</span>
+                      <em>{unavailable ? unavailableReason : opening ? tr("正在打开...") : formatRecentTime(workspace.lastOpenedAt, locale, tr)}</em>
+                    </span>
+                    {!unavailable ? (
+                      <span className="welcome-recent-open">
+                        {tr("打开")} <ArrowRight className="welcome-recent-arrow" size={16} aria-hidden="true" />
+                      </span>
+                    ) : null}
+                  </button>
+                  <button
+                    type="button"
+                    className="welcome-recent-delete"
+                    aria-label={tr("删除工作区记录 {name}", { name: workspace.name })}
+                    title={tr("删除工作区记录")}
+                    onClick={() => onRemoveRecent(workspace)}
+                  >
+                    <Trash2 size={15} aria-hidden="true" />
+                  </button>
+                </div>
               );
             })}
           </div>
@@ -82,6 +121,10 @@ export function WelcomeScreen({ recentWorkspaces, openingWorkspaceId, errorMessa
       </main>
     </div>
   );
+}
+
+export function recentWorkspaceUnavailableReason(workspace: RecentWorkspace, tr: ReturnType<typeof useRendererI18n>["tr"]): string {
+  return workspace.availability === "notWorkspace" ? tr("不是 Nolia 工作区") : tr("路径不可用");
 }
 
 function formatRecentTime(timestamp: number, locale: ResolvedLocale, tr: ReturnType<typeof useRendererI18n>["tr"]): string {

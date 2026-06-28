@@ -1,14 +1,17 @@
-import { readFile, writeFile } from "node:fs/promises";
+import { rename, readFile, writeFile } from "node:fs/promises";
 import initSqlJs from "sql.js";
 import type { SqlJsStatic, SqlValue } from "sql.js";
 
 import type {
   BacklinkItem,
   BacklinksResponse,
+  FileHistoryEntry,
   FileKind,
   ParsedDocument,
+  SearchResultItem,
   SearchQueryResponse
 } from "../../shared/types";
+import type { AiEmbeddingSettings, AiProviderId, AiSemanticIndexStatus } from "../../shared/ai";
 import type { SearchQueryRequest } from "../../shared/ipc";
 import { basenameWithoutExt } from "../utils/filePaths";
 
@@ -25,11 +28,46 @@ interface FileIndexEntry {
   sha256?: string;
 }
 
+export interface SemanticChunkRecord {
+  pathRel: string;
+  title: string;
+  fileSha256: string;
+  chunkIndex: number;
+  chunkHash: string;
+  content: string;
+  embedding: number[];
+  providerId: AiProviderId;
+  model: string;
+  dimension: number;
+  updatedAt: number;
+}
+
+export interface SemanticSearchResultItem extends SearchResultItem {
+  mode: "semantic";
+  chunkIndex: number;
+  chunkHash: string;
+}
+
+export interface SemanticIndexMetadata {
+  enabled: boolean;
+  providerId?: AiProviderId;
+  model?: string;
+  baseUrl?: string;
+  apiMode?: string;
+  updatedAt?: number;
+  error?: string;
+}
+
+const SEMANTIC_INDEX_KEY = "ai.semanticIndex";
+
 let sqlJsPromise: Promise<SqlJsStatic> | undefined;
 
 export class WorkspaceDb {
   private indexVersion = 0;
   private ftsEnabled = true;
+  private dirty = false;
+  private saveTimer?: NodeJS.Timeout;
+  private savePromise?: Promise<void>;
 
   private constructor(
     private readonly dbPath: string,
@@ -38,31 +76,111 @@ export class WorkspaceDb {
 
   static async open(dbPath: string): Promise<WorkspaceDb> {
     const SQL = await getSqlJs();
-    let db: Db;
+    let db = await openSqlDatabase(SQL, dbPath);
+    let workspaceDb = new WorkspaceDb(dbPath, db);
     try {
-      const bytes = await readFile(dbPath);
-      db = new SQL.Database(bytes);
-    } catch {
-      db = new SQL.Database();
+      workspaceDb.ensureSchema();
+      return workspaceDb;
+    } catch (error) {
+      db.close();
+      if (!isRecoverableSqliteCorruption(error)) {
+        throw error;
+      }
     }
 
-    const workspaceDb = new WorkspaceDb(dbPath, db);
+    await backupCorruptDatabase(dbPath);
+    db = new SQL.Database();
+    workspaceDb = new WorkspaceDb(dbPath, db);
     workspaceDb.ensureSchema();
     await workspaceDb.save();
     return workspaceDb;
   }
 
   close(): void {
+    if (this.saveTimer) {
+      clearTimeout(this.saveTimer);
+      this.saveTimer = undefined;
+    }
     this.db.close();
   }
 
   async save(): Promise<void> {
+    if (this.saveTimer) {
+      clearTimeout(this.saveTimer);
+      this.saveTimer = undefined;
+    }
+    return this.flush({ force: true });
+  }
+
+  scheduleSave(delayMs = 1500): void {
+    this.dirty = true;
+    if (this.saveTimer) {
+      return;
+    }
+    this.saveTimer = setTimeout(() => {
+      this.saveTimer = undefined;
+      void this.flush();
+    }, delayMs);
+  }
+
+  async flush(options: { force?: boolean } = {}): Promise<void> {
+    if (options.force) {
+      this.dirty = true;
+    }
+    if (this.savePromise) {
+      await this.savePromise;
+      if (!this.dirty) {
+        return;
+      }
+    }
+    this.savePromise = this.writeToDisk();
+    try {
+      await this.savePromise;
+    } finally {
+      this.savePromise = undefined;
+    }
+  }
+
+  private async writeToDisk(): Promise<void> {
+    if (!this.dirty) {
+      return;
+    }
+    this.dirty = false;
     const bytes = this.db.export();
     await writeFile(this.dbPath, Buffer.from(bytes));
   }
 
   markAllFilesDeleted(): void {
     this.db.run("UPDATE files SET deleted = 1");
+  }
+
+  markMissingFilesDeleted(currentPaths: Set<string>): void {
+    const rows = this.all("SELECT path_rel AS pathRel FROM files WHERE deleted = 0");
+    for (const row of rows) {
+      const pathRel = readString(row.pathRel);
+      if (!currentPaths.has(pathRel)) {
+        this.removeFile(pathRel);
+      }
+    }
+  }
+
+  shouldIndexFile(entry: FileIndexEntry): boolean {
+    const row = this.first(
+      `SELECT size, mtime_ms AS mtimeMs, sha256, deleted
+       FROM files
+       WHERE path_rel = ?`,
+      [entry.pathRel]
+    );
+    if (!row || readNumber(row.deleted) !== 0) {
+      return true;
+    }
+    if (readNumber(row.size) !== entry.size || readNumber(row.mtimeMs) !== entry.mtimeMs) {
+      return true;
+    }
+    if (entry.kind === "markdown" && entry.sha256 && readString(row.sha256) !== entry.sha256) {
+      return true;
+    }
+    return false;
   }
 
   upsertFile(entry: FileIndexEntry): number {
@@ -152,9 +270,236 @@ export class WorkspaceDb {
       } else {
         this.db.run("DELETE FROM document_search WHERE file_id = ?", [fileId]);
       }
+      this.db.run("DELETE FROM semantic_chunks WHERE file_id = ?", [fileId]);
       this.refreshTagCounts();
       this.indexVersion += 1;
     });
+  }
+
+  listSemanticIndexableDocuments(): Array<{ pathRel: string; title: string; plainText: string; sha256: string; updatedAt: number }> {
+    return this.all(
+      `SELECT f.path_rel AS pathRel, COALESCE(d.title, f.name) AS title, COALESCE(d.plain_text, '') AS plainText, COALESCE(f.sha256, '') AS sha256, d.updated_at AS updatedAt
+       FROM documents d
+       JOIN files f ON f.id = d.file_id
+       WHERE f.deleted = 0 AND f.kind = 'markdown'
+       ORDER BY f.path_rel`
+    ).map((row) => ({
+      pathRel: readString(row.pathRel),
+      title: readString(row.title),
+      plainText: readString(row.plainText),
+      sha256: readString(row.sha256),
+      updatedAt: readNumber(row.updatedAt)
+    }));
+  }
+
+  countSemanticIndexableDocuments(): number {
+    return readNumber(this.first("SELECT COUNT(*) AS count FROM files WHERE deleted = 0 AND kind = 'markdown'")?.count);
+  }
+
+  getSemanticIndexMetadata(): SemanticIndexMetadata | undefined {
+    const row = this.first("SELECT value_json AS valueJson FROM workspace_settings WHERE key = ?", [SEMANTIC_INDEX_KEY]);
+    if (!row) {
+      return undefined;
+    }
+    try {
+      const parsed = JSON.parse(readString(row.valueJson)) as Partial<SemanticIndexMetadata>;
+      return {
+        enabled: Boolean(parsed.enabled),
+        providerId: parsed.providerId === "openai-compatible" || parsed.providerId === "ollama" ? parsed.providerId : undefined,
+        model: typeof parsed.model === "string" ? parsed.model : undefined,
+        baseUrl: typeof parsed.baseUrl === "string" ? parsed.baseUrl : undefined,
+        apiMode: typeof parsed.apiMode === "string" ? parsed.apiMode : undefined,
+        updatedAt: typeof parsed.updatedAt === "number" ? parsed.updatedAt : undefined,
+        error: typeof parsed.error === "string" ? parsed.error : undefined
+      };
+    } catch {
+      return undefined;
+    }
+  }
+
+  setSemanticIndexMetadata(metadata: SemanticIndexMetadata): void {
+    this.db.run(
+      `INSERT INTO workspace_settings (key, value_json, updated_at)
+       VALUES (?, ?, ?)
+       ON CONFLICT(key) DO UPDATE SET value_json = excluded.value_json, updated_at = excluded.updated_at`,
+      [SEMANTIC_INDEX_KEY, JSON.stringify(metadata), Date.now()]
+    );
+  }
+
+  clearSemanticIndex(settings?: AiEmbeddingSettings): void {
+    this.transaction(() => {
+      this.db.run("DELETE FROM semantic_chunks");
+      this.setSemanticIndexMetadata({
+        enabled: Boolean(settings?.enabled),
+        providerId: settings?.providerId,
+        model: settings?.model,
+        baseUrl: settings?.baseUrl,
+        apiMode: settings?.apiMode,
+        updatedAt: undefined
+      });
+    });
+  }
+
+  replaceSemanticChunks(pathRel: string, chunks: SemanticChunkRecord[]): void {
+    const fileId = this.getFileId(pathRel);
+    if (!fileId) {
+      return;
+    }
+    this.transaction(() => {
+      this.db.run("DELETE FROM semantic_chunks WHERE file_id = ?", [fileId]);
+      for (const chunk of chunks) {
+        this.db.run(
+          `INSERT INTO semantic_chunks
+            (file_id, chunk_index, chunk_hash, file_sha256, title, content, embedding_json, provider_id, model, dimension, updated_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+          [
+            fileId,
+            chunk.chunkIndex,
+            chunk.chunkHash,
+            chunk.fileSha256,
+            chunk.title,
+            chunk.content,
+            JSON.stringify(chunk.embedding),
+            chunk.providerId,
+            chunk.model,
+            chunk.dimension,
+            chunk.updatedAt
+          ]
+        );
+      }
+    });
+  }
+
+  hasCurrentSemanticChunks(pathRel: string, fileSha256: string, providerId: AiProviderId, model: string): boolean {
+    const row = this.first(
+      `SELECT COUNT(*) AS count
+       FROM semantic_chunks c
+       JOIN files f ON f.id = c.file_id
+       WHERE f.deleted = 0 AND f.path_rel = ? AND c.file_sha256 = ? AND c.provider_id = ? AND c.model = ?`,
+      [pathRel, fileSha256, providerId, model]
+    );
+    return readNumber(row?.count) > 0;
+  }
+
+  semanticIndexStatus(settings: AiEmbeddingSettings, progress?: AiSemanticIndexStatus["progress"], transientError?: string, options: { fast?: boolean } = {}): AiSemanticIndexStatus {
+    const metadata = this.getSemanticIndexMetadata();
+    const totalFiles = readNumber(this.first("SELECT COUNT(*) AS count FROM files WHERE deleted = 0 AND kind = 'markdown'")?.count);
+    const metadataMatches = metadata?.providerId === settings.providerId && metadata.model === settings.model && metadata.baseUrl === settings.baseUrl && metadata.apiMode === settings.apiMode;
+    const error = transientError ?? (metadataMatches ? metadata?.error : undefined);
+    if (options.fast) {
+      const state = progress
+        ? "updating"
+        : !settings.enabled || !settings.model.trim()
+          ? "not_configured"
+          : metadata?.updatedAt && !metadataMatches
+              ? "stale"
+              : metadata?.updatedAt
+                ? "ready"
+                : error
+                  ? "failed"
+                  : "not_created";
+      return {
+        state,
+        enabled: Boolean(settings.enabled),
+        providerId: settings.providerId,
+        model: settings.model,
+        updatedAt: metadata?.updatedAt,
+        totalFiles,
+        indexedFiles: state === "ready" ? totalFiles : 0,
+        staleFiles: state === "ready" ? 0 : totalFiles,
+        chunkCount: 0,
+        progress,
+        error
+      };
+    }
+    const chunkCount = readNumber(this.first(
+      `SELECT COUNT(*) AS count
+       FROM semantic_chunks c
+       JOIN files f ON f.id = c.file_id
+       WHERE f.deleted = 0
+         AND f.kind = 'markdown'
+         AND c.provider_id = ?
+         AND c.model = ?
+         AND c.file_sha256 = COALESCE(f.sha256, '')`,
+      [settings.providerId, settings.model]
+    )?.count);
+    const indexedFiles = readNumber(this.first(
+      `SELECT COUNT(DISTINCT f.id) AS count
+       FROM files f
+       JOIN semantic_chunks c ON c.file_id = f.id
+       WHERE f.deleted = 0
+          AND f.kind = 'markdown'
+          AND c.provider_id = ?
+          AND c.model = ?
+          AND c.file_sha256 = COALESCE(f.sha256, '')`,
+      [settings.providerId, settings.model]
+    )?.count);
+    const staleFiles = Math.max(0, totalFiles - indexedFiles);
+    let state: AiSemanticIndexStatus["state"];
+    if (progress) {
+      state = "updating";
+    } else if (!settings.enabled || !settings.model.trim()) {
+      state = "not_configured";
+    } else if (metadata?.updatedAt && !metadataMatches) {
+      state = "stale";
+    } else if (error && !chunkCount) {
+      state = "failed";
+    } else if (metadata?.updatedAt && error && chunkCount > 0) {
+      state = "ready";
+    } else if (metadata?.updatedAt && staleFiles > 0) {
+      state = "stale";
+    } else if (error) {
+      state = "failed";
+    } else if (!chunkCount || !metadata?.updatedAt) {
+      state = "not_created";
+    } else {
+      state = "ready";
+    }
+    return {
+      state,
+      enabled: Boolean(settings.enabled),
+      providerId: settings.providerId,
+      model: settings.model,
+      updatedAt: metadata?.updatedAt,
+      totalFiles,
+      indexedFiles,
+      staleFiles,
+      chunkCount,
+      progress,
+      message: statusMessageFor(state, staleFiles),
+      error
+    };
+  }
+
+  semanticSearch(queryEmbedding: number[], settings: AiEmbeddingSettings, limit = 8): SemanticSearchResultItem[] {
+    const rows = this.all(
+      `SELECT f.path_rel AS pathRel, COALESCE(c.title, d.title, f.name) AS title, c.content AS content,
+              c.embedding_json AS embeddingJson, c.chunk_index AS chunkIndex, c.chunk_hash AS chunkHash
+       FROM semantic_chunks c
+       JOIN files f ON f.id = c.file_id
+       LEFT JOIN documents d ON d.file_id = f.id
+       WHERE f.deleted = 0
+         AND c.file_sha256 = COALESCE(f.sha256, '')
+         AND c.provider_id = ?
+         AND c.model = ?`,
+      [settings.providerId, settings.model]
+    );
+    return rows
+      .map((row) => {
+        const embedding = parseEmbedding(readString(row.embeddingJson));
+        return {
+          pathRel: readString(row.pathRel),
+          title: readString(row.title),
+          score: cosineSimilarity(queryEmbedding, embedding),
+          snippets: [readString(row.content).slice(0, 500)],
+          mode: "semantic" as const,
+          chunkIndex: readNumber(row.chunkIndex),
+          chunkHash: readString(row.chunkHash)
+        };
+      })
+      .filter((item) => Number.isFinite(item.score) && item.score > 0)
+      .sort((a, b) => b.score - a.score)
+      .slice(0, Math.max(1, Math.min(20, limit)));
   }
 
   touchRecentFile(pathRel: string, editorMode?: string): void {
@@ -329,6 +674,33 @@ export class WorkspaceDb {
     );
   }
 
+  listSnapshots(pathRel: string, limit = 50): FileHistoryEntry[] {
+    const fileId = this.getFileId(pathRel);
+    if (!fileId) {
+      return [];
+    }
+    return this.all(
+      `SELECT s.id, f.path_rel AS pathRel, s.snapshot_path AS snapshotPath, s.sha256, s.reason, s.size, s.created_at AS createdAt
+       FROM snapshots s
+       JOIN files f ON f.id = s.file_id
+       WHERE s.file_id = ?
+       ORDER BY s.created_at DESC
+       LIMIT ?`,
+      [fileId, limit]
+    ).map(snapshotEntryFromRow);
+  }
+
+  getSnapshot(snapshotId: number): FileHistoryEntry | undefined {
+    const row = this.first(
+      `SELECT s.id, f.path_rel AS pathRel, s.snapshot_path AS snapshotPath, s.sha256, s.reason, s.size, s.created_at AS createdAt
+       FROM snapshots s
+       JOIN files f ON f.id = s.file_id
+       WHERE s.id = ? AND f.deleted = 0`,
+      [snapshotId]
+    );
+    return row ? snapshotEntryFromRow(row) : undefined;
+  }
+
   getFileId(pathRel: string): number | undefined {
     const row = this.first("SELECT id FROM files WHERE path_rel = ? AND deleted = 0", [pathRel]);
     const value = readNumber(row?.id);
@@ -439,6 +811,22 @@ export class WorkspaceDb {
         updated_at INTEGER NOT NULL
       );
 
+      CREATE TABLE IF NOT EXISTS semantic_chunks (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        file_id INTEGER NOT NULL,
+        chunk_index INTEGER NOT NULL,
+        chunk_hash TEXT NOT NULL,
+        file_sha256 TEXT NOT NULL,
+        title TEXT,
+        content TEXT NOT NULL,
+        embedding_json TEXT NOT NULL,
+        provider_id TEXT NOT NULL,
+        model TEXT NOT NULL,
+        dimension INTEGER NOT NULL,
+        updated_at INTEGER NOT NULL,
+        UNIQUE(file_id, provider_id, model, chunk_index)
+      );
+
       CREATE TABLE IF NOT EXISTS code_run_trust (
         scope TEXT PRIMARY KEY,
         target TEXT NOT NULL,
@@ -464,6 +852,8 @@ export class WorkspaceDb {
       CREATE INDEX IF NOT EXISTS idx_markdown_links_from ON markdown_links(from_file_id);
       CREATE INDEX IF NOT EXISTS idx_attachment_refs_file_id ON attachment_refs(file_id);
       CREATE INDEX IF NOT EXISTS idx_snapshots_file_created ON snapshots(file_id, created_at DESC);
+      CREATE INDEX IF NOT EXISTS idx_semantic_chunks_lookup ON semantic_chunks(provider_id, model, file_sha256);
+      CREATE INDEX IF NOT EXISTS idx_semantic_chunks_file ON semantic_chunks(file_id);
     `);
 
     try {
@@ -676,6 +1066,58 @@ async function getSqlJs(): Promise<SqlJsStatic> {
   return sqlJsPromise;
 }
 
+async function openSqlDatabase(SQL: SqlJsStatic, dbPath: string): Promise<Db> {
+  let bytes: Buffer;
+  try {
+    bytes = await readFile(dbPath);
+  } catch (error) {
+    if (isNotFoundError(error)) {
+      return new SQL.Database();
+    }
+    throw error;
+  }
+
+  try {
+    return new SQL.Database(bytes);
+  } catch (error) {
+    if (!isRecoverableSqliteCorruption(error)) {
+      throw error;
+    }
+  }
+
+  await backupCorruptDatabase(dbPath);
+  return new SQL.Database();
+}
+
+function isRecoverableSqliteCorruption(error: unknown): boolean {
+  const message = error instanceof Error ? error.message : String(error);
+  return /database disk image is malformed|file is not a database|not a database|database malformed/i.test(message);
+}
+
+function isNotFoundError(error: unknown): boolean {
+  return typeof error === "object" && error !== null && "code" in error && (error as { code?: unknown }).code === "ENOENT";
+}
+
+async function backupCorruptDatabase(dbPath: string): Promise<void> {
+  const timestamp = new Date().toISOString().replace(/[:.]/g, "-");
+  for (let attempt = 0; attempt < 100; attempt += 1) {
+    const suffix = attempt === 0 ? timestamp : `${timestamp}-${attempt}`;
+    try {
+      await rename(dbPath, `${dbPath}.corrupt-${suffix}`);
+      return;
+    } catch (error) {
+      if (isNotFoundError(error)) {
+        return;
+      }
+      if (typeof error === "object" && error !== null && "code" in error && (error as { code?: unknown }).code === "EEXIST") {
+        continue;
+      }
+      throw error;
+    }
+  }
+  throw new Error(`Unable to back up corrupted workspace database: ${dbPath}`);
+}
+
 function readString(value: unknown): string {
   if (typeof value === "string") {
     return value;
@@ -695,6 +1137,18 @@ function readNumber(value: unknown): number {
     return Number.isFinite(parsed) ? parsed : 0;
   }
   return 0;
+}
+
+function snapshotEntryFromRow(row: Record<string, unknown>): FileHistoryEntry {
+  return {
+    id: readNumber(row.id),
+    pathRel: readString(row.pathRel),
+    snapshotPath: readString(row.snapshotPath),
+    sha256: readString(row.sha256),
+    reason: readString(row.reason),
+    size: readNumber(row.size),
+    createdAt: readNumber(row.createdAt)
+  };
 }
 
 function uniqueLower(values: string[]): string[] {
@@ -720,6 +1174,52 @@ function buildSnippet(text: string, query: string): string {
   const start = Math.max(0, index - 60);
   const end = Math.min(text.length, index + query.length + 90);
   return `${start > 0 ? "..." : ""}${text.slice(start, end)}${end < text.length ? "..." : ""}`;
+}
+
+function parseEmbedding(value: string): number[] {
+  try {
+    const parsed = JSON.parse(value) as unknown;
+    if (!Array.isArray(parsed)) {
+      return [];
+    }
+    return parsed.map((item) => (typeof item === "number" ? item : Number(item))).filter(Number.isFinite);
+  } catch {
+    return [];
+  }
+}
+
+function cosineSimilarity(left: number[], right: number[]): number {
+  if (!left.length || left.length !== right.length) {
+    return 0;
+  }
+  let dot = 0;
+  let leftNorm = 0;
+  let rightNorm = 0;
+  for (let index = 0; index < left.length; index += 1) {
+    dot += left[index] * right[index];
+    leftNorm += left[index] * left[index];
+    rightNorm += right[index] * right[index];
+  }
+  if (!leftNorm || !rightNorm) {
+    return 0;
+  }
+  return dot / (Math.sqrt(leftNorm) * Math.sqrt(rightNorm));
+}
+
+function statusMessageFor(state: AiSemanticIndexStatus["state"], staleFiles: number): string | undefined {
+  if (state === "not_configured") {
+    return "Embedding 模型尚未配置。";
+  }
+  if (state === "not_created") {
+    return "语义索引尚未创建。";
+  }
+  if (state === "stale") {
+    return staleFiles > 0 ? `语义索引有 ${staleFiles} 个文件需要更新。` : "语义索引配置已变化，需要重新更新。";
+  }
+  if (state === "ready") {
+    return "语义索引可用。";
+  }
+  return undefined;
 }
 
 function matchesFilters(pathRel: string, tagFilter: string | undefined, pathFilter: string | undefined, db: WorkspaceDb): boolean {

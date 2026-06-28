@@ -1,6 +1,10 @@
 import { expect, test, type Page } from "@playwright/test";
 import { installMockNolia } from "./helpers/mockNolia";
 
+async function gotoApp(page: Page) {
+  await page.goto("/", { waitUntil: "domcontentloaded" });
+}
+
 test("built-in JSON and TXT editors expose the right tools and autosave safely", async ({ page }) => {
   await page.setViewportSize({ width: 1320, height: 860 });
   await installMockNolia(page, {
@@ -14,7 +18,7 @@ test("built-in JSON and TXT editors expose the right tools and autosave safely",
     }
   });
 
-  await page.goto("/");
+  await gotoApp(page);
   await openAssetsFolder(page);
 
   await page.getByRole("button", { name: "config.json", exact: true }).click();
@@ -31,7 +35,11 @@ test("built-in JSON and TXT editors expose the right tools and autosave safely",
   }
 
   await page.getByRole("button", { name: "搜索/替换" }).click();
-  await expect(page.locator(".text-resource-codemirror .cm-search")).toBeVisible();
+  await expect(page.locator(".editor-find-replace")).toBeVisible();
+  await expect(page.locator(".text-resource-codemirror .cm-search")).toHaveCount(0);
+  await page.locator(".editor-find-query").fill("\"z\"");
+  await page.keyboard.press("Enter");
+  await expect(page.locator(".editor-find-count")).toHaveText("1/1");
   await page.getByRole("button", { name: "自动换行" }).click();
   await expect(page.getByRole("button", { name: "自动换行" })).toHaveAttribute("aria-pressed", "false");
   await page.getByRole("button", { name: "行号" }).click();
@@ -79,10 +87,15 @@ test("built-in JSON and TXT editors expose the right tools and autosave safely",
   await expect(page.getByTestId("builtin-text-editor").getByRole("button", { name: "保存" })).toHaveCount(0);
   await expect(page.getByLabel("文本语言")).toHaveCount(0);
   await expect(page.locator("[aria-label='自动识别文本类型：TXT']")).toBeVisible();
+  await expect(page.locator(".editor-find-replace")).toBeVisible();
+  await page.locator(".editor-find-query").fill("indented");
+  await page.locator(".editor-replace-input").fill("clean");
+  await page.locator(".editor-find-replace").getByRole("button", { name: "替换", exact: true }).click();
+  await expect(page.getByTestId("builtin-text-editor").locator(".cm-content")).toContainText("clean value");
   await page.getByRole("button", { name: "清理空白" }).click();
   await expect
     .poll(() => page.evaluate(() => (window as typeof window & { __noliaMock: { savedText: Record<string, string> } }).__noliaMock.savedText["assets/notes.txt"]))
-    .toBe("    indented value\nword   gap\n\n\tkeep");
+    .toBe("    clean value\nword   gap\n\n\tkeep");
 
   await page.getByRole("button", { name: "component.tsx", exact: true }).click();
   await expect(page.locator(".resource-kind-pill")).toHaveText("文本编辑器");
@@ -112,7 +125,7 @@ test("resource previews cover image, PDF, audio, video, archive, and unknown fil
     }
   });
 
-  await page.goto("/");
+  await gotoApp(page);
   await openAssetsFolder(page);
 
   await page.getByRole("button", { name: "mock.png", exact: true }).click();
