@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { access, mkdir, readFile, writeFile } from "node:fs/promises";
+import { access, mkdir, readdir, readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { dialog, type BrowserWindow, type OpenDialogOptions } from "electron";
 
@@ -11,6 +11,7 @@ import {
 } from "../../shared/constants";
 import { createTranslator, type Translator } from "../../shared/i18n";
 import type { RecentWorkspace, WorkspaceIndexedEvent, WorkspaceInfo } from "../../shared/types";
+import type { WorkspaceHealthSnapshot, WorkspaceProbeResult } from "../../shared/contracts";
 import type { ResolvedLocale } from "../../shared/types";
 import type { WorkspaceOpenRequest, WorkspaceRemoveRecentRequest, WorkspaceSwitchRequest } from "../../shared/ipc";
 import { ensureDir, pathExists } from "../utils/filePaths";
@@ -34,6 +35,8 @@ export interface WorkspaceRuntime {
   watcher: WorkspaceWatcher;
   indexAbortController?: AbortController;
   indexTask?: Promise<void>;
+  treeSequence: number;
+  watcherError?: string;
 }
 
 export class WorkspaceService {
@@ -45,9 +48,47 @@ export class WorkspaceService {
     private readonly settings: SettingsService,
     private readonly diagnostics: DiagnosticsService,
     private readonly onIndexed?: (event: WorkspaceIndexedEvent) => void,
-    locale: ResolvedLocale = "zh-CN"
+    locale: ResolvedLocale = "zh-CN",
+    private readonly userDataPath?: string
   ) {
     this.tr = createTranslator(locale);
+  }
+
+  async probeWorkspace(pathInput?: string, parentWindow?: BrowserWindow): Promise<WorkspaceProbeResult | undefined> {
+    const selectedPath = pathInput ?? (await this.pickWorkspaceDirectory(this.tr("打开工作区"), false, parentWindow));
+    if (!selectedPath) {
+      return undefined;
+    }
+    const name = path.basename(selectedPath) || "Workspace";
+    if (!(await pathExists(selectedPath))) {
+      return { path: selectedPath, name, status: "inaccessible", readable: false, writable: false, markdownCount: 0, hasNoliaDirectory: false, message: this.tr("Workspace path does not exist: {path}", { path: selectedPath }) };
+    }
+    const permissions = await readPermissions(selectedPath);
+    if (!permissions.readable) {
+      return { path: selectedPath, name, status: "inaccessible", ...permissions, markdownCount: 0, hasNoliaDirectory: false, message: "无法读取所选目录" };
+    }
+    const hasNoliaDirectory = await pathExists(path.join(selectedPath, WORKSPACE_META_DIR));
+    const configPath = path.join(selectedPath, WORKSPACE_META_DIR, WORKSPACE_CONFIG_FILE);
+    const markdownCount = await countMarkdownFiles(selectedPath);
+    if (await pathExists(configPath)) {
+      try {
+        const config = parseWorkspaceConfig(await readFile(configPath, "utf8"));
+        if (!config.workspaceId || !config.name || !config.version) {
+          throw new Error("Invalid workspace config");
+        }
+        return { path: selectedPath, name: config.name, status: "initialized", ...permissions, markdownCount, hasNoliaDirectory: true };
+      } catch (error) {
+        return { path: selectedPath, name, status: "corrupt", ...permissions, markdownCount, hasNoliaDirectory: true, message: error instanceof Error ? error.message : String(error) };
+      }
+    }
+    return {
+      path: selectedPath,
+      name,
+      status: permissions.writable ? "initializable" : "read_only",
+      ...permissions,
+      markdownCount,
+      hasNoliaDirectory
+    };
   }
 
   async bootstrap(): Promise<{
@@ -72,6 +113,17 @@ export class WorkspaceService {
       throw new Error(this.tr("Workspace path does not exist: {path}", { path: selectedPath }));
     }
     if (!(await isInitializedWorkspace(selectedPath))) {
+      const permissions = await readPermissions(selectedPath);
+      if (request.createIfMissing && permissions.writable) {
+        return this.createWorkspace({ path: selectedPath });
+      }
+      if (!permissions.writable && permissions.readable && this.userDataPath) {
+        await this.closeActiveWorkspace();
+        const runtime = await this.prepareReadOnlyWorkspace(selectedPath);
+        this.active = runtime;
+        this.startBackgroundIndex(runtime);
+        return runtime.info;
+      }
       throw new Error(this.tr("Selected folder is not a Nolia workspace. Use Create Workspace to initialize it."));
     }
 
@@ -160,6 +212,24 @@ export class WorkspaceService {
     return this.active;
   }
 
+  getHealth(workspaceId: string): WorkspaceHealthSnapshot {
+    const runtime = this.requireWorkspace(workspaceId);
+    const issues: WorkspaceHealthSnapshot["issues"] = [];
+    if (!runtime.info.permissions.writable) issues.push({ id: "read-only", title: "工作区为只读", message: "正文写入、属性、模板和 AI 修改已禁用。", severity: "warning" });
+    if (runtime.watcherError) issues.push({ id: "watcher", title: "文件监控异常", message: runtime.watcherError, severity: "error" });
+    if (runtime.info.indexState.status === "error") issues.push({ id: "index", title: "搜索索引异常", message: runtime.info.indexState.message ?? "索引失败", severity: "error" });
+    return {
+      workspaceId,
+      readable: runtime.info.permissions.readable,
+      writable: runtime.info.permissions.writable,
+      watcher: { status: runtime.watcherError ? "error" : "ready", message: runtime.watcherError },
+      index: { status: runtime.info.indexState.status, progress: runtime.info.indexState.progress, message: runtime.info.indexState.message },
+      database: { schemaVersion: runtime.db.getSchemaVersion(), status: "ready" },
+      history: { bytes: runtime.db.getHistoryBytes() },
+      issues
+    };
+  }
+
   private async prepareWorkspace(rootPath: string, initialize: boolean): Promise<WorkspaceRuntime> {
     const configPath = path.join(rootPath, WORKSPACE_META_DIR);
     if (initialize) {
@@ -186,19 +256,67 @@ export class WorkspaceService {
     };
 
     const db = await WorkspaceDb.open(path.join(configPath, WORKSPACE_DB_FILE));
-    const watcher = new WorkspaceWatcher(rootPath, db, this.indexer, (pathRel) => {
+    let runtime!: WorkspaceRuntime;
+    const watcher = new WorkspaceWatcher(rootPath, db, this.indexer, (pathRel, operation, node) => {
       info.indexState = {
         status: "ready",
         progress: 1,
         version: db.getIndexVersion()
       };
-      this.onIndexed?.({ workspaceId: info.workspaceId, pathRel, indexVersion: db.getIndexVersion() });
+      runtime.treeSequence += 1;
+      this.onIndexed?.({ workspaceId: info.workspaceId, pathRel, indexVersion: db.getIndexVersion(), sequence: runtime.treeSequence, operation, node });
+    }, (error) => {
+      const message = error instanceof Error ? error.message : String(error);
+      runtime.watcherError = message;
+      this.diagnostics.warn("Workspace watcher failed", { workspaceId: info.workspaceId, rootPath, error: message });
     });
-    watcher.start();
     const indexAbortController = new AbortController();
-    const runtime: WorkspaceRuntime = { info, db, watcher, indexAbortController };
+    runtime = { info, db, watcher, indexAbortController, treeSequence: 0 };
+    watcher.start();
     this.diagnostics.info("Workspace opened", { workspaceId: info.workspaceId, rootPath });
 
+    return runtime;
+  }
+
+  private async prepareReadOnlyWorkspace(rootPath: string): Promise<WorkspaceRuntime> {
+    if (!this.userDataPath) {
+      throw new Error("此工作区为只读，无法创建本地缓存");
+    }
+    const cacheKey = Buffer.from(rootPath).toString("base64url").slice(0, 80);
+    const configPath = path.join(this.userDataPath, "workspace-cache", cacheKey);
+    await ensureDir(configPath);
+    const now = Date.now();
+    const configFile = path.join(configPath, WORKSPACE_CONFIG_FILE);
+    let config: WorkspaceConfig;
+    try {
+      config = parseWorkspaceConfig(await readFile(configFile, "utf8"));
+    } catch {
+      config = { workspaceId: `ws_readonly_${cacheKey}`, name: path.basename(rootPath) || "Workspace", createdAt: now, lastOpenedAt: now, version: 1 };
+    }
+    config.lastOpenedAt = now;
+    await writeFile(configFile, `${JSON.stringify(config, null, 2)}\n`, "utf8");
+    const info: WorkspaceInfo = {
+      workspaceId: config.workspaceId,
+      name: config.name,
+      rootPath,
+      configPath,
+      createdAt: config.createdAt,
+      lastOpenedAt: now,
+      permissions: { readable: true, writable: false },
+      indexState: { status: "indexing", progress: 0, version: 0 }
+    };
+    const db = await WorkspaceDb.open(path.join(configPath, WORKSPACE_DB_FILE));
+    let runtime!: WorkspaceRuntime;
+    const watcher = new WorkspaceWatcher(rootPath, db, this.indexer, (pathRel, operation, node) => {
+      info.indexState = { status: "ready", progress: 1, version: db.getIndexVersion() };
+      runtime.treeSequence += 1;
+      this.onIndexed?.({ workspaceId: info.workspaceId, pathRel, indexVersion: db.getIndexVersion(), sequence: runtime.treeSequence, operation, node });
+    }, (error) => {
+      runtime.watcherError = error instanceof Error ? error.message : String(error);
+      this.diagnostics.warn("Read-only workspace watcher failed", { workspaceId: info.workspaceId, error: runtime.watcherError });
+    });
+    runtime = { info, db, watcher, indexAbortController: new AbortController(), treeSequence: 0 };
+    watcher.start();
     return runtime;
   }
 
@@ -325,4 +443,27 @@ async function canAccess(filePath: string, mode: number): Promise<boolean> {
   } catch {
     return false;
   }
+}
+
+async function countMarkdownFiles(rootPath: string, limit = 100_000): Promise<number> {
+  let count = 0;
+  async function walk(currentPath: string): Promise<void> {
+    if (count >= limit) {
+      return;
+    }
+    const entries = await readdir(currentPath, { withFileTypes: true });
+    for (const entry of entries) {
+      if (entry.name === WORKSPACE_META_DIR || entry.name === "node_modules" || entry.name === ".git") {
+        continue;
+      }
+      const entryPath = path.join(currentPath, entry.name);
+      if (entry.isDirectory()) {
+        await walk(entryPath);
+      } else if (/\.(?:md|markdown)$/i.test(entry.name)) {
+        count += 1;
+      }
+    }
+  }
+  await walk(rootPath);
+  return count;
 }

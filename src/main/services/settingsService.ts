@@ -1,9 +1,9 @@
-import { readFile, writeFile, mkdir, access } from "node:fs/promises";
+import { readFile, writeFile, mkdir, access, rename, rm } from "node:fs/promises";
 import path from "node:path";
 
 import { DEFAULT_SETTINGS, WORKSPACE_CONFIG_FILE, WORKSPACE_META_DIR } from "../../shared/constants";
 import { normalizeAiSettings as normalizeSharedAiSettings } from "../../shared/ai";
-import type { AppSettings, RecentWorkspace } from "../../shared/types";
+import type { AppSettings, RecentExternalFile, RecentWorkspace } from "../../shared/types";
 
 interface WindowState {
   bounds?: {
@@ -18,6 +18,7 @@ interface WindowState {
 interface GlobalState {
   settings: AppSettings;
   recentWorkspaces: RecentWorkspace[];
+  recentExternalFiles: RecentExternalFile[];
   windowState?: WindowState;
 }
 
@@ -30,7 +31,8 @@ export class SettingsService {
   private readonly statePath: string;
   private state: GlobalState = {
     settings: defaultSettings,
-    recentWorkspaces: []
+    recentWorkspaces: [],
+    recentExternalFiles: []
   };
 
   constructor(userDataPath: string) {
@@ -43,13 +45,9 @@ export class SettingsService {
       const raw = await readFile(this.statePath, "utf8");
       const parsed = JSON.parse(raw) as Partial<GlobalState>;
       this.state = {
-        settings: {
-          ...defaultSettings,
-          ...(parsed.settings ?? {}),
-          ai: normalizeAiSettings(parsed.settings?.ai),
-          plugins: normalizePluginSettings(parsed.settings?.plugins)
-        },
+        settings: normalizeAppSettings(parsed.settings),
         recentWorkspaces: parsed.recentWorkspaces ?? [],
+        recentExternalFiles: parsed.recentExternalFiles ?? [],
         windowState: parsed.windowState
       };
     } catch {
@@ -151,6 +149,34 @@ export class SettingsService {
     return this.state.recentWorkspaces.find((workspace) => workspace.workspaceId === workspaceId);
   }
 
+  async listRecentExternalFiles(): Promise<RecentExternalFile[]> {
+    const items = await Promise.all(this.state.recentExternalFiles.map(async (item): Promise<RecentExternalFile> => ({
+      ...item,
+      availability: await externalFileAvailability(item.filePath)
+    })));
+    return items.sort((left, right) => right.lastOpenedAt - left.lastOpenedAt);
+  }
+
+  async addRecentExternalFile(filePath: string): Promise<void> {
+    const normalized = path.resolve(filePath);
+    const existing = this.state.recentExternalFiles.filter((item) => item.filePath !== normalized);
+    const recent: RecentExternalFile = {
+      filePath: normalized,
+      name: path.basename(normalized),
+      lastOpenedAt: Date.now(),
+      availability: "available"
+    };
+    this.state.recentExternalFiles = [recent, ...existing].slice(0, 20);
+    await this.persist();
+  }
+
+  async removeRecentExternalFile(filePath: string): Promise<RecentExternalFile[]> {
+    const normalized = path.resolve(filePath);
+    this.state.recentExternalFiles = this.state.recentExternalFiles.filter((item) => item.filePath !== normalized);
+    await this.persist();
+    return this.listRecentExternalFiles();
+  }
+
   getWindowState(): WindowState | undefined {
     return this.state.windowState;
   }
@@ -161,7 +187,14 @@ export class SettingsService {
   }
 
   private async persist(): Promise<void> {
-    await writeFile(this.statePath, `${JSON.stringify(this.state, null, 2)}\n`, "utf8");
+    const temporaryPath = `${this.statePath}.${process.pid}.${Date.now()}.tmp`;
+    try {
+      await writeFile(temporaryPath, `${JSON.stringify(this.state, null, 2)}\n`, "utf8");
+      await rename(temporaryPath, this.statePath);
+    } catch (error) {
+      await rm(temporaryPath, { force: true }).catch(() => undefined);
+      throw error;
+    }
   }
 }
 
@@ -172,7 +205,54 @@ function normalizeSettingValue(key: string, value: unknown): unknown {
   if (key === "ai") {
     return normalizeAiSettings(value);
   }
+  if (key === "inboxDirectory" || key === "dailyNoteDirectory" || key === "templatesDirectory") {
+    return normalizeWorkspaceDirectorySetting(value, DEFAULT_SETTINGS[key]);
+  }
+  if (key === "quickCaptureFilePattern" || key === "dailyNoteFilePattern") {
+    return normalizeDatePatternSetting(value, DEFAULT_SETTINGS[key]);
+  }
   return value;
+}
+
+function normalizeAppSettings(value: unknown): AppSettings {
+  const settings = value && typeof value === "object" && !Array.isArray(value)
+    ? value as Partial<AppSettings>
+    : {};
+  return {
+    ...defaultSettings,
+    ...settings,
+    inboxDirectory: normalizeWorkspaceDirectorySetting(settings.inboxDirectory, DEFAULT_SETTINGS.inboxDirectory),
+    quickCaptureFilePattern: normalizeDatePatternSetting(settings.quickCaptureFilePattern, DEFAULT_SETTINGS.quickCaptureFilePattern),
+    dailyNoteDirectory: normalizeWorkspaceDirectorySetting(settings.dailyNoteDirectory, DEFAULT_SETTINGS.dailyNoteDirectory),
+    dailyNoteFilePattern: normalizeDatePatternSetting(settings.dailyNoteFilePattern, DEFAULT_SETTINGS.dailyNoteFilePattern),
+    templatesDirectory: normalizeWorkspaceDirectorySetting(settings.templatesDirectory, DEFAULT_SETTINGS.templatesDirectory),
+    ai: normalizeAiSettings(settings.ai),
+    plugins: normalizePluginSettings(settings.plugins)
+  };
+}
+
+function normalizeWorkspaceDirectorySetting(value: unknown, fallback: string): string {
+  if (typeof value !== "string") return fallback;
+  const raw = value.trim();
+  const slashPath = raw.replace(/\\/g, "/");
+  const normalized = slashPath.replace(/^\/+|\/+$/g, "");
+  const segments = normalized.split("/").map((segment) => segment.trim()).filter((segment) => segment && segment !== ".");
+  const invalidSegment = segments.some((segment) =>
+    segment === ".." ||
+    /[<>:"|?*]/.test(segment) ||
+    Array.from(segment).some((character) => character.charCodeAt(0) < 32) ||
+    /[. ]$/.test(segment) ||
+    /^(?:con|prn|aux|nul|com[1-9]|lpt[1-9])(?:\..*)?$/i.test(segment)
+  );
+  if (!normalized || normalized.length > 160 || /^(?:[a-z]:)?\//i.test(slashPath) || /^[a-z]:/i.test(slashPath) || invalidSegment) return fallback;
+  return segments.join("/");
+}
+
+function normalizeDatePatternSetting(value: unknown, fallback: string): string {
+  if (typeof value !== "string") return fallback;
+  const pattern = value.trim();
+  if (!pattern || pattern.length > 80 || /[\\/:*?"<>|]/.test(pattern) || !/(YYYY|MM|DD)/.test(pattern)) return fallback;
+  return pattern;
 }
 
 function normalizeAiSettings(value: unknown): AppSettings["ai"] {
@@ -217,4 +297,13 @@ async function workspaceAvailability(rootPath: string): Promise<RecentWorkspace[
     return "notWorkspace";
   }
   return "available";
+}
+
+async function externalFileAvailability(filePath: string): Promise<RecentExternalFile["availability"]> {
+  try {
+    await access(filePath);
+    return "available";
+  } catch (error) {
+    return error && typeof error === "object" && "code" in error && (error as NodeJS.ErrnoException).code === "ENOENT" ? "missing" : "unreadable";
+  }
 }

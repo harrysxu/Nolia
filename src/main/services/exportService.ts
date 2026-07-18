@@ -30,6 +30,26 @@ export class ExportService {
       runtime.info.rootPath,
       `${path.basename(normalized, path.extname(normalized))}.${request.format === "markdown" ? "md" : request.format}`
     );
+    return this.exportMarkdown(markdown, defaultPath, request.format, request.themeId, path.join(runtime.info.rootPath, WORKSPACE_META_DIR, WORKSPACE_DIRECTORIES.cache), parentWindow);
+  }
+
+  async exportExternalDocument(request: { filePath: string; format: "pdf" | "html" | "markdown"; themeId?: string }, parentWindow?: BrowserWindow): Promise<{
+    status: "completed" | "failed";
+    outputPath?: string;
+    warnings: string[];
+  }> {
+    const sourcePath = path.resolve(request.filePath);
+    const markdown = await readFile(sourcePath, "utf8");
+    const defaultPath = path.join(path.dirname(sourcePath), `${path.basename(sourcePath, path.extname(sourcePath))}.${request.format === "markdown" ? "md" : request.format}`);
+    const cachePath = path.join(appTemporaryDirectory(), "nolia-export-cache");
+    return this.exportMarkdown(markdown, defaultPath, request.format, request.themeId, cachePath, parentWindow);
+  }
+
+  private async exportMarkdown(markdown: string, defaultPath: string, format: "pdf" | "html" | "markdown", themeId: string | undefined, cachePath: string, parentWindow?: BrowserWindow): Promise<{
+    status: "completed" | "failed";
+    outputPath?: string;
+    warnings: string[];
+  }> {
     const options: SaveDialogOptions = {
       title: this.tr("导出文档对话框"),
       defaultPath
@@ -39,25 +59,28 @@ export class ExportService {
       return { status: "failed", warnings: [this.tr("已取消导出")] };
     }
 
-    if (request.format === "markdown") {
+    if (format === "markdown") {
       await writeFile(result.filePath, markdown, "utf8");
       return { status: "completed", outputPath: result.filePath, warnings: [] };
     }
 
-    const html = await createExportHtml(markdown, path.basename(normalized), request.themeId);
-    if (request.format === "html") {
+    const html = await createExportHtml(markdown, path.basename(defaultPath), themeId);
+    if (format === "html") {
       await writeFile(result.filePath, html, "utf8");
       return { status: "completed", outputPath: result.filePath, warnings: [] };
     }
 
-    const tempDir = path.join(runtime.info.rootPath, WORKSPACE_META_DIR, WORKSPACE_DIRECTORIES.cache);
-    await mkdir(tempDir, { recursive: true });
-    const tempHtml = path.join(tempDir, `export-${Date.now()}.html`);
+    await mkdir(cachePath, { recursive: true });
+    const tempHtml = path.join(cachePath, `export-${Date.now()}.html`);
     await writeFile(tempHtml, html, "utf8");
     const pdf = await printHtmlToPdf(tempHtml);
     await writeFile(result.filePath, pdf);
     return { status: "completed", outputPath: result.filePath, warnings: [] };
   }
+}
+
+function appTemporaryDirectory(): string {
+  return process.env.TMPDIR || process.env.TEMP || "/tmp";
 }
 
 async function createExportHtml(markdown: string, title: string, themeId?: string): Promise<string> {

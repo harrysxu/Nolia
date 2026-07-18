@@ -31,16 +31,28 @@ test("workspace, settings, search, and resource editor layouts stay readable acr
   await page.screenshot({ path: "test-results/ui-visual-light-workspace.png", fullPage: false });
 
   for (const viewport of [
+    { width: 1440, height: 900 },
     { width: 1320, height: 860 },
     { width: 1100, height: 760 },
-    { width: 900, height: 700 }
+    { width: 900, height: 700 },
+    { width: 780, height: 520 }
   ]) {
     await page.setViewportSize(viewport);
+    if (viewport.width <= 1180) await expect(page.locator(".right-panel")).toBeHidden();
     await assertWorkspaceLayout(page);
     await assertToolbarButtonsVisible(page, "Markdown 工具");
+    await expect(page.locator(".source-editor .cm-content")).toContainText("Layout Smoke");
+    await expect(page.locator(".split-preview").getByRole("heading", { name: "Layout Smoke" })).toBeVisible();
+    await page.screenshot({ path: `test-results/ui-visual-workspace-${viewport.width}x${viewport.height}.png`, fullPage: false });
   }
 
   await page.setViewportSize({ width: 1100, height: 760 });
+  await expect(page.locator(".right-panel")).toBeHidden();
+  await page.locator("[data-inspector-trigger]").click();
+  await expect(page.locator(".right-panel")).toBeVisible();
+  await expect(page.locator(".inspector-drawer-backdrop")).toBeVisible();
+  await page.keyboard.press("Escape");
+  await expect(page.locator(".right-panel")).toBeHidden();
   await page.getByRole("navigation", { name: "工作区导航" }).getByRole("button", { name: "设置" }).click();
   const settingsDialog = page.getByRole("dialog", { name: "设置" });
   await expect(settingsDialog).toBeVisible();
@@ -54,14 +66,14 @@ test("workspace, settings, search, and resource editor layouts stay readable acr
   await page.getByLabel("主题").selectOption("dark");
   await expect.poll(() => page.evaluate(() => document.documentElement.dataset.theme)).toBe("dark");
   await settingsDialog.locator(".settings-close-button").click();
-  await page.getByRole("navigation", { name: "工作区导航" }).getByRole("button", { name: "搜索" }).click();
-  await page.getByPlaceholder("搜索工作区").fill("layout");
-  await expect(page.locator(".result-item").filter({ hasText: "Layout Smoke" })).toBeVisible();
+  await page.getByRole("navigation", { name: "工作区导航" }).getByRole("button", { name: "发现" }).click();
+  await page.getByPlaceholder("搜索标题、正文、路径、标签或属性").fill("layout");
+  await expect(page.locator(".discover-results").filter({ hasText: "Layout Smoke" })).toBeVisible();
   await assertWorkspaceLayout(page);
-  await expectReadable(page, ".sidebar");
+  await expectReadable(page, ".discover-page");
   await page.screenshot({ path: "test-results/ui-visual-dark-search.png", fullPage: false });
 
-  await page.getByRole("navigation", { name: "工作区导航" }).getByRole("button", { name: "笔记", exact: true }).click();
+  await page.getByRole("navigation", { name: "工作区导航" }).getByRole("button", { name: "文件", exact: true }).click();
   await page.getByPlaceholder("搜索文件或资源").fill("");
   await page.getByRole("button", { name: /assets/ }).first().click();
   await page.getByRole("button", { name: "config.json", exact: true }).click();

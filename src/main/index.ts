@@ -15,9 +15,12 @@ import { AiSecretService } from "./ai/security/secretService";
 import { AttachmentService } from "./services/attachmentService";
 import { DiagnosticsService } from "./services/diagnosticsService";
 import { ExportService } from "./services/exportService";
+import { ExternalDocumentService } from "./services/externalDocumentService";
 import { FileSystemService } from "./services/fileSystemService";
 import { HistoryService } from "./services/historyService";
 import { PLUGIN_PROTOCOL, PluginService } from "./services/pluginService";
+import { PluginBroker } from "./services/pluginBroker";
+import { PerformanceLogService } from "./services/performanceLogService";
 import { SettingsService } from "./services/settingsService";
 import { SemanticIndexService } from "./services/semanticIndexService";
 import { WorkspaceService } from "./services/workspaceService";
@@ -30,6 +33,8 @@ let mainWindow: BrowserWindow | undefined;
 let externalFileReceiverWindowId: number | undefined;
 let createMainWindowFromRuntime: (() => BrowserWindow) | undefined;
 const pendingFiles: string[] = [];
+const closeConfirmedWindowIds = new Set<number>();
+const closeHandshakeReadyWindowIds = new Set<number>();
 const RENDERER_PROTOCOL = "nolia";
 const ASSET_PROTOCOL = "nolia-asset";
 const EXTERNAL_ASSET_HOST = "external";
@@ -101,6 +106,8 @@ app.whenReady().then(async () => {
 
   const settings = new SettingsService(app.getPath("userData"));
   await settings.init();
+  const performanceLog = new PerformanceLogService(app.getPath("userData"));
+  await performanceLog.init();
   const aiSecrets = new AiSecretService(app.getPath("userData"));
   await aiSecrets.init();
   const aiSettings = new AiSettingsService(settings, aiSecrets);
@@ -114,11 +121,16 @@ app.whenReady().then(async () => {
       return;
     }
     window.webContents.send("workspace.indexed", event);
-  }, startupLocale);
+  }, startupLocale, app.getPath("userData"));
   const history = new HistoryService();
   const files = new FileSystemService(workspaces, history);
+  const pluginBroker = new PluginBroker(plugins, workspaces, files, diagnostics);
   const attachments = new AttachmentService(workspaces, startupLocale);
   const exporter = new ExportService(workspaces, startupLocale);
+  const externalDocuments = new ExternalDocumentService(app.getPath("userData"), settings, (event) => {
+    getUsableMainWindow()?.webContents.send(IpcChannels.externalFileChanged, event);
+  });
+  await externalDocuments.init();
   const semanticIndex = new SemanticIndexService();
   const aiRuntimeServices = { workspaces, files, settings, aiSettings, diagnostics, semanticIndex };
   let aiTasks: AiTaskService | undefined;
@@ -137,6 +149,7 @@ app.whenReady().then(async () => {
   registerPluginProtocol(plugins);
 
   createMainWindowFromRuntime = () => createTrackedMainWindow(settings, diagnostics, () => {
+    externalDocuments.close();
     void workspaces.closeActiveWorkspace().catch((error: unknown) => {
       diagnostics.error("Failed to close active workspace after window close", { error: formatError(error) });
     });
@@ -148,12 +161,32 @@ app.whenReady().then(async () => {
     files,
     attachments,
     exporter,
+    externalDocuments,
     settings,
     diagnostics,
+    performanceLog,
     plugins,
+    pluginBroker,
     ai,
     aiTasks,
-    syncExtensionMenus: (menus) => installApplicationMenu(() => mainWindow, menus, startupLocale)
+    aiSettings,
+    syncExtensionMenus: (menus) => installApplicationMenu(() => mainWindow, menus, startupLocale),
+    setWindowDocumentState: (event, state) => {
+      const window = BrowserWindow.fromWebContents(event.sender);
+      if (!window || window.isDestroyed()) return;
+      closeHandshakeReadyWindowIds.add(window.id);
+      window.setTitle(state.title);
+      if (process.platform === "darwin") {
+        window.setRepresentedFilename(state.representedFilename ?? "");
+        window.setDocumentEdited(state.dirty);
+      }
+    },
+    confirmWindowClose: (event) => {
+      const window = BrowserWindow.fromWebContents(event.sender);
+      if (!window || window.isDestroyed()) return;
+      closeConfirmedWindowIds.add(window.id);
+    window.close();
+    }
   });
   installApplicationMenu(() => mainWindow, getBuiltInMenuContributions(startupLocale), startupLocale);
 
@@ -253,7 +286,7 @@ function collectMarkdownFileArgs(argv: string[]): string[] {
 }
 
 function isMarkdownFilePath(filePath: string): boolean {
-  return /\.(?:md|markdown)$/i.test(filePath);
+  return /\.(?:md|markdown|mdown|mkd)$/i.test(filePath);
 }
 
 function sendOrQueueExternalFile(filePath: string): void {
@@ -276,7 +309,16 @@ function sendOrQueueExternalFile(filePath: string): void {
 function createTrackedMainWindow(settings: SettingsService, diagnostics: DiagnosticsService, onClosed?: () => void): BrowserWindow {
   externalFileReceiverWindowId = undefined;
   const window = createMainWindow(settings, diagnostics);
+  window.on("close", (event) => {
+    if (closeConfirmedWindowIds.delete(window.id)) return;
+    if (!closeHandshakeReadyWindowIds.has(window.id)) return;
+    event.preventDefault();
+    if (window.webContents.isDestroyed()) return;
+    window.webContents.send(IpcChannels.windowCloseRequest);
+  });
   window.on("closed", () => {
+    closeConfirmedWindowIds.delete(window.id);
+    closeHandshakeReadyWindowIds.delete(window.id);
     if (mainWindow?.id === window.id) {
       mainWindow = undefined;
     }

@@ -2,8 +2,10 @@
   "id": "local.jsonEditor",
   "name": "JSON 编辑器",
   "version": "1.0.0",
-  "apiVersion": 2,
-  "renderer": "index.js",
+  "apiVersion": 3,
+  "entrypoints": {
+    "ui": "index.html"
+  },
   "activationEvents": ["onStartup", "onFileOpen:.json"],
   "permissions": ["ui:contribute", "workspace:file:read", "workspace:file:write"],
   "contributes": {

@@ -375,7 +375,7 @@ test("code block language controls update split preview and WYSIWYG source", asy
   expect(await sourceContains(page, "```xml\n<root><enabled>true</enabled></root>")).toBe(true);
 });
 
-test("WYSIWYG Mermaid preview blocks expose editable Markdown source", async ({ page }) => {
+test("WYSIWYG Mermaid blocks open a zoomable viewer before editing source", async ({ page }) => {
   await setupBoundaryWorkspace(page, {
     "diagram.md": ["# Diagram", "", "```mermaid", "graph TD; A[Markdown] --> B[Preview];", "```"].join("\n")
   });
@@ -387,6 +387,23 @@ test("WYSIWYG Mermaid preview blocks expose editable Markdown source", async ({ 
   await expect(diagramBlock.locator(".mermaid svg")).toBeVisible();
   await diagramBlock.click();
   const diagramSource = diagramBlock.getByLabel("Markdown 块源码");
+  const diagramViewer = page.getByRole("dialog", { name: "图表预览" });
+  await expect(diagramViewer).toBeHidden();
+  await expect(diagramSource).toBeHidden();
+  await expect(diagramViewer.getByText("125%", { exact: true })).toHaveCount(0);
+  await diagramBlock.focus();
+  await page.keyboard.press("Enter");
+  await expect(diagramViewer).toBeVisible();
+  await expect(diagramSource).toBeHidden();
+  await expect(diagramViewer.getByText("125%", { exact: true })).toBeVisible();
+  await diagramViewer.getByRole("button", { name: "放大图表" }).click();
+  await expect(diagramViewer.getByText("150%", { exact: true })).toBeVisible();
+  const downloadPromise = page.waitForEvent("download");
+  await diagramViewer.getByRole("button", { name: "下载 PNG 图片" }).click();
+  const download = await downloadPromise;
+  expect(download.suggestedFilename()).toMatch(/\.png$/);
+  await page.keyboard.press("F2");
+  await expect(diagramViewer).toBeHidden();
   await expect(diagramSource).toBeVisible();
   await expect(diagramSource).toBeFocused();
   await replaceFocusedText(page, "```mermaid\nflowchart LR\n  C[Updated] --> D[Done]\n```");
@@ -1131,7 +1148,7 @@ test("WYSIWYG list source editor expands for long wrapped Markdown", async ({ pa
   expect(metrics.overflowY).toBe("hidden");
 });
 
-test("clicking a split Mermaid preview focuses the matching source block", async ({ page }) => {
+test("split Mermaid preview opens the viewer and edits the matching source on request", async ({ page }) => {
   await setupBoundaryWorkspace(page, {
     "diagram-click.md": [
       "# Diagram Click",
@@ -1161,9 +1178,69 @@ test("clicking a split Mermaid preview focuses the matching source block", async
   await expect(diagrams).toHaveCount(2);
   await expect(diagrams.nth(1).locator("svg")).toBeVisible();
 
+  const diagramViewer = page.getByRole("dialog", { name: "图表预览" });
   await diagrams.nth(1).click();
+  await expect(diagramViewer).toBeHidden();
+  await diagrams.nth(1).focus();
+  await page.keyboard.press("Enter");
+  await expect(diagramViewer).toBeVisible();
+  await diagramViewer.getByRole("button", { name: "编辑图表源码" }).click();
+  await expect(diagramViewer).toBeHidden();
   await page.keyboard.type("%% clicked\n");
   expect(await sourceContains(page, "```erDiagram\n%% clicked\nCUSTOMER ||--o{ ORDER : places")).toBe(true);
+});
+
+test("renders many Mermaid diagrams in a large document without overlap", async ({ page }) => {
+  const sections = Array.from({ length: 8 }, (_, index) => [
+    `## Diagram ${index + 1}`,
+    "",
+    "```mermaid",
+    "sequenceDiagram",
+    `participant Client${index} as Client`,
+    `participant Service${index} as Service`,
+    `Client${index}->>Service${index}: Request ${index + 1}`,
+    `Service${index}-->>Client${index}: Response ${index + 1}`,
+    "```",
+    "",
+    "Supporting text keeps this document large enough to exercise the worker and preview layout. ".repeat(80)
+  ].join("\n"));
+  const largeDocument = ["# Large Diagram Document", "", ...sections, "", "Closing notes."] .join("\n");
+  await setupBoundaryWorkspace(page, { "large-diagrams.md": largeDocument });
+  await openWorkspaceNote(page, "large-diagrams.md");
+  await page.getByRole("button", { name: "分屏", exact: true }).click();
+
+  const diagrams = page.locator(".split-preview .mermaid");
+  await expect(diagrams).toHaveCount(8);
+  await expect.poll(() => diagrams.locator("svg").count(), { timeout: 15_000 }).toBe(8);
+  await expect(page.locator(".split-preview .mermaid.is-error")).toHaveCount(0);
+  const metrics = await diagrams.locator("svg").evaluateAll((elements) => elements.map((element) => {
+    const rect = element.getBoundingClientRect();
+    return { id: element.id, top: rect.top, bottom: rect.bottom, width: rect.width, height: rect.height };
+  }));
+  expect(new Set(metrics.map((item) => item.id)).size).toBe(8);
+  expect(metrics.every((item) => item.width > 0 && item.height > 0)).toBe(true);
+  for (let index = 1; index < metrics.length; index += 1) {
+    expect(metrics[index].top).toBeGreaterThanOrEqual(metrics[index - 1].bottom - 2);
+  }
+
+  await diagrams.first().click();
+  const sequenceViewer = page.getByRole("dialog", { name: "图表预览" });
+  await expect(sequenceViewer).toBeHidden();
+  await diagrams.first().focus();
+  await page.keyboard.press("Enter");
+  await expect(sequenceViewer).toBeVisible();
+  const sequenceDownloadPromise = page.waitForEvent("download");
+  await sequenceViewer.getByRole("button", { name: "下载 PNG 图片" }).click();
+  const sequenceDownload = await sequenceDownloadPromise;
+  expect(sequenceDownload.suggestedFilename()).toMatch(/\.png$/);
+  await sequenceViewer.getByRole("button", { name: "关闭图表查看器", exact: true }).last().click();
+  await expect(sequenceViewer).toBeHidden();
+
+  await page.getByRole("button", { name: "编辑", exact: true }).click();
+  const editorDiagrams = page.locator(".ProseMirror .markdown-preview-block-mermaid .mermaid");
+  await expect(editorDiagrams).toHaveCount(8);
+  await expect.poll(() => editorDiagrams.locator("svg").count(), { timeout: 15_000 }).toBe(8);
+  await expect(page.locator(".ProseMirror .markdown-preview-block-mermaid .mermaid.is-error")).toHaveCount(0);
 });
 
 test("copy and paste keeps Markdown semantics across source and edit documents", async ({ page, context }) => {
@@ -1378,11 +1455,11 @@ async function setupBoundaryWorkspace(page: Page, initialFiles: Record<string, s
     { mockSettings: settings, filesSeed: initialFiles }
   );
   await page.goto("/");
-  await page.getByRole("navigation", { name: "工作区导航" }).getByRole("button", { name: "笔记", exact: true }).click();
+  await page.getByRole("navigation", { name: "工作区导航" }).getByRole("button", { name: "文件", exact: true }).click();
 }
 
 async function openWorkspaceNote(page: Page, name: string) {
-  await page.getByRole("navigation", { name: "工作区导航" }).getByRole("button", { name: "笔记", exact: true }).click();
+  await page.getByRole("navigation", { name: "工作区导航" }).getByRole("button", { name: "文件", exact: true }).click();
   await page.getByRole("button", { name, exact: true }).click();
   await expect(page.locator(".statusbar")).toContainText(name);
 }

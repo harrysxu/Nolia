@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { mkdir, readdir, readFile, writeFile } from "node:fs/promises";
+import { readdir, readFile } from "node:fs/promises";
 import path from "node:path";
 
 import { WORKSPACE_DIRECTORIES, WORKSPACE_META_DIR } from "../../shared/constants";
@@ -20,6 +20,7 @@ import type {
   AiToolApproval,
   AiWriteTransaction
 } from "../../shared/ai";
+import { AI_WORKSPACE_PATCH_OPERATION_LIMIT } from "../../shared/ai";
 import { isMarkdownPath, normalizeWorkspaceUserPath } from "../utils/filePaths";
 import { sha256Text } from "../utils/hash";
 import { AiService } from "./aiService";
@@ -106,10 +107,9 @@ export class AiTaskService {
     if (approval.status !== "pending") {
       return task;
     }
-    const transaction = await this.applyProposal(proposal);
+    await this.applyProposal(task, proposal, request.selectedOperationIds);
     approval.status = "approved";
     proposal.status = "applied";
-    task.writes.push(transaction);
     task.steps.push({ id: randomUUID(), index: task.steps.length + 1, kind: "write", title: "Applied AI proposal", summary: proposal.summary, createdAt: Date.now() });
     task.status = "completed";
     task.pendingApprovalId = undefined;
@@ -157,12 +157,22 @@ export class AiTaskService {
     if (!transaction || transaction.undoneAt) {
       return task;
     }
+    if (transaction.status !== "committed") {
+      throw new Error(`transaction_not_committed: ${transaction.id} is ${transaction.status}`);
+    }
     for (const operation of [...transaction.operations].reverse()) {
+      if (operation.status === "rolled_back") {
+        continue;
+      }
       if (operation.movedPath && operation.targetPathRel) {
         await this.services.files.rename({ workspaceId: transaction.workspaceId, sourcePathRel: operation.targetPathRel, targetPathRel: operation.pathRel });
         continue;
       }
       if (operation.createdFile) {
+        const current = await this.services.files.readFile({ workspaceId: transaction.workspaceId, pathRel: operation.pathRel });
+        if (operation.afterHash && current.sha256 !== operation.afterHash) {
+          throw new Error(`transaction_precondition_failed: ${operation.pathRel} changed after the AI transaction`);
+        }
         await this.services.files.trash({ workspaceId: transaction.workspaceId, pathRel: operation.pathRel });
         continue;
       }
@@ -170,23 +180,24 @@ export class AiTaskService {
         await this.services.files.trash({ workspaceId: transaction.workspaceId, pathRel: operation.pathRel });
         continue;
       }
-      if (!operation.beforeSnapshotId) {
-        continue;
-      }
-      const snapshot = await this.services.files.readHistory({ workspaceId: transaction.workspaceId, snapshotId: operation.beforeSnapshotId });
-      if (!snapshot) {
-        continue;
-      }
+      const beforeContent = await this.readTransactionBeforeContent(transaction.workspaceId, operation);
       const current = await this.services.files.readFile({ workspaceId: transaction.workspaceId, pathRel: operation.pathRel });
-      await this.services.files.writeAtomic({
+      if (operation.afterHash && current.sha256 !== operation.afterHash) {
+        throw new Error(`transaction_precondition_failed: ${operation.pathRel} changed after the AI transaction`);
+      }
+      const restored = await this.services.files.writeAtomic({
         workspaceId: transaction.workspaceId,
         pathRel: operation.pathRel,
-        content: snapshot.content,
+        content: beforeContent,
         baseHash: current.sha256,
         createSnapshot: true
       });
+      if (restored.status !== "saved") {
+        throw new Error(`Undo failed for ${operation.pathRel}: ${restored.status}`);
+      }
     }
     transaction.undoneAt = Date.now();
+    transaction.status = "rolled_back";
     task.steps.push({ id: randomUUID(), index: task.steps.length + 1, kind: "write", title: "Undid AI write transaction", summary: transaction.proposalId, createdAt: Date.now() });
     task.updatedAt = Date.now();
     await this.saveTask(task);
@@ -207,6 +218,9 @@ export class AiTaskService {
       this.bufferPendingRunEvent(event);
       return;
     }
+    if (event.type === "text-delta" || event.type === "usage") {
+      return;
+    }
     if (event.type === "tool-call") {
       task.steps.push({ id: randomUUID(), index: task.steps.length + 1, kind: "tool", title: event.toolName, summary: event.inputSummary, createdAt: Date.now() });
     } else if (event.type === "tool-result") {
@@ -216,7 +230,14 @@ export class AiTaskService {
       task.sources = dedupeSources([...task.sources, event.source]);
     } else if (event.type === "patch-proposal") {
       const approval = createApproval(task, event.proposal);
-      const proposal = { ...event.proposal, taskId: task.id, approvalId: approval.id, createdAt: Date.now(), status: "pending" as const };
+      const proposal = {
+        ...event.proposal,
+        operations: await this.prepareProposalOperations(event.proposal),
+        taskId: task.id,
+        approvalId: approval.id,
+        createdAt: Date.now(),
+        status: "pending" as const
+      };
       task.proposals.push(proposal);
       task.approvals.push(approval);
       task.status = "waiting_approval";
@@ -277,55 +298,174 @@ export class AiTaskService {
     return task;
   }
 
-  private async applyProposal(proposal: AiPatchProposal): Promise<AiWriteTransaction> {
-    const operations = [];
-    for (const operation of proposal.operations) {
-      const pathRel = operationTargetPath(operation, proposal.pathRel);
-      if (operation.type === "createDirectory") {
-        if (!pathRel) {
-          throw new Error("AI workspace operation path is required.");
-        }
-        await this.services.files.create({ workspaceId: proposal.workspaceId, pathRel, kind: "directory" });
-        operations.push({ pathRel, beforeSnapshotId: undefined, beforeHash: "new", afterHash: "directory", createdDirectory: true });
-        continue;
-      }
-      if (operation.type === "movePath") {
-        await this.services.files.rename({ workspaceId: proposal.workspaceId, sourcePathRel: operation.sourcePathRel, targetPathRel: operation.targetPathRel });
-        operations.push({ pathRel: operation.sourcePathRel, targetPathRel: operation.targetPathRel, beforeHash: "move", afterHash: "move", movedPath: true });
-        continue;
-      }
-      if (!pathRel || !isMarkdownPath(pathRel)) {
-        throw new Error("AI 工作区操作只能修改 Markdown 文件。");
-      }
-      if (operation.type === "createFile") {
-        await this.services.files.create({ workspaceId: proposal.workspaceId, pathRel, kind: "file", content: operation.afterText });
-        const snapshot = await this.services.files.createHistorySnapshot({ workspaceId: proposal.workspaceId, pathRel, reason: "manual", content: operation.afterText });
-        operations.push({ pathRel, beforeSnapshotId: undefined, beforeHash: "new", afterHash: snapshot.entry?.sha256 ?? sha256Text(operation.afterText), createdFile: true });
-        continue;
-      }
-      const current = await this.services.files.readFile({ workspaceId: proposal.workspaceId, pathRel });
-      const beforeSnapshot = await this.services.files.createHistorySnapshot({ workspaceId: proposal.workspaceId, pathRel, reason: "manual", content: current.content });
-      const nextContent = applyPatchOperation(current.content, operation);
-      const result = await this.services.files.writeAtomic({
-        workspaceId: proposal.workspaceId,
-        pathRel,
-        content: nextContent,
-        baseHash: current.sha256,
-        createSnapshot: false
-      });
-      if (result.status !== "saved") {
-        throw new Error(`${pathRel}: ${result.status === "conflict" ? "保存冲突" : "保存失败"}`);
-      }
-      operations.push({ pathRel, beforeSnapshotId: beforeSnapshot.entry?.id, beforeHash: current.sha256, afterHash: result.sha256, createdFile: false });
+  private async applyProposal(task: AiTaskSnapshot, proposal: AiPatchProposal, selectedOperationIds?: string[]): Promise<AiWriteTransaction> {
+    if (proposal.operations.length > AI_WORKSPACE_PATCH_OPERATION_LIMIT) {
+      throw new Error(`AI proposal exceeds the ${AI_WORKSPACE_PATCH_OPERATION_LIMIT}-operation limit`);
     }
-    return {
+    const selected = selectProposalOperations(proposal.operations, selectedOperationIds);
+    validateProposalOperations(selected, proposal.pathRel);
+    await this.assertProposalPreconditions(proposal.workspaceId, selected, proposal.pathRel);
+    const executionOrder = [...selected].sort((left, right) => operationExecutionRank(left) - operationExecutionRank(right));
+    const transaction: AiWriteTransaction = {
       id: randomUUID(),
       taskId: proposal.taskId ?? proposal.runId,
       proposalId: proposal.id,
       workspaceId: proposal.workspaceId,
       createdAt: Date.now(),
-      operations
+      status: "prepared",
+      operations: []
     };
+    task.writes.push(transaction);
+    task.updatedAt = Date.now();
+    await this.saveTask(task);
+    try {
+      for (const operation of executionOrder) {
+        const pathRel = operationTargetPath(operation, proposal.pathRel);
+        const operationId = operation.id;
+        if (operation.type === "createDirectory") {
+          if (!pathRel) {
+            throw new Error("AI workspace operation path is required.");
+          }
+          await this.services.files.create({ workspaceId: proposal.workspaceId, pathRel, kind: "directory" });
+          transaction.operations.push({ pathRel, beforeSnapshotId: undefined, beforeHash: "new", afterHash: "directory", createdDirectory: true, operationId, status: "applied" });
+          continue;
+        }
+        if (operation.type === "movePath") {
+          await this.services.files.rename({ workspaceId: proposal.workspaceId, sourcePathRel: operation.sourcePathRel, targetPathRel: operation.targetPathRel });
+          transaction.operations.push({ pathRel: operation.sourcePathRel, targetPathRel: operation.targetPathRel, beforeHash: "move", afterHash: "move", movedPath: true, operationId, status: "applied" });
+          continue;
+        }
+        if (!pathRel || !isMarkdownPath(pathRel)) {
+          throw new Error("AI 工作区操作只能修改 Markdown 文件。");
+        }
+        if (operation.type === "createFile") {
+          await this.services.files.create({ workspaceId: proposal.workspaceId, pathRel, kind: "file", content: operation.afterText });
+          const snapshot = await this.services.files.createHistorySnapshot({ workspaceId: proposal.workspaceId, pathRel, reason: "manual", content: operation.afterText });
+          transaction.operations.push({ pathRel, beforeSnapshotId: undefined, beforeHash: "new", afterHash: snapshot.entry?.sha256 ?? sha256Text(operation.afterText), createdFile: true, operationId, status: "applied" });
+          continue;
+        }
+        const current = await this.services.files.readFile({ workspaceId: proposal.workspaceId, pathRel });
+        const beforeSnapshot = await this.services.files.createHistorySnapshot({ workspaceId: proposal.workspaceId, pathRel, reason: "manual", content: current.content });
+        const nextContent = applyPatchOperation(current.content, operation);
+        const result = await this.services.files.writeAtomic({
+          workspaceId: proposal.workspaceId,
+          pathRel,
+          content: nextContent,
+          baseHash: current.sha256,
+          createSnapshot: false
+        });
+        if (result.status !== "saved") {
+          throw new Error(`${pathRel}: ${result.status === "conflict" ? "保存冲突" : "保存失败"}`);
+        }
+        transaction.operations.push({ pathRel, beforeSnapshotId: beforeSnapshot.entry?.id, beforeContent: current.content, beforeHash: current.sha256, afterHash: result.sha256, createdFile: false, operationId, status: "applied" });
+      }
+      transaction.status = "committed";
+      await this.saveTask(task);
+      return transaction;
+    } catch (error) {
+      try {
+        await this.rollbackTransactionOperations(transaction);
+        transaction.status = "rolled_back";
+      } catch (rollbackError) {
+        transaction.status = "rollback_failed";
+        transaction.operations.push({ pathRel: "", status: "failed", error: rollbackError instanceof Error ? rollbackError.message : String(rollbackError) });
+      }
+      task.updatedAt = Date.now();
+      await this.saveTask(task);
+      throw error;
+    }
+  }
+
+  private async prepareProposalOperations(proposal: AiPatchProposal): Promise<AiPatchOperation[]> {
+    const prepared = withOperationMetadata(proposal.operations);
+    return Promise.all(prepared.map(async (operation) => {
+      if (operation.type === "createDirectory" || operation.type === "createFile") {
+        return { ...operation, baseHash: "new" };
+      }
+      if (operation.type === "movePath") {
+        let baseHash = "exists";
+        if (isMarkdownPath(operation.sourcePathRel)) {
+          try {
+            baseHash = (await this.services.files.readFile({ workspaceId: proposal.workspaceId, pathRel: operation.sourcePathRel })).sha256;
+          } catch {
+            // Directory moves use an existence precondition instead of a content hash.
+          }
+        }
+        return { ...operation, baseHash, targetBaseHash: "new" };
+      }
+      const pathRel = operationTargetPath(operation, proposal.pathRel);
+      const current = await this.services.files.readFile({ workspaceId: proposal.workspaceId, pathRel });
+      return { ...operation, baseHash: current.sha256 };
+    }));
+  }
+
+  private async assertProposalPreconditions(workspaceId: string, operations: AiPatchOperation[], fallbackPath: string): Promise<void> {
+    for (const operation of operations) {
+      if (operation.type === "createDirectory" || operation.type === "createFile") {
+        if (await this.workspacePathExists(workspaceId, operation.pathRel)) {
+          throw new Error(`transaction_precondition_failed: ${operation.pathRel} already exists`);
+        }
+        continue;
+      }
+      if (operation.type === "movePath") {
+        if (!(await this.workspacePathExists(workspaceId, operation.sourcePathRel))) {
+          throw new Error(`transaction_precondition_failed: ${operation.sourcePathRel} is missing`);
+        }
+        if (await this.workspacePathExists(workspaceId, operation.targetPathRel)) {
+          throw new Error(`transaction_precondition_failed: ${operation.targetPathRel} already exists`);
+        }
+        if (operation.baseHash && operation.baseHash !== "exists" && isMarkdownPath(operation.sourcePathRel)) {
+          const current = await this.services.files.readFile({ workspaceId, pathRel: operation.sourcePathRel });
+          if (current.sha256 !== operation.baseHash) {
+            throw new Error(`transaction_precondition_failed: ${operation.sourcePathRel} changed after proposal`);
+          }
+        }
+        continue;
+      }
+      const pathRel = operationTargetPath(operation, fallbackPath);
+      const current = await this.services.files.readFile({ workspaceId, pathRel });
+      if (!operation.baseHash || current.sha256 !== operation.baseHash) {
+        throw new Error(`transaction_precondition_failed: ${pathRel} changed after proposal`);
+      }
+    }
+  }
+
+  private async workspacePathExists(workspaceId: string, pathRel: string): Promise<boolean> {
+    const parent = pathRel.split("/").slice(0, -1).join("/");
+    try {
+      const tree = await this.services.files.listTree({ workspaceId, root: parent, sortBy: "name", showHidden: true });
+      return tree.nodes.some((node) => node.pathRel === pathRel);
+    } catch {
+      return false;
+    }
+  }
+
+  private async rollbackTransactionOperations(transaction: AiWriteTransaction): Promise<void> {
+    for (const operation of [...transaction.operations].reverse()) {
+      if (operation.movedPath && operation.targetPathRel) {
+        await this.services.files.rename({ workspaceId: transaction.workspaceId, sourcePathRel: operation.targetPathRel, targetPathRel: operation.pathRel });
+      } else if (operation.createdFile || operation.createdDirectory) {
+        await this.services.files.trash({ workspaceId: transaction.workspaceId, pathRel: operation.pathRel });
+      } else if (!operation.createdFile && !operation.createdDirectory && !operation.movedPath) {
+        const beforeContent = await this.readTransactionBeforeContent(transaction.workspaceId, operation);
+        const current = await this.services.files.readFile({ workspaceId: transaction.workspaceId, pathRel: operation.pathRel });
+        const restored = await this.services.files.writeAtomic({ workspaceId: transaction.workspaceId, pathRel: operation.pathRel, content: beforeContent, baseHash: current.sha256, createSnapshot: false });
+        if (restored.status !== "saved") throw new Error(`Rollback failed for ${operation.pathRel}: ${restored.status}`);
+      }
+      operation.status = "rolled_back";
+    }
+  }
+
+  private async readTransactionBeforeContent(
+    workspaceId: string,
+    operation: AiWriteTransaction["operations"][number]
+  ): Promise<string> {
+    if (operation.beforeContent !== undefined) return operation.beforeContent;
+    if (operation.beforeSnapshotId) {
+      const snapshot = await this.services.files.readHistory({ workspaceId, snapshotId: operation.beforeSnapshotId });
+      if (snapshot) return snapshot.content;
+    }
+    throw new Error(`Missing rollback snapshot for ${operation.pathRel}`);
   }
 
   private async taskForRun(runId: string): Promise<AiTaskSnapshot | undefined> {
@@ -377,11 +517,18 @@ export class AiTaskService {
     if (!active) {
       return [];
     }
+    const stored = active.db.listAiTasks().map(normalizeStoredTask);
+    if (stored.length) {
+      return stored;
+    }
     const dir = tasksDir(active.info.rootPath);
     try {
       const entries = await readdir(dir);
       const tasks = await Promise.all(entries.filter((entry) => entry.endsWith(".json")).map((entry) => readTaskFile(path.join(dir, entry))));
-      return tasks.filter((task): task is AiTaskSnapshot => Boolean(task));
+      const migrated = tasks.filter((task): task is AiTaskSnapshot => Boolean(task)).map(normalizeStoredTask);
+      for (const task of migrated) active.db.saveAiTask(task);
+      if (migrated.length) await active.db.save();
+      return migrated;
     } catch {
       return [];
     }
@@ -396,7 +543,16 @@ export class AiTaskService {
     if (!active) {
       return undefined;
     }
-    return readTaskFile(path.join(tasksDir(active.info.rootPath), `${safeTaskId(taskId)}.json`));
+    const stored = active.db.readAiTask(taskId);
+    if (stored) return normalizeStoredTask(stored);
+    const legacy = await readTaskFile(path.join(tasksDir(active.info.rootPath), `${safeTaskId(taskId)}.json`));
+    if (legacy) {
+      const task = normalizeStoredTask(legacy);
+      active.db.saveAiTask(task);
+      await active.db.save();
+      return task;
+    }
+    return undefined;
   }
 
   private async saveTask(task: AiTaskSnapshot): Promise<void> {
@@ -405,9 +561,8 @@ export class AiTaskService {
       return;
     }
     const runtime = this.services.workspaces.requireWorkspace(workspaceId);
-    const dir = tasksDir(runtime.info.rootPath);
-    await mkdir(dir, { recursive: true });
-    await writeFile(path.join(dir, `${safeTaskId(task.id)}.json`), `${JSON.stringify(task, null, 2)}\n`, "utf8");
+    runtime.db.saveAiTask(task);
+    await runtime.db.save();
   }
 }
 
@@ -461,6 +616,67 @@ function applyPatchOperation(current: string, operation: AiPatchOperation): stri
   throw new Error("Unsupported AI patch operation");
 }
 
+function withOperationMetadata(operations: AiPatchOperation[]): AiPatchOperation[] {
+  const identified = operations.map((operation, index) => ({ ...operation, id: operation.id ?? `operation-${index + 1}` }));
+  const directories = identified.flatMap((operation) => operation.type === "createDirectory" ? [{ pathRel: operation.pathRel, id: operation.id }] : []);
+  return identified.map((operation) => {
+    const target = operation.type === "movePath" ? operation.targetPathRel : "pathRel" in operation ? operation.pathRel : undefined;
+    const inferred = target
+      ? directories.filter((directory) => target !== directory.pathRel && target.startsWith(`${directory.pathRel}/`)).map((directory) => directory.id)
+      : [];
+    return { ...operation, dependsOn: [...new Set([...(operation.dependsOn ?? []), ...inferred])] } as AiPatchOperation;
+  });
+}
+
+function selectProposalOperations(operations: AiPatchOperation[], selectedOperationIds?: string[]): AiPatchOperation[] {
+  const prepared = withOperationMetadata(operations);
+  if (!selectedOperationIds) return prepared;
+  if (!selectedOperationIds.length) {
+    throw new Error("AI proposal approval must select at least one operation");
+  }
+  const byId = new Map(prepared.map((operation) => [operation.id!, operation]));
+  const unknown = selectedOperationIds.find((id) => !byId.has(id));
+  if (unknown) {
+    throw new Error(`AI proposal operation was not found: ${unknown}`);
+  }
+  const selected = new Set(selectedOperationIds);
+  const includeDependencies = (id: string) => {
+    const operation = byId.get(id);
+    if (!operation) return;
+    for (const dependency of operation.dependsOn ?? []) {
+      if (!byId.has(dependency)) {
+        throw new Error(`AI proposal dependency was not found: ${dependency}`);
+      }
+      if (!selected.has(dependency)) {
+        selected.add(dependency);
+        includeDependencies(dependency);
+      }
+    }
+  };
+  [...selected].forEach(includeDependencies);
+  return prepared.filter((operation) => selected.has(operation.id!));
+}
+
+function operationExecutionRank(operation: AiPatchOperation): number {
+  if (operation.type === "createDirectory") return 0;
+  if (operation.type === "movePath") return 1;
+  return 2;
+}
+
+function validateProposalOperations(operations: AiPatchOperation[], fallbackPath: string): void {
+  for (const operation of operations) {
+    if (operation.type === "movePath") {
+      normalizeWorkspaceUserPath(operation.sourcePathRel);
+      normalizeWorkspaceUserPath(operation.targetPathRel);
+      continue;
+    }
+    const pathRel = operationTargetPath(operation, fallbackPath);
+    if (operation.type !== "createDirectory" && !isMarkdownPath(pathRel)) {
+      throw new Error("AI 工作区操作只能修改 Markdown 文件。");
+    }
+  }
+}
+
 function operationTargetPath(operation: AiPatchOperation, fallback: string): string {
   const pathRel = "pathRel" in operation && operation.pathRel ? operation.pathRel : fallback;
   return normalizeWorkspaceUserPath(pathRel);
@@ -496,4 +712,15 @@ async function readTaskFile(filePath: string): Promise<AiTaskSnapshot | undefine
   } catch {
     return undefined;
   }
+}
+
+function normalizeStoredTask(task: AiTaskSnapshot): AiTaskSnapshot {
+  return {
+    ...task,
+    writes: task.writes.map((transaction) => ({
+      ...transaction,
+      status: transaction.status ?? (transaction.undoneAt ? "rolled_back" : "committed"),
+      operations: transaction.operations.map((operation) => ({ ...operation, status: operation.status ?? "applied" }))
+    }))
+  };
 }

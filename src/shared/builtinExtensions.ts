@@ -85,6 +85,46 @@ function appSettingsContributions(tr: Translator): ExtensionManifest["contribute
       order: 50
     },
     {
+      id: "settings.inboxDirectory",
+      key: "inboxDirectory",
+      label: tr("Inbox 目录"),
+      category: "advanced",
+      type: "text",
+      order: 51
+    },
+    {
+      id: "settings.quickCaptureFilePattern",
+      key: "quickCaptureFilePattern",
+      label: tr("快速捕获文件格式"),
+      category: "advanced",
+      type: "text",
+      order: 52
+    },
+    {
+      id: "settings.dailyNoteDirectory",
+      key: "dailyNoteDirectory",
+      label: tr("Daily Note 目录"),
+      category: "advanced",
+      type: "text",
+      order: 53
+    },
+    {
+      id: "settings.dailyNoteFilePattern",
+      key: "dailyNoteFilePattern",
+      label: tr("Daily Note 文件格式"),
+      category: "advanced",
+      type: "text",
+      order: 54
+    },
+    {
+      id: "settings.templatesDirectory",
+      key: "templatesDirectory",
+      label: tr("模板目录"),
+      category: "advanced",
+      type: "text",
+      order: 55
+    },
+    {
       id: "settings.pluginSafeMode",
       key: "pluginSafeMode",
       label: tr("外部插件安全模式"),
@@ -191,13 +231,15 @@ export function getBuiltInExtensionManifests(locale: ResolvedLocale = "zh-CN"): 
       permissions: ["workspace:read", "workspace:write", "ui:contribute"],
       contributes: {
         commands: [
+          { id: "file.open", title: tr("打开文件"), keywords: ["open file", "markdown"], order: 5 },
           { id: "workspace.open", title: tr("打开工作区"), keywords: ["open workspace"], order: 10 },
           { id: "workspace.create", title: tr("创建工作区"), keywords: ["create workspace"], order: 20 },
           { id: "workspace.close", title: tr("关闭工作区"), keywords: ["close workspace"], order: 30 }
         ],
         menus: [
+          { id: "menu.file.open", label: tr("打开文件"), command: "file.open", location: "file", group: "workspace", order: 10 },
           { id: "menu.file.workspace.open", label: tr("打开工作区"), command: "workspace.open", location: "file", group: "workspace", order: 20 },
-          { id: "menu.file.workspace.close", label: tr("关闭工作区"), command: "workspace.close", location: "file", group: "workspace", order: 30 }
+          { id: "menu.file.workspace.close", label: tr("关闭工作区"), command: "workspace.close", location: "file", group: "workspace", order: 30, when: "workspace" }
         ]
       }
     },
@@ -320,7 +362,7 @@ export function getBuiltInExtensionManifests(locale: ResolvedLocale = "zh-CN"): 
         ],
         sidebarPanels: [{ id: "files", title: tr("笔记"), icon: "FolderOpen", command: "view.files", order: 20, visibleInNav: true }],
         menus: [
-          { id: "menu.file.new", label: tr("新建笔记"), command: "file.new", location: "file", group: "workspace", order: 10 },
+          { id: "menu.file.new", label: tr("新建笔记"), command: "file.new", location: "file", group: "workspace", order: 10, when: "workspace" },
           { id: "menu.view.files", label: tr("笔记"), command: "view.files", location: "view", group: "sidebar", order: 30 }
         ]
       }

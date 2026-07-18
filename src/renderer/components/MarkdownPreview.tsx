@@ -1,15 +1,15 @@
-import { useEffect, useRef, type MouseEvent } from "react";
-import mermaid from "mermaid";
-
+import { Fragment, useEffect, useRef, useState, type KeyboardEvent, type MouseEvent } from "react";
 import { normalizeCodeBlockLanguage } from "../../shared/codeBlockLanguages";
 import type { Translator } from "../../shared/i18n";
 import { useRendererI18n } from "../app/i18n";
+import { renderMermaidSvg } from "../services/mermaidRenderer";
 import { getCodeBlockLanguageSelectOptions } from "./codeBlockLanguageSelect";
+import { DiagramViewer, type DiagramViewerContent } from "./DiagramViewer";
 
 interface MarkdownPreviewProps {
   html: string;
   renderDiagrams?: boolean;
-  onMermaidClick?: (diagram: MarkdownPreviewDiagramClick) => void;
+  onMermaidEdit?: (diagram: MarkdownPreviewDiagramClick) => void;
   onCodeLanguageChange?: (change: MarkdownPreviewCodeLanguageChange) => void;
 }
 
@@ -23,9 +23,10 @@ export interface MarkdownPreviewCodeLanguageChange {
   language: string;
 }
 
-export function MarkdownPreview({ html, renderDiagrams = true, onMermaidClick, onCodeLanguageChange }: MarkdownPreviewProps) {
+export function MarkdownPreview({ html, renderDiagrams = true, onMermaidEdit, onCodeLanguageChange }: MarkdownPreviewProps) {
   const { tr } = useRendererI18n();
   const previewRef = useRef<HTMLDivElement>(null);
+  const [diagramViewer, setDiagramViewer] = useState<DiagramViewerContent | undefined>();
 
   useEffect(() => {
     const root = previewRef.current;
@@ -38,12 +39,21 @@ export function MarkdownPreview({ html, renderDiagrams = true, onMermaidClick, o
     if (!diagrams.length) {
       return;
     }
+    diagrams.forEach((diagram) => prepareDiagramInteraction(diagram, tr("查看图表")));
     let canceled = false;
-    void renderMermaidDiagrams(diagrams, () => canceled);
+    void renderMermaidDiagrams(diagrams, () => canceled).then(() => {
+      if (!canceled) {
+        diagrams.forEach((diagram) => prepareDiagramInteraction(diagram, tr("查看图表")));
+      }
+    });
     return () => {
       canceled = true;
     };
-  }, [html, renderDiagrams]);
+  }, [html, renderDiagrams, tr]);
+
+  useEffect(() => {
+    setDiagramViewer(undefined);
+  }, [html]);
 
   useEffect(() => {
     const root = previewRef.current;
@@ -57,7 +67,7 @@ export function MarkdownPreview({ html, renderDiagrams = true, onMermaidClick, o
     if (event.target instanceof Element && event.target.closest(".code-language-select")) {
       return;
     }
-    if (!onMermaidClick || !(event.target instanceof Element)) {
+    if (!(event.target instanceof Element)) {
       return;
     }
     const diagram = event.target.closest<HTMLElement>(".mermaid");
@@ -66,14 +76,67 @@ export function MarkdownPreview({ html, renderDiagrams = true, onMermaidClick, o
       return;
     }
     event.preventDefault();
+    diagram.focus({ preventScroll: true });
+    return;
+  };
+
+  const handleKeyDown = (event: KeyboardEvent<HTMLDivElement>) => {
+    if (!(event.target instanceof Element)) {
+      return;
+    }
+    const diagram = event.target.closest<HTMLElement>(".mermaid");
+    const root = previewRef.current;
+    if (!diagram || !root?.contains(diagram)) {
+      return;
+    }
     const diagrams = Array.from(root.querySelectorAll<HTMLElement>(".mermaid"));
-    onMermaidClick({
+    const location = {
       index: diagrams.indexOf(diagram),
       markdown: diagram.dataset.markdown
+    };
+    if (event.key === "F2" || (event.key.toLowerCase() === "e" && !event.metaKey && !event.ctrlKey && !event.altKey)) {
+      if (!onMermaidEdit) {
+        return;
+      }
+      event.preventDefault();
+      event.stopPropagation();
+      onMermaidEdit(location);
+      return;
+    }
+    if (event.key !== "Enter" && event.key !== " ") {
+      return;
+    }
+    event.preventDefault();
+    openDiagramViewer(diagram, location);
+  };
+
+  const openDiagramViewer = (diagram: HTMLElement, location: MarkdownPreviewDiagramClick) => {
+    const svg = diagram.querySelector<SVGElement>("svg")?.outerHTML;
+    if (!svg) {
+      return;
+    }
+    setDiagramViewer({
+      svg,
+      markdown: location.markdown,
+      initialScale: 1.25,
+      onEdit: onMermaidEdit ? () => onMermaidEdit(location) : undefined
     });
   };
 
-  return <div ref={previewRef} className="markdown-preview" onClick={handleClick} dangerouslySetInnerHTML={{ __html: html }} />;
+  return (
+    <Fragment>
+      <div ref={previewRef} className="markdown-preview" onClick={handleClick} onKeyDown={handleKeyDown} dangerouslySetInnerHTML={{ __html: html }} />
+      {diagramViewer ? <DiagramViewer content={diagramViewer} onClose={() => setDiagramViewer(undefined)} /> : null}
+    </Fragment>
+  );
+}
+
+function prepareDiagramInteraction(diagram: HTMLElement, label: string) {
+  diagram.tabIndex = 0;
+  diagram.setAttribute("role", "button");
+  diagram.setAttribute("aria-label", label);
+  diagram.setAttribute("aria-keyshortcuts", "Enter Space F2 E");
+  diagram.title = label;
 }
 
 function attachCodeLanguageControls(
@@ -128,27 +191,14 @@ async function renderMermaidDiagrams(elements: HTMLElement[], isCanceled: () => 
   if (isCanceled()) {
     return;
   }
-  try {
-    mermaid.initialize({
-      startOnLoad: false,
-      securityLevel: "strict",
-      theme: document.documentElement.dataset.theme === "dark" || document.documentElement.dataset.theme === "technical" ? "dark" : "default"
-    });
-  } catch (error) {
-    if (!isCanceled()) {
-      elements.forEach((element) => markMermaidRenderError(element, error));
-    }
-    return;
-  }
   await Promise.all(
-    elements.map(async (element, index) => {
+    elements.map(async (element) => {
       const source = element.textContent ?? "";
       if (!source.trim() || isCanceled()) {
         return;
       }
-      const id = `nolia-mermaid-${Date.now()}-${index}`;
       try {
-        const { svg } = await mermaid.render(id, source);
+        const svg = await renderMermaidSvg(source, "nolia-mermaid");
         if (isCanceled()) {
           return;
         }

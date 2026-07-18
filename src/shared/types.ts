@@ -1,4 +1,5 @@
 import type { AiSettings } from "./ai";
+import type { RecentExternalFile } from "./externalDocuments";
 
 export type ThemeId = "system" | "light" | "dark" | "paper" | "technical";
 export type EditorMode = "wysiwyg" | "source" | "split";
@@ -17,6 +18,11 @@ export interface AppSettings {
   focusMode: boolean;
   autoSaveDelayMs: number;
   attachmentStrategy: "workspace_assets" | "document_assets";
+  inboxDirectory: string;
+  quickCaptureFilePattern: string;
+  dailyNoteDirectory: string;
+  dailyNoteFilePattern: string;
+  templatesDirectory: string;
   pluginSafeMode: boolean;
   ai: AiSettings;
   plugins: Record<string, {
@@ -51,6 +57,9 @@ export interface WorkspaceIndexedEvent {
   workspaceId: string;
   pathRel: string;
   indexVersion: number;
+  sequence?: number;
+  operation?: "create" | "change" | "delete";
+  node?: FileTreeNode;
 }
 
 export interface RecentWorkspace {
@@ -62,6 +71,8 @@ export interface RecentWorkspace {
   exists: boolean;
   availability?: "available" | "missing" | "notWorkspace";
 }
+
+export type { RecentExternalFile };
 
 export interface FileTreeNode {
   pathRel: string;
@@ -191,4 +202,17 @@ export interface BacklinkItem {
 export interface BacklinksResponse {
   linked: BacklinkItem[];
   unlinked: BacklinkItem[];
+}
+
+export interface RenameReferenceChange {
+  pathRel: string;
+  before: string;
+  after: string;
+  replacements: number;
+}
+
+export interface RenameReferencePreview {
+  sourcePathRel: string;
+  targetPathRel: string;
+  changes: RenameReferenceChange[];
 }

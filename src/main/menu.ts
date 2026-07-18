@@ -64,7 +64,8 @@ export function installApplicationMenu(
       submenu: [
         ...fileMenuItems,
         { type: "separator" },
-        { label: tr("关闭窗口"), role: "close" }
+        { label: tr("关闭标签"), accelerator: acceleratorForModifier("W", process.platform), click: () => send("document.close") },
+        { label: tr("关闭窗口"), accelerator: acceleratorForModifier("Shift+W", process.platform), click: () => getMainWindow()?.close() }
       ]
     },
     {

@@ -1,7 +1,8 @@
 /* eslint-disable no-redeclare */
 import { toString as mdastToString } from "mdast-util-to-string";
+import { fromHtml } from "hast-util-from-html";
+import katex from "katex";
 import rehypeHighlight from "rehype-highlight";
-import rehypeKatex from "rehype-katex";
 import rehypeParse from "rehype-parse";
 import rehypeRaw from "rehype-raw";
 import rehypeRemark from "rehype-remark";
@@ -14,12 +15,13 @@ import remarkRehype from "remark-rehype";
 import remarkStringify from "remark-stringify";
 import { unified } from "unified";
 import { visit } from "unist-util-visit";
-import { parse as parseYaml, stringify as stringifyYaml } from "yaml";
+import { isMap, isScalar, isSeq, parse as parseYaml, parseDocument, stringify as stringifyYaml } from "yaml";
 import type { Info as MarkdownInfo, State as MarkdownState } from "mdast-util-to-markdown";
 import type { Heading, Image, Link, Parents, Root, RootContent, Text } from "mdast";
 
 import { codeFenceLanguageForCodeBlock } from "./codeBlockLanguages";
 import type { AttachmentRef, MarkdownLink, OutlineItem, ParsedDocument, WikiLink } from "./types";
+import type { PropertyMutation } from "./contracts";
 
 export const NOLIA_TOC_START = "<!-- nolia-toc:start -->";
 export const NOLIA_TOC_END = "<!-- nolia-toc:end -->";
@@ -203,6 +205,140 @@ export function stringifyMarkdown(frontmatter: Record<string, unknown>, body: st
   return `---\n${stringifyYaml(frontmatter).trimEnd()}\n---\n${normalizedBody}`;
 }
 
+export function applyFrontmatterMutation(source: string, mutation: PropertyMutation): string {
+  const match = source.match(/^---\r?\n([\s\S]*?)\r?\n---[ \t]*(?:\r?\n|$)/);
+  const document = parseDocument(match ? match[1] : "{}", { keepSourceTokens: true });
+  if (document.errors.length) {
+    const first = document.errors[0];
+    throw new Error(first.message);
+  }
+  if (!isMap(document.contents)) {
+    throw new Error("Frontmatter must be a YAML mapping");
+  }
+
+  if (mutation.type === "set") {
+    document.set(mutation.key, mutation.value);
+  } else if (mutation.type === "delete") {
+    document.delete(mutation.key);
+  } else {
+    const value = document.get(mutation.key, true);
+    if (value !== undefined) {
+      document.set(mutation.nextKey, value);
+      document.delete(mutation.key);
+    }
+  }
+
+  const yaml = document.toString({ lineWidth: 0 }).trimEnd();
+  const body = match ? source.slice(match[0].length) : source;
+  if (!yaml || yaml === "{}") {
+    return body.replace(/^\n+/, "");
+  }
+  return `---\n${yaml}\n---\n${body.replace(/^\n+/, "")}`;
+}
+
+export function renameMarkdownTagReferences(source: string, sourceTag: string, targetTag: string): { content: string; replacements: number } {
+  const sourceKey = sourceTag.replace(/^#/, "").trim();
+  const targetKey = targetTag.replace(/^#/, "").trim();
+  if (!sourceKey || !targetKey || sourceKey.toLowerCase() === targetKey.toLowerCase()) {
+    return { content: source, replacements: 0 };
+  }
+
+  let content = source;
+  let replacements = 0;
+  const frontmatter = renameFrontmatterTag(content, sourceKey, targetKey);
+  content = frontmatter.content;
+  replacements += frontmatter.replacements;
+
+  const frontmatterMatch = content.match(/^---\r?\n[\s\S]*?\r?\n---\r?\n?/);
+  const prefix = frontmatterMatch?.[0] ?? "";
+  const body = content.slice(prefix.length);
+  const inlinePattern = new RegExp(`(^|[\\s([{])#${escapeRegExp(sourceKey)}(?=$|[^\\p{L}\\p{N}_/-])`, "giu");
+  let inFence = false;
+  let fenceMarker = "";
+  const renamedBody = body.split(/(\r?\n)/).map((line) => {
+    if (/^\r?\n$/.test(line)) return line;
+    const fence = line.match(/^\s*(`{3,}|~{3,})/);
+    if (fence) {
+      const marker = fence[1][0];
+      if (!inFence) {
+        inFence = true;
+        fenceMarker = marker;
+      } else if (marker === fenceMarker) {
+        inFence = false;
+        fenceMarker = "";
+      }
+      return line;
+    }
+    if (inFence) return line;
+    return line.split(/(`+[^`]*`+)/).map((segment, index) => {
+      if (index % 2 === 1) return segment;
+      return segment.replace(inlinePattern, (match, leading: string) => {
+        replacements += 1;
+        return `${leading}#${targetKey}`;
+      });
+    }).join("");
+  }).join("");
+
+  return { content: `${prefix}${renamedBody}`, replacements };
+}
+
+function renameFrontmatterTag(source: string, sourceTag: string, targetTag: string): { content: string; replacements: number } {
+  const match = source.match(/^---\r?\n([\s\S]*?)\r?\n---[ \t]*(?:\r?\n|$)/);
+  if (!match) return { content: source, replacements: 0 };
+  const document = parseDocument(match[1], { keepSourceTokens: true });
+  if (document.errors.length || !isMap(document.contents)) return { content: source, replacements: 0 };
+  const key = document.has("tags") ? "tags" : document.has("tag") ? "tag" : undefined;
+  if (!key) return { content: source, replacements: 0 };
+  const node = document.get(key, true);
+  let replacements = 0;
+  if (isSeq(node)) {
+    const targetExists = node.items.some((item) => isScalar(item) && typeof item.value === "string" && item.value.toLowerCase() === targetTag.toLowerCase());
+    const matchingRanges: Array<[number, number, number?]> = [];
+    for (const item of node.items) {
+      if (isScalar(item) && typeof item.value === "string" && item.value.toLowerCase() === sourceTag.toLowerCase() && item.range) matchingRanges.push(item.range);
+    }
+    if (!targetExists && matchingRanges.length) {
+      const nextYaml = applyYamlScalarRangeEdits(match[1], matchingRanges.map((range) => ({ range, sourceTag, targetTag })));
+      const yamlStart = match[0].indexOf(match[1]);
+      const nextFrontmatter = `${match[0].slice(0, yamlStart)}${nextYaml}${match[0].slice(yamlStart + match[1].length)}`;
+      return { content: `${nextFrontmatter}${source.slice(match[0].length)}`, replacements: matchingRanges.length };
+    }
+    node.items = node.items.filter((item) => {
+      if (!isScalar(item) || typeof item.value !== "string" || item.value.toLowerCase() !== sourceTag.toLowerCase()) return true;
+      replacements += 1;
+      if (targetExists) return false;
+      item.value = targetTag;
+      return true;
+    });
+  } else if (isScalar(node) && typeof node.value === "string") {
+    const tagPattern = new RegExp(`(^|[\\s,])${escapeRegExp(sourceTag)}(?=$|[\\s,])`, "giu");
+    const nextValue = node.value.replace(tagPattern, (matchValue, prefix: string) => {
+      replacements += 1;
+      return `${prefix}${targetTag}`;
+    });
+    if (replacements && node.range) {
+      const nextYaml = applyYamlScalarRangeEdits(match[1], [{ range: node.range, sourceTag, targetTag }]);
+      const yamlStart = match[0].indexOf(match[1]);
+      const nextFrontmatter = `${match[0].slice(0, yamlStart)}${nextYaml}${match[0].slice(yamlStart + match[1].length)}`;
+      return { content: `${nextFrontmatter}${source.slice(match[0].length)}`, replacements };
+    }
+    node.value = nextValue;
+  }
+  if (!replacements) return { content: source, replacements: 0 };
+  const yaml = document.toString({ lineWidth: 0 }).trimEnd();
+  return { content: `---\n${yaml}\n---\n${source.slice(match[0].length).replace(/^\n+/, "")}`, replacements };
+}
+
+function applyYamlScalarRangeEdits(yaml: string, edits: Array<{ range: [number, number, number?]; sourceTag: string; targetTag: string }>): string {
+  let next = yaml;
+  for (const edit of [...edits].sort((left, right) => right.range[0] - left.range[0])) {
+    const raw = next.slice(edit.range[0], edit.range[1]);
+    const replaced = raw.replace(new RegExp(escapeRegExp(edit.sourceTag), "iu"), edit.targetTag);
+    next = `${next.slice(0, edit.range[0])}${replaced}${next.slice(edit.range[1])}`;
+  }
+  return next;
+}
+
 export function parseMarkdown(source: string, pathRel = ""): ParsedDocument {
   const diagnostics: ParsedDocument["diagnostics"] = [];
   const { frontmatter, body } = splitFrontmatter(source);
@@ -294,7 +430,7 @@ export async function renderMarkdownToHtml(markdown: string): Promise<string> {
     .use(rehypeSanitize, markdownSanitizeSchema)
     .use(rehypeHeadingIds)
     .use(rehypeTrimAutolinkTrailingPunctuation)
-    .use(rehypeKatex)
+    .use(rehypeKatexWorkerSafe)
     .use(rehypeHighlight)
     .use(rehypeWikiLinkClasses)
     .use(rehypeCallouts)
@@ -303,6 +439,64 @@ export async function renderMarkdownToHtml(markdown: string): Promise<string> {
     .process(renderBody);
 
   return trimRenderedCodeFenceNewline(String(file));
+}
+
+function rehypeKatexWorkerSafe() {
+  return (tree: HastNode) => {
+    transformMathChildren(tree, []);
+  };
+}
+
+function transformMathChildren(parent: HastNode, ancestors: HastNode[]): void {
+  const children = parent.children;
+  if (!children) {
+    return;
+  }
+  for (let index = 0; index < children.length; index += 1) {
+    const element = children[index];
+    if (element.type !== "element") {
+      continue;
+    }
+    const classes = Array.isArray(element.properties?.className) ? element.properties.className.map(String) : [];
+    const languageMath = classes.includes("language-math");
+    const mathDisplay = classes.includes("math-display");
+    const mathInline = classes.includes("math-inline");
+    if (languageMath || mathDisplay || mathInline) {
+      const parentElement = ancestors.at(-1);
+      const isMathFence = Boolean(element.tagName === "code" && languageMath && parent.tagName === "pre" && parentElement?.children);
+      const scope = isMathFence ? parent : element;
+      const replacementParent = isMathFence ? parentElement : parent;
+      const replacementIndex = replacementParent?.children?.indexOf(scope) ?? -1;
+      if (replacementParent?.children && replacementIndex >= 0) {
+        const source = hastText(scope);
+        let replacement: HastNode[];
+        try {
+          const html = katex.renderToString(source, { displayMode: isMathFence || mathDisplay, throwOnError: true });
+          replacement = fromHtml(html, { fragment: true }).children as HastNode[];
+        } catch (error) {
+          replacement = [{
+            type: "element",
+            tagName: "span",
+            properties: { className: ["katex-error"], title: error instanceof Error ? error.message : String(error) },
+            children: [{ type: "text", value: source }]
+          }];
+        }
+        replacementParent.children.splice(replacementIndex, 1, ...replacement);
+        if (!isMathFence) {
+          index += replacement.length - 1;
+        }
+        continue;
+      }
+    }
+    transformMathChildren(element, [...ancestors, parent]);
+  }
+}
+
+function hastText(node: HastNode): string {
+  if (node.type === "text") {
+    return node.value ?? "";
+  }
+  return (node.children ?? []).map(hastText).join("");
 }
 
 export function createMarkdownTocBlock(source: string, title = "目录"): string {

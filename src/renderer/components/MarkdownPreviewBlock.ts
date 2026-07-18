@@ -1,12 +1,15 @@
 import { Node, mergeAttributes } from "@tiptap/core";
 import { NodeSelection, TextSelection } from "@tiptap/pm/state";
 import type { EditorView } from "@tiptap/pm/view";
-import mermaid from "mermaid";
 import { slugifyMarkdownHeadingId } from "../../shared/markdown";
+import { renderMermaidSvg } from "../services/mermaidRenderer";
+import type { DiagramViewerContent } from "./DiagramViewer";
 import { wireMarkdownNodeInteraction } from "./markdownNodeInteraction";
 
 type MarkdownPreviewBlockOptions = {
   sourceLabel: string;
+  viewLabel: string;
+  onOpenDiagram?: (content: DiagramViewerContent) => void;
 };
 
 export const MarkdownPreviewBlock = Node.create<MarkdownPreviewBlockOptions>({
@@ -17,7 +20,9 @@ export const MarkdownPreviewBlock = Node.create<MarkdownPreviewBlockOptions>({
 
   addOptions() {
     return {
-      sourceLabel: "Markdown 块源码"
+      sourceLabel: "Markdown 块源码",
+      viewLabel: "查看图表",
+      onOpenDiagram: undefined
     };
   },
 
@@ -75,6 +80,11 @@ export const MarkdownPreviewBlock = Node.create<MarkdownPreviewBlockOptions>({
       wrapper.dataset.markdown = node.attrs.markdown;
       wrapper.contentEditable = "false";
       wrapper.tabIndex = 0;
+      if (node.attrs.kind === "mermaid") {
+        wrapper.setAttribute("aria-label", this.options.viewLabel);
+        wrapper.setAttribute("aria-keyshortcuts", "Enter Space F2 E");
+        wrapper.title = this.options.viewLabel;
+      }
       const preview = document.createElement("div");
       preview.className = "markdown-preview-block-render";
       const input = document.createElement("textarea");
@@ -115,6 +125,26 @@ export const MarkdownPreviewBlock = Node.create<MarkdownPreviewBlockOptions>({
 
       if (node.attrs.kind === "toc") {
         wireTocBlockNavigation(wrapper, view, getNodePos);
+      } else if (node.attrs.kind === "mermaid") {
+        wireMermaidBlockInteraction({
+          wrapper,
+          input,
+          view,
+          getPos: getNodePos,
+          setEditing,
+          onOpen: () => {
+            const svg = preview.querySelector<SVGElement>("svg")?.outerHTML;
+            if (!svg) {
+              return;
+            }
+            this.options.onOpenDiagram?.({
+              svg,
+              markdown: String(currentNode.attrs.markdown ?? ""),
+              initialScale: 1.25,
+              onEdit: () => setEditing(true, true)
+            });
+          }
+        });
       } else {
         wireMarkdownNodeInteraction({
           wrapper,
@@ -168,6 +198,78 @@ export const MarkdownPreviewBlock = Node.create<MarkdownPreviewBlockOptions>({
     };
   }
 });
+
+function wireMermaidBlockInteraction({ wrapper, input, view, getPos, setEditing, onOpen }: {
+  wrapper: HTMLElement;
+  input: HTMLTextAreaElement;
+  view: EditorView;
+  getPos: () => number | undefined;
+  setEditing: (editing: boolean, focusInput?: boolean) => void;
+  onOpen: () => void;
+}) {
+  const selectNode = (focusEditor = true) => {
+    const pos = getPos();
+    if (typeof pos !== "number") {
+      return;
+    }
+    view.dispatch(view.state.tr.setSelection(NodeSelection.create(view.state.doc, pos)));
+    if (focusEditor) {
+      view.focus();
+    }
+  };
+  const openViewer = () => {
+    selectNode();
+    onOpen();
+  };
+  const closeWhenFocusLeaves = () => {
+    window.setTimeout(() => {
+      if (!wrapper.contains(document.activeElement)) {
+        setEditing(false);
+      }
+    }, 0);
+  };
+
+  wrapper.addEventListener("mousedown", (event) => {
+    if (input.contains(event.target as globalThis.Node)) {
+      return;
+    }
+    event.preventDefault();
+    event.stopPropagation();
+    selectNode();
+  });
+  wrapper.addEventListener("click", (event) => {
+    if (input.contains(event.target as globalThis.Node)) {
+      return;
+    }
+    event.preventDefault();
+    event.stopPropagation();
+    selectNode();
+  });
+  wrapper.addEventListener("focus", () => selectNode(false));
+  wrapper.addEventListener("blur", closeWhenFocusLeaves);
+  wrapper.addEventListener("keydown", (event) => {
+    if (event.key === "Enter" || event.key === " ") {
+      event.preventDefault();
+      event.stopPropagation();
+      openViewer();
+      return;
+    }
+    if (event.key === "F2" || (event.key.toLowerCase() === "e" && !event.metaKey && !event.ctrlKey && !event.altKey)) {
+      event.preventDefault();
+      event.stopPropagation();
+      setEditing(true, true);
+      return;
+    }
+    if (event.key === "Escape") {
+      event.preventDefault();
+      event.stopPropagation();
+      setEditing(false);
+      view.focus();
+    }
+  });
+  input.addEventListener("focus", () => setEditing(true));
+  input.addEventListener("blur", closeWhenFocusLeaves);
+}
 
 function wireTocBlockNavigation(wrapper: HTMLElement, view: EditorView, getPos: () => number | undefined) {
   const selectBlock = () => {
@@ -376,12 +478,7 @@ async function renderMermaidPreview(target: HTMLElement) {
   const token = `${Date.now()}-${Math.random()}`;
   diagram.dataset.renderToken = token;
   try {
-    mermaid.initialize({
-      startOnLoad: false,
-      securityLevel: "strict",
-      theme: document.documentElement.dataset.theme === "dark" || document.documentElement.dataset.theme === "technical" ? "dark" : "default"
-    });
-    const { svg } = await mermaid.render(`nolia-edit-mermaid-${Date.now()}`, source);
+    const svg = await renderMermaidSvg(source, "nolia-edit-mermaid");
     if (diagram.dataset.renderToken !== token) {
       return;
     }

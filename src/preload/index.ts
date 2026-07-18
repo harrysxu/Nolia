@@ -1,6 +1,7 @@
 import { contextBridge, ipcRenderer } from "electron";
 
 import { IpcChannels } from "../shared/channels";
+import { isPreloadIpcResult } from "./ipcResult";
 import {
   type AttachmentImportRequest,
   type AttachmentPickImageRequest,
@@ -34,6 +35,7 @@ import {
   type FileListTreeRequest,
   type FileReadRequest,
   type FileRenameRequest,
+  type FileRenamePreviewRequest,
   type FileResourceActionRequest,
   type FileTrashRequest,
   type FileWriteBinaryAtomicRequest,
@@ -51,6 +53,34 @@ import {
 } from "../shared/ipc";
 import type { AiModelDescriptor, AiProviderTestResult, AiRunEvent, AiRunStartResponse, AiSecretGetResponse, AiSemanticIndexResult, AiSemanticIndexStatus, AiSettingsPublic, AiTaskSnapshot, AiTaskStartResponse, AiTaskSummary } from "../shared/ai";
 import type { PluginDescriptor } from "../shared/extensions";
+import type { PluginRpcRequest, PluginRpcResponse, PluginSessionDescriptor } from "../shared/plugins";
+import type {
+  ExternalDocumentChangedEvent,
+  ExternalDocumentDraft,
+  ExternalDocumentReadResponse,
+  ExternalDocumentSaveRequest,
+  ExternalDocumentSaveResponse,
+  ExternalFolderSession,
+  RecentExternalFile,
+  WindowDocumentState
+} from "../shared/externalDocuments";
+import type {
+  LocalGraphResponse,
+  DocumentDraft,
+  PropertyMutationRequest,
+  PropertyMutationResponse,
+  SavedSearch,
+  UnifiedSearchQuery,
+  UnifiedSearchResponse,
+  TagRenameApplyRequest,
+  TagRenameApplyResponse,
+  TagRenamePreview,
+  TagRenamePreviewRequest,
+  WorkspaceProbeResult,
+  WorkspaceHealthSnapshot,
+  WorkspaceSessionSnapshot,
+  WikiLinkTarget
+} from "../shared/contracts";
 import type {
   AppSettings,
   BacklinksResponse,
@@ -60,6 +90,7 @@ import type {
   FileReadResponse,
   FileTreeNode,
   FileWriteResponse,
+  RenameReferencePreview,
   ParsedDocument,
   RecentWorkspace,
   SearchQueryResponse,
@@ -82,12 +113,19 @@ export interface NoliaApi {
       };
     }>;
     open: (request?: WorkspaceOpenRequest) => Promise<WorkspaceInfo | undefined>;
+    probe?: (request?: { path?: string }) => Promise<WorkspaceProbeResult | undefined>;
     create: (request?: WorkspaceOpenRequest) => Promise<WorkspaceInfo | undefined>;
     listRecent: () => Promise<RecentWorkspace[]>;
     removeRecent?: (request: WorkspaceRemoveRecentRequest) => Promise<RecentWorkspace[]>;
     listTags: (request: WorkspaceListTagsRequest) => Promise<Array<{ name: string; displayName: string; count: number }>>;
+    listLinkTargets?: (request: { workspaceId: string }) => Promise<WikiLinkTarget[]>;
+    previewTagRename?: (request: TagRenamePreviewRequest) => Promise<TagRenamePreview>;
+    applyTagRename?: (request: TagRenameApplyRequest) => Promise<TagRenameApplyResponse>;
     switch: (request: WorkspaceSwitchRequest) => Promise<{ ok: boolean; restoredState?: WorkspaceInfo }>;
     close: () => Promise<void>;
+    readSession?: (request: { workspaceId: string }) => Promise<WorkspaceSessionSnapshot | undefined>;
+    writeSession?: (request: { workspaceId: string; session: WorkspaceSessionSnapshot }) => Promise<{ ok: boolean }>;
+    health?: (request: { workspaceId: string }) => Promise<WorkspaceHealthSnapshot>;
   };
   file: {
     listTree: (request: FileListTreeRequest) => Promise<{ nodes: FileTreeNode[] }>;
@@ -100,23 +138,50 @@ export interface NoliaApi {
     createHistorySnapshot?: (request: FileHistoryCreateRequest) => Promise<{ entry?: FileHistoryEntry }>;
     create: (request: FileCreateRequest) => Promise<{ ok: boolean; affectedPaths: string[] }>;
     rename: (request: FileRenameRequest) => Promise<{ ok: boolean; affectedPaths: string[] }>;
+    previewRename?: (request: FileRenamePreviewRequest) => Promise<RenameReferencePreview>;
     trash: (request: FileTrashRequest) => Promise<{ ok: boolean; affectedPaths: string[] }>;
     openExternal?: (request: FileResourceActionRequest) => Promise<{ ok: boolean; error?: string }>;
     revealInFinder?: (request: FileResourceActionRequest) => Promise<{ ok: boolean }>;
   };
   externalFile?: {
     consumePendingOpen: () => Promise<string[]>;
-    read: (request: ExternalFileReadRequest) => Promise<FileReadResponse>;
+    pick?: () => Promise<{ filePaths: string[] }>;
+    read: (request: ExternalFileReadRequest) => Promise<ExternalDocumentReadResponse>;
     writeAtomic: (request: ExternalFileWriteAtomicRequest) => Promise<FileWriteResponse>;
+    save?: (request: ExternalDocumentSaveRequest) => Promise<ExternalDocumentSaveResponse>;
+    readDraft?: (request: { filePath: string }) => Promise<ExternalDocumentDraft | undefined>;
+    writeDraft?: (request: Omit<ExternalDocumentDraft, "updatedAt">) => Promise<{ ok: true }>;
+    deleteDraft?: (request: { filePath: string }) => Promise<{ ok: true }>;
+    listRecent?: () => Promise<RecentExternalFile[]>;
+    removeRecent?: (request: { filePath: string }) => Promise<RecentExternalFile[]>;
+    openFolder?: (request: { filePath: string }) => Promise<ExternalFolderSession>;
+    closeFolder?: (request: { sessionId: string }) => Promise<{ ok: boolean }>;
+    resolveLink?: (request: { filePath: string; href: string; folderSessionId?: string }) => Promise<{ filePath?: string; fragment?: string }>;
+    pickAttachment?: () => Promise<{ path?: string }>;
+    importAttachment?: (request: { documentPath: string; sourcePath: string; baseHash: string }) => Promise<{ assetPath: string; markdown: string; mimeType: string; size: number }>;
+    export?: (request: { filePath: string; format: "pdf" | "html" | "markdown"; themeId?: string }) => Promise<{ status: "completed" | "failed"; outputPath?: string; warnings: string[] }>;
+  };
+  window?: {
+    setDocumentState: (state: WindowDocumentState) => Promise<{ ok: true }>;
+    confirmClose: () => Promise<{ ok: true }>;
   };
   document: {
     parse: (request: DocumentParseRequest) => Promise<ParsedDocument>;
+    mutateProperty?: (request: PropertyMutationRequest) => Promise<PropertyMutationResponse>;
+    readDraft?: (request: { workspaceId: string; pathRel: string }) => Promise<DocumentDraft | undefined>;
+    writeDraft?: (request: { workspaceId: string; pathRel: string; content: string; baseHash: string; revision: number }) => Promise<{ ok: boolean }>;
+    deleteDraft?: (request: { workspaceId: string; pathRel: string }) => Promise<{ ok: boolean }>;
   };
   search: {
     query: (request: SearchQueryRequest) => Promise<SearchQueryResponse>;
+    unified?: (request: { workspaceId: string; query: UnifiedSearchQuery }) => Promise<UnifiedSearchResponse>;
+    listSaved?: (request: { workspaceId: string }) => Promise<SavedSearch[]>;
+    save?: (request: { workspaceId: string; search: SavedSearch }) => Promise<SavedSearch[]>;
+    deleteSaved?: (request: { workspaceId: string; searchId: string }) => Promise<SavedSearch[]>;
   };
   graph: {
     getBacklinks: (request: GraphBacklinksRequest) => Promise<BacklinksResponse>;
+    getLocal?: (request: { workspaceId: string; pathRel: string; depth?: 1 | 2; limit?: number }) => Promise<LocalGraphResponse>;
   };
   attachment: {
     import: (request: AttachmentImportRequest) => Promise<{
@@ -146,6 +211,9 @@ export interface NoliaApi {
     setEnabled: (request: PluginSetEnabledRequest) => Promise<PluginDescriptor[]>;
     acceptPermissions: (request: PluginAcceptPermissionsRequest) => Promise<PluginDescriptor[]>;
     recordFailure: (request: PluginRecordFailureRequest) => Promise<PluginDescriptor[]>;
+    openSession?: (request: { pluginId: string }) => Promise<PluginSessionDescriptor>;
+    closeSession?: (request: { sessionId: string }) => Promise<{ ok: boolean }>;
+    request?: (request: PluginRpcRequest) => Promise<PluginRpcResponse>;
   };
   extensions?: {
     syncMenus: (request: ExtensionsSyncMenusRequest) => Promise<{ ok: boolean }>;
@@ -180,6 +248,8 @@ export interface NoliaApi {
   events: {
     onAppCommand: (listener: (command: string) => void) => Unsubscribe;
     onExternalFileOpen: (listener: (filePath: string) => void) => Unsubscribe;
+    onExternalFileChanged?: (listener: (event: ExternalDocumentChangedEvent) => void) => Unsubscribe;
+    onWindowCloseRequest?: (listener: () => void) => Unsubscribe;
     onWorkspaceIndexed?: (listener: (event: WorkspaceIndexedEvent) => void) => Unsubscribe;
   };
 }
@@ -187,13 +257,20 @@ export interface NoliaApi {
 const api: NoliaApi = {
   workspace: {
     bootstrap: () => invoke(IpcChannels.workspaceBootstrap, {}),
+    probe: (request = {}) => invoke(IpcChannels.workspaceProbe, request),
     open: (request = {}) => invoke(IpcChannels.workspaceOpen, request),
     create: (request = {}) => invoke(IpcChannels.workspaceCreate, request),
     listRecent: () => invoke(IpcChannels.workspaceListRecent, {}),
     removeRecent: (request) => invoke(IpcChannels.workspaceRemoveRecent, request),
     listTags: (request) => invoke(IpcChannels.workspaceListTags, request),
+    listLinkTargets: (request) => invoke(IpcChannels.workspaceListLinkTargets, request),
+    previewTagRename: (request) => invoke(IpcChannels.workspaceTagRenamePreview, request),
+    applyTagRename: (request) => invoke(IpcChannels.workspaceTagRenameApply, request),
     switch: (request) => invoke(IpcChannels.workspaceSwitch, request),
-    close: () => invoke(IpcChannels.workspaceClose, {})
+    close: () => invoke(IpcChannels.workspaceClose, {}),
+    readSession: (request) => invoke(IpcChannels.workspaceSessionRead, request),
+    writeSession: (request) => invoke(IpcChannels.workspaceSessionWrite, request),
+    health: (request) => invoke(IpcChannels.workspaceHealth, request)
   },
   file: {
     listTree: (request) => invoke(IpcChannels.fileListTree, request),
@@ -206,23 +283,50 @@ const api: NoliaApi = {
     createHistorySnapshot: (request) => invoke(IpcChannels.fileHistoryCreate, request),
     create: (request) => invoke(IpcChannels.fileCreate, request),
     rename: (request) => invoke(IpcChannels.fileRename, request),
+    previewRename: (request) => invoke(IpcChannels.fileRenamePreview, request),
     trash: (request) => invoke(IpcChannels.fileTrash, request),
     openExternal: (request) => invoke(IpcChannels.fileOpenExternal, request),
     revealInFinder: (request) => invoke(IpcChannels.fileRevealInFinder, request)
   },
   externalFile: {
     consumePendingOpen: () => invoke(IpcChannels.externalFileConsumePendingOpen, {}),
+    pick: () => invoke(IpcChannels.externalFilePick, {}),
     read: (request) => invoke(IpcChannels.externalFileRead, request),
-    writeAtomic: (request) => invoke(IpcChannels.externalFileWriteAtomic, request)
+    writeAtomic: (request) => invoke(IpcChannels.externalFileWriteAtomic, request),
+    save: (request) => invoke(IpcChannels.externalFileSave, request),
+    readDraft: (request) => invoke(IpcChannels.externalFileDraftRead, request),
+    writeDraft: (request) => invoke(IpcChannels.externalFileDraftWrite, request),
+    deleteDraft: (request) => invoke(IpcChannels.externalFileDraftDelete, request),
+    listRecent: () => invoke(IpcChannels.externalFileRecentList, {}),
+    removeRecent: (request) => invoke(IpcChannels.externalFileRecentRemove, request),
+    openFolder: (request) => invoke(IpcChannels.externalFileFolderOpen, request),
+    closeFolder: (request) => invoke(IpcChannels.externalFileFolderClose, request),
+    resolveLink: (request) => invoke(IpcChannels.externalFileResolveLink, request),
+    pickAttachment: () => invoke(IpcChannels.externalFileAttachmentPick, {}),
+    importAttachment: (request) => invoke(IpcChannels.externalFileAttachmentImport, request),
+    export: (request) => invoke(IpcChannels.externalFileExport, request)
+  },
+  window: {
+    setDocumentState: (state) => invoke(IpcChannels.windowDocumentStateSet, state),
+    confirmClose: () => invoke(IpcChannels.windowCloseConfirm, {})
   },
   document: {
-    parse: (request) => invoke(IpcChannels.documentParse, request)
+    parse: (request) => invoke(IpcChannels.documentParse, request),
+    mutateProperty: (request) => invoke(IpcChannels.documentMutateProperty, request),
+    readDraft: (request) => invoke(IpcChannels.documentDraftRead, request),
+    writeDraft: (request) => invoke(IpcChannels.documentDraftWrite, request),
+    deleteDraft: (request) => invoke(IpcChannels.documentDraftDelete, request)
   },
   search: {
-    query: (request) => invoke(IpcChannels.searchQuery, request)
+    query: (request) => invoke(IpcChannels.searchQuery, request),
+    unified: (request) => invoke(IpcChannels.searchUnified, request),
+    listSaved: (request) => invoke(IpcChannels.searchSavedList, request),
+    save: (request) => invoke(IpcChannels.searchSavedSave, request),
+    deleteSaved: (request) => invoke(IpcChannels.searchSavedDelete, request)
   },
   graph: {
-    getBacklinks: (request) => invoke(IpcChannels.graphGetBacklinks, request)
+    getBacklinks: (request) => invoke(IpcChannels.graphGetBacklinks, request),
+    getLocal: (request) => invoke(IpcChannels.graphGetLocal, request)
   },
   attachment: {
     import: (request) => invoke(IpcChannels.attachmentImport, request),
@@ -242,7 +346,10 @@ const api: NoliaApi = {
     list: () => invoke(IpcChannels.pluginsList, {}),
     setEnabled: (request) => invoke(IpcChannels.pluginsSetEnabled, request),
     acceptPermissions: (request) => invoke(IpcChannels.pluginsAcceptPermissions, request),
-    recordFailure: (request) => invoke(IpcChannels.pluginsRecordFailure, request)
+    recordFailure: (request) => invoke(IpcChannels.pluginsRecordFailure, request),
+    openSession: (request) => invoke(IpcChannels.pluginSessionOpen, request),
+    closeSession: (request) => invoke(IpcChannels.pluginSessionClose, request),
+    request: (request) => invoke(IpcChannels.pluginRpcRequest, request)
   },
   extensions: {
     syncMenus: (request) => invoke(IpcChannels.extensionsSyncMenus, request)
@@ -277,6 +384,8 @@ const api: NoliaApi = {
   events: {
     onAppCommand: (listener) => subscribe("app.command", listener),
     onExternalFileOpen: (listener) => subscribe("file.openExternal", listener),
+    onExternalFileChanged: (listener) => subscribe(IpcChannels.externalFileChanged, listener),
+    onWindowCloseRequest: (listener) => subscribe(IpcChannels.windowCloseRequest, listener),
     onWorkspaceIndexed: (listener) => subscribe("workspace.indexed", listener)
   }
 };
@@ -288,8 +397,19 @@ if (process.env.NOLIA_E2E_TEST_HOOKS === "1") {
   });
 }
 
-function invoke<T>(channel: string, payload: unknown): Promise<T> {
-  return ipcRenderer.invoke(channel, payload) as Promise<T>;
+async function invoke<T>(channel: string, payload: unknown): Promise<T> {
+  const response = await ipcRenderer.invoke(channel, payload) as unknown;
+  if (!isPreloadIpcResult(response)) {
+    return response as T;
+  }
+  if (response.ok) {
+    return response.data as T;
+  }
+  const error = new Error(response.error.message) as Error & { code?: string; operationId?: string; retryable?: boolean };
+  error.code = response.error.code;
+  error.operationId = response.error.operationId;
+  error.retryable = response.error.retryable;
+  throw error;
 }
 
 function subscribe<T>(channel: string, listener: (payload: T) => void): Unsubscribe {

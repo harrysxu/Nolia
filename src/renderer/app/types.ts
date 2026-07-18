@@ -1,4 +1,6 @@
-import type { BacklinksResponse, EditorMode, FileTreeNode, ParsedDocument, SearchResultItem, WorkspaceInfo } from "../../shared/types";
+import type { EditorMode, ParsedDocument } from "../../shared/types";
+import type { DocumentRevision } from "../../shared/contracts";
+import type { ExternalFolderSession } from "../../shared/externalDocuments";
 
 export type SidebarView = string;
 export type RightPanelView = "outline" | "details" | "history" | "errors";
@@ -29,6 +31,19 @@ export interface OpenDocumentTab {
   parsed: ParsedDocument;
   pendingHtml?: string;
   lastSavedAt?: number;
+  revisionState?: DocumentRevision;
+  realPath?: string;
+  bom?: boolean;
+  eol?: "lf" | "crlf";
+  readonly?: boolean;
+  encodingSupported?: boolean;
+  folderSession?: ExternalFolderSession;
+  externalConflict?: {
+    kind: "change" | "delete";
+    diskHash?: string;
+    diskContent?: string;
+    mtimeMs?: number;
+  };
 }
 
 export interface ActiveResource {
@@ -45,23 +60,4 @@ export interface ActiveResource {
   baseHash?: string;
   dirty?: boolean;
   lastSavedAt?: number;
-}
-
-export interface SuspendedShellState {
-  workspace?: WorkspaceInfo;
-  fileTree: FileTreeNode[];
-  searchResults: SearchResultItem[];
-  favoriteDocs: FavoriteDocument[];
-  recentViewedDocs: DocumentListItem[];
-  recentEditedDocs: DocumentListItem[];
-  noteFilterQuery: string;
-  workspaceSearchQuery: string;
-  openDocs: OpenDocumentTab[];
-  activePathRel?: string;
-  activeResource?: ActiveResource;
-  treeSelection?: TreeSelection;
-  backlinks: BacklinksResponse;
-  sidebarView: SidebarView;
-  leftPanelCollapsed: boolean;
-  rightPanelCollapsed: boolean;
 }

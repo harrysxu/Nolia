@@ -63,6 +63,7 @@ test("English locale covers welcome, workspace, settings, editors, plugins, and 
 
   await page.goto("/");
   await expect(page.getByText("Local-first Markdown workstation")).toBeVisible();
+  await expect(page.getByRole("button", { name: "Open File" })).toBeVisible();
   await expect(page.getByRole("button", { name: "Open Workspace" })).toBeVisible();
   await expect(page.getByRole("heading", { name: "Continue where you left off" })).toBeVisible();
   await expect(page.getByText("暂无最近工作区。")).toHaveCount(0);
@@ -81,7 +82,7 @@ test("English workspace pages stay localized and readable across key surfaces", 
 
   await page.goto("/");
   await expect(page.getByRole("navigation", { name: "Workspace navigation" })).toBeVisible();
-  await expect(page.getByRole("button", { name: "Notes", exact: true })).toBeVisible();
+  await expect(page.getByRole("button", { name: "File", exact: true })).toBeVisible();
   await expect(page.getByText("Files and Resources")).toBeVisible();
   await expect(page.getByPlaceholder("Search files or resources")).toBeVisible();
   await expect(page.getByRole("toolbar", { name: "Markdown Tools" })).toBeVisible();
@@ -198,10 +199,10 @@ test("localized chrome preserves user-authored content, file names, and external
   await expect(page.getByText("No matching commands.")).toBeVisible();
   await page.keyboard.press("Escape");
 
-  await page.getByRole("button", { name: "Search", exact: true }).click();
-  await expect(page.getByPlaceholder("Search workspace")).toBeVisible();
-  await page.getByPlaceholder("Search workspace").fill("文件与资源");
-  await expect(page.locator(".result-item").filter({ hasText: "文件与资源 Settings 日本語 한국어" })).toBeVisible();
+  await page.getByRole("button", { name: "Discover", exact: true }).click();
+  await expect(page.getByPlaceholder("Search titles, content, paths, tags, or properties")).toBeVisible();
+  await page.getByPlaceholder("Search titles, content, paths, tags, or properties").fill("文件与资源");
+  await expect(page.locator(".discover-results").filter({ hasText: "文件与资源 Settings 日本語 한국어" })).toBeVisible();
 
   await page.getByRole("navigation", { name: "Workspace navigation" }).getByRole("button", { name: "Settings", exact: true }).click();
   const settingsDialog = page.getByRole("dialog", { name: "Settings" });
@@ -319,6 +320,7 @@ async function assertNoCoreChineseText(page: Page, options: { allowUserContent?:
     "文本工具",
     "搜索工作区",
     "暂无最近工作区。",
+    "打开文件",
     "外部插件",
     "内置扩展",
     "接受权限",

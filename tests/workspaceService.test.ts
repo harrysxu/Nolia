@@ -69,6 +69,7 @@ describe("workspace service startup", () => {
 
       const reopened = await service.openWorkspace({ path: workspaceRoot });
       expect(reopened?.workspaceId).toBe(created?.workspaceId);
+      await service.closeActiveWorkspace();
     } finally {
       await rm(userData, { recursive: true, force: true });
       await rm(home, { recursive: true, force: true });

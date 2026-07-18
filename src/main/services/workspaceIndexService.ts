@@ -35,12 +35,14 @@ export class WorkspaceIndexService {
 
   async indexPathRel(rootPath: string, pathRel: string, db: WorkspaceDb): Promise<void> {
     const absolutePath = path.join(rootPath, normalizePathRel(pathRel));
+    let changed: boolean;
     try {
-      await this.indexAbsolutePath(rootPath, absolutePath, db);
+      changed = await this.indexAbsolutePath(rootPath, absolutePath, db);
     } catch {
       db.removeFile(normalizePathRel(pathRel));
+      changed = true;
     }
-    await db.save();
+    if (changed) db.scheduleSave(5_000);
   }
 
   async removePathRel(pathRel: string, db: WorkspaceDb): Promise<void> {
@@ -48,11 +50,11 @@ export class WorkspaceIndexService {
     await db.save();
   }
 
-  private async indexAbsolutePath(rootPath: string, absolutePath: string, db: WorkspaceDb): Promise<void> {
+  private async indexAbsolutePath(rootPath: string, absolutePath: string, db: WorkspaceDb): Promise<boolean> {
     const entryStat = await stat(absolutePath);
     const pathRel = toWorkspaceRelative(rootPath, absolutePath);
     if (isAlwaysIgnoredWorkspacePath(pathRel)) {
-      return;
+      return false;
     }
 
     const kind = fileKindForPath(absolutePath, entryStat.isDirectory());
@@ -68,10 +70,10 @@ export class WorkspaceIndexService {
 
     if (kind !== "markdown") {
       if (!db.shouldIndexFile(baseEntry)) {
-        return;
+        return false;
       }
       db.upsertFile(baseEntry);
-      return;
+      return true;
     }
 
     const content = await readFile(absolutePath, "utf8");
@@ -81,12 +83,13 @@ export class WorkspaceIndexService {
       sha256
     };
     if (!db.shouldIndexFile(entry)) {
-      return;
+      return false;
     }
     db.upsertDocument(
       entry,
       parseMarkdown(content, pathRel)
     );
+    return true;
   }
 }
 

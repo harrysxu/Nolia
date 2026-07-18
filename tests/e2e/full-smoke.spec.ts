@@ -30,12 +30,12 @@ test("full workspace smoke covers startup, file workflow, search, settings, and 
   await expect(page.getByRole("navigation", { name: "工作区导航" })).toBeVisible();
   await expect(page.locator(".statusbar")).toContainText("alpha.md");
   await expect(page.locator(".source-editor .cm-content")).toContainText("中文搜索内容");
-  await page.locator(".app-nav").getByRole("button", { name: "目录" }).click();
+  await page.getByRole("tablist", { name: "文档检查器" }).getByRole("tab", { name: "目录" }).click();
   await page.locator(".right-panel").getByRole("button", { name: "Deep Section" }).click();
   await expect(page.locator(".source-editor .cm-content")).toContainText("Deep Section");
   await expect(page.locator(".statusbar")).toContainText("已跳转到第");
 
-  await page.getByRole("navigation", { name: "工作区导航" }).getByRole("button", { name: "笔记", exact: true }).click();
+  await page.getByRole("navigation", { name: "工作区导航" }).getByRole("button", { name: "文件", exact: true }).click();
   await page.getByRole("button", { name: "新建", exact: true }).click();
   await page.getByRole("menuitem", { name: "新建笔记" }).click();
   await page.getByRole("dialog", { name: "新建笔记" }).locator("input").fill("Release Smoke");
@@ -63,15 +63,14 @@ test("full workspace smoke covers startup, file workflow, search, settings, and 
     .poll(() => page.evaluate(() => (window as typeof window & { __noliaMock: { renamedPaths: Array<{ targetPathRel: string }> } }).__noliaMock.renamedPaths))
     .toContainEqual(expect.objectContaining({ targetPathRel: "Renamed-Smoke.md" }));
 
-  await page.getByRole("navigation", { name: "工作区导航" }).getByRole("button", { name: "搜索" }).click();
-  await page.getByPlaceholder("搜索工作区").fill("中文搜索内容");
-  await expect(page.locator(".result-item").filter({ hasText: "Release Smoke" })).toBeVisible();
-  await expect(page.locator(".result-item").filter({ hasText: "Alpha" })).toBeVisible();
-  await expect(page.locator(".search-hit").filter({ hasText: "中文搜索内容" }).first()).toBeVisible();
-  await page.getByPlaceholder("搜索工作区").fill("not-found-search-boundary");
-  await expect(page.getByText("没有匹配的搜索结果。")).toBeVisible();
+  await page.getByRole("navigation", { name: "工作区导航" }).getByRole("button", { name: "发现" }).click();
+  await page.getByPlaceholder("搜索标题、正文、路径、标签或属性").fill("中文搜索内容");
+  await expect(page.locator(".discover-results").filter({ hasText: "Release Smoke" })).toBeVisible();
+  await expect(page.locator(".discover-results").filter({ hasText: "Alpha" })).toBeVisible();
+  await page.getByPlaceholder("搜索标题、正文、路径、标签或属性").fill("not-found-search-boundary");
+  await expect(page.getByText("没有匹配结果。")).toBeVisible();
 
-  await page.getByRole("navigation", { name: "工作区导航" }).getByRole("button", { name: "笔记", exact: true }).click();
+  await page.getByRole("navigation", { name: "工作区导航" }).getByRole("button", { name: "文件", exact: true }).click();
   await expect(page.getByPlaceholder("搜索文件或资源")).toHaveValue("");
   await page.getByPlaceholder("搜索文件或资源").fill("");
   await page.getByRole("button", { name: "target.md", exact: true }).click();
@@ -81,12 +80,12 @@ test("full workspace smoke covers startup, file workflow, search, settings, and 
   await page.keyboard.press("Enter");
   await expect(page.locator(".result-item", { hasText: "Alpha" })).toContainText("[[Target]]");
 
-  await page.getByRole("navigation", { name: "工作区导航" }).getByRole("button", { name: "笔记", exact: true }).click();
+  await page.getByRole("navigation", { name: "工作区导航" }).getByRole("button", { name: "文件", exact: true }).click();
   await page.getByPlaceholder("搜索文件或资源").fill("");
   await page.getByRole("button", { name: "target.md", exact: true }).click({ button: "right" });
   await page.getByRole("menuitem", { name: "收藏", exact: true }).click();
-  await page.getByRole("navigation", { name: "工作区导航" }).getByRole("button", { name: "收藏" }).click();
-  await expect(page.getByRole("button", { name: "target.md", exact: true })).toBeVisible();
+  await page.getByRole("navigation", { name: "工作区导航" }).getByRole("button", { name: "发现" }).click();
+  await expect(page.locator(".discover-nav").getByRole("button", { name: "target", exact: true })).toBeVisible();
 
   await page.getByRole("navigation", { name: "工作区导航" }).getByRole("button", { name: "设置" }).click();
   const settingsDialog = page.getByRole("dialog", { name: "设置" });
@@ -113,7 +112,7 @@ test("full workspace smoke covers startup, file workflow, search, settings, and 
   expect(dialogSizeAfterTab).toEqual(dialogSize);
   await settingsDialog.locator(".settings-close-button").click();
 
-  await page.getByRole("navigation", { name: "工作区导航" }).getByRole("button", { name: "笔记", exact: true }).click();
+  await page.getByRole("navigation", { name: "工作区导航" }).getByRole("button", { name: "文件", exact: true }).click();
   await page.getByPlaceholder("搜索文件或资源").fill("");
   await page.getByRole("button", { name: "Renamed-Smoke.md", exact: true }).click({ button: "right" });
   await page.getByRole("menuitem", { name: "删除" }).click();

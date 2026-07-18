@@ -116,10 +116,12 @@ describe("workspace db", () => {
       const alpha = `---
 title: Alpha
 tags: [dev]
+priority: high
 ---
 # Alpha
 
 Local first design notes.
+- [ ] Ship launch packet
 `;
       db.upsertDocument(
         {
@@ -176,6 +178,12 @@ Local first design notes.
 
       const search = db.search({ workspaceId: "ws_test", query: "local", limit: 10 });
       expect(search.items.map((item) => item.pathRel)).toContain("alpha.md");
+      expect(db.search({ workspaceId: "ws_test", query: "alp", limit: 10 }).items.map((item) => item.pathRel)).toContain("alpha.md");
+      expect(db.search({ workspaceId: "ws_test", query: "pha", limit: 10 }).items.map((item) => item.pathRel)).toContain("alpha.md");
+      expect(db.search({ workspaceId: "ws_test", query: "alpha.md", limit: 10 }).items.map((item) => item.pathRel)).toContain("alpha.md");
+      expect(db.search({ workspaceId: "ws_test", query: "dev", limit: 10 }).items.map((item) => item.pathRel)).toContain("alpha.md");
+      expect(db.search({ workspaceId: "ws_test", query: "priority", limit: 10 }).items.map((item) => item.pathRel)).toContain("alpha.md");
+      expect(db.search({ workspaceId: "ws_test", query: "launch packet", limit: 10 }).items.map((item) => item.pathRel)).toContain("alpha.md");
       expect(db.listTags()).toEqual([{ name: "dev", displayName: "dev", count: 1 }]);
       const backlinks = db.getBacklinks("alpha.md", true);
       expect(backlinks.linked).toEqual(expect.arrayContaining([
@@ -292,4 +300,40 @@ Local first design notes.
       await rm(root, { recursive: true, force: true });
     }
   });
+
+  it("keeps the FTS database bounded when the same long document is reindexed repeatedly", async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), "nolia-db-"));
+    const dbPath = path.join(root, "workspace.sqlite");
+    const db = await WorkspaceDb.open(dbPath);
+    try {
+      const body = "Nolia repeated long document line.\n".repeat(3_200);
+      const index = (revision: number) => {
+        const source = `# Long\n\n${body}\nRevision ${revision}\n`;
+        db.upsertDocument(
+          {
+            pathRel: "long.md",
+            name: "long.md",
+            ext: ".md",
+            kind: "markdown",
+            size: source.length,
+            mtimeMs: revision,
+            sha256: `long-${revision}`
+          },
+          parseMarkdown(source, "long.md")
+        );
+      };
+
+      index(0);
+      await db.save();
+      const initialSize = (await stat(dbPath)).size;
+      for (let revision = 1; revision <= 300; revision += 1) index(revision);
+      await db.save();
+      const finalSize = (await stat(dbPath)).size;
+
+      expect(finalSize).toBeLessThan(initialSize * 4);
+    } finally {
+      db.close();
+      await rm(root, { recursive: true, force: true });
+    }
+  }, 60_000);
 });

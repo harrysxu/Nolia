@@ -1,61 +1,91 @@
-import chokidar, { type FSWatcher } from "chokidar";
+import { watch, type FSWatcher } from "node:fs";
+import { stat } from "node:fs/promises";
+import path from "node:path";
 
 import { WORKSPACE_META_DIR } from "../../shared/constants";
 import { WorkspaceDb } from "./workspaceDb";
 import { WorkspaceIndexService } from "./workspaceIndexService";
 import { isAlwaysIgnoredWorkspacePath, toWorkspaceRelative } from "../utils/filePaths";
+import { fileKindForPath } from "../utils/filePaths";
+import type { FileTreeNode } from "../../shared/types";
 
 export class WorkspaceWatcher {
   private watcher?: FSWatcher;
   private readonly pending = new Map<string, NodeJS.Timeout>();
   private readonly activeTasks = new Set<Promise<void>>();
+  private stopped = false;
 
   constructor(
     private readonly rootPath: string,
     private readonly db: WorkspaceDb,
     private readonly indexer: WorkspaceIndexService,
-    private readonly onIndexed: (pathRel: string) => void
+    private readonly onIndexed: (pathRel: string, operation: "create" | "change" | "delete", node?: FileTreeNode) => void,
+    private readonly onError: (error: unknown) => void = () => undefined
   ) {}
 
   start(): void {
-    this.watcher = chokidar.watch(this.rootPath, {
-      ignored: (filePath) => this.shouldIgnore(filePath),
-      ignoreInitial: true,
-      persistent: true
-    });
-
-    this.watcher
-      .on("add", (filePath) => this.queueIndex(filePath))
-      .on("change", (filePath) => this.queueIndex(filePath))
-      .on("unlink", (filePath) => this.queueRemove(filePath))
-      .on("addDir", (filePath) => this.queueIndex(filePath))
-      .on("unlinkDir", (filePath) => this.queueRemove(filePath));
+    if (this.watcher) {
+      return;
+    }
+    this.stopped = false;
+    try {
+      this.watcher = watch(this.rootPath, { recursive: true, persistent: true }, (eventType, fileName) => {
+        if (!fileName) {
+          return;
+        }
+        const filePath = path.join(this.rootPath, fileName.toString());
+        if (this.shouldIgnore(filePath)) {
+          return;
+        }
+        this.queueRefresh(filePath, eventType === "change" ? "change" : "create");
+      });
+    } catch (error) {
+      this.onError(error);
+      return;
+    }
+    this.watcher.on("error", (error) => this.onError(error));
   }
 
   async stop(): Promise<void> {
+    this.stopped = true;
     for (const timeout of this.pending.values()) {
       clearTimeout(timeout);
     }
     this.pending.clear();
-    await this.watcher?.close();
+    const watcher = this.watcher;
+    this.watcher = undefined;
+    watcher?.close();
     await Promise.allSettled([...this.activeTasks]);
   }
 
-  private queueIndex(filePath: string): void {
+  private queueRefresh(filePath: string, operation: "create" | "change"): void {
     this.queue(filePath, async (pathRel) => {
-      await this.indexer.indexPathRel(this.rootPath, pathRel, this.db);
-      this.onIndexed(pathRel);
-    });
-  }
-
-  private queueRemove(filePath: string): void {
-    this.queue(filePath, async (pathRel) => {
-      await this.indexer.removePathRel(pathRel, this.db);
-      this.onIndexed(pathRel);
+      try {
+        const entryStat = await stat(filePath);
+        await this.indexer.indexPathRel(this.rootPath, pathRel, this.db);
+        this.onIndexed(pathRel, operation, {
+          pathRel,
+          name: path.basename(filePath),
+          kind: fileKindForPath(filePath, entryStat.isDirectory()),
+          size: entryStat.size,
+          mtimeMs: entryStat.mtimeMs,
+          children: entryStat.isDirectory() ? [] : undefined
+        });
+      } catch (error) {
+        if (isMissingPathError(error)) {
+          await this.indexer.removePathRel(pathRel, this.db);
+          this.onIndexed(pathRel, "delete");
+          return;
+        }
+        throw error;
+      }
     });
   }
 
   private queue(filePath: string, task: (pathRel: string) => Promise<void>): void {
+    if (this.stopped) {
+      return;
+    }
     const pathRel = toWorkspaceRelative(this.rootPath, filePath);
     if (isAlwaysIgnoredWorkspacePath(pathRel)) {
       return;
@@ -68,9 +98,14 @@ export class WorkspaceWatcher {
       pathRel,
       setTimeout(() => {
         this.pending.delete(pathRel);
-        const activeTask = task(pathRel).finally(() => {
-          this.activeTasks.delete(activeTask);
-        });
+        if (this.stopped) {
+          return;
+        }
+        const activeTask = task(pathRel)
+          .catch((error: unknown) => this.onError(error))
+          .finally(() => {
+            this.activeTasks.delete(activeTask);
+          });
         this.activeTasks.add(activeTask);
       }, 250)
     );
@@ -84,4 +119,8 @@ export class WorkspaceWatcher {
       return false;
     }
   }
+}
+
+function isMissingPathError(error: unknown): boolean {
+  return Boolean(error && typeof error === "object" && "code" in error && (error as NodeJS.ErrnoException).code === "ENOENT");
 }

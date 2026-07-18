@@ -74,6 +74,35 @@ test("welcome screen renders with preload API mocked", async ({ page }) => {
   await expect(page.getByRole("heading", { name: "继续上次的工作" })).toBeVisible();
 });
 
+test("welcome dashboard uses the full content width without mobile overflow", async ({ page }) => {
+  await installMockNolia(page, {
+    activeWorkspace: false,
+    recentWorkspaces: [
+      { workspaceId: "recent-one", name: "Design Workspace", path: "/tmp/design-workspace", createdAt: Date.now() - 5000, lastOpenedAt: Date.now(), exists: true },
+      { workspaceId: "recent-two", name: "Research Workspace", path: "/tmp/research-workspace", createdAt: Date.now() - 10000, lastOpenedAt: Date.now() - 1000, exists: true }
+    ],
+    files: { "home.md": "# Home" }
+  });
+  await page.setViewportSize({ width: 1440, height: 900 });
+  await page.goto("/");
+  const content = page.locator(".welcome-content");
+  const recent = page.locator(".welcome-recent-panel");
+  const [contentBox, recentBox] = await Promise.all([content.boundingBox(), recent.boundingBox()]);
+  expect(contentBox).not.toBeNull();
+  expect(recentBox).not.toBeNull();
+  expect(recentBox?.width ?? 0).toBeGreaterThan((contentBox?.width ?? 0) * 0.95);
+  expect(recentBox?.y ?? 0).toBeGreaterThan((contentBox?.y ?? 0) + 80);
+  await page.screenshot({ path: "output/welcome-redesign-desktop.png", fullPage: false });
+
+  await page.setViewportSize({ width: 780, height: 520 });
+  await expect(page.getByRole("button", { name: "打开文件" })).toBeVisible();
+  await expect(page.getByRole("button", { name: "打开工作区" })).toBeVisible();
+  await expect(page.getByRole("tab", { name: /工作区/ })).toBeVisible();
+  const overflow = await page.locator(".welcome-screen").evaluate((element) => element.scrollWidth <= element.clientWidth + 1);
+  expect(overflow).toBe(true);
+  await page.screenshot({ path: "output/welcome-redesign-mobile.png", fullPage: false });
+});
+
 test("welcome recent workspace cards open available workspaces and delete recent records", async ({ page }) => {
   const now = Date.now();
   const recentWorkspaces: RecentWorkspace[] = [
@@ -279,7 +308,7 @@ test("workspace startup routes JSON recent results through the JSON editor", asy
   await expect(page.locator(".editor-toolbar, .markdown-actionbar")).toHaveCount(0);
 });
 
-test("recent list keeps current order while active and refreshes on re-entry", async ({ page }) => {
+test("discover page keeps recent edits ordered across document navigation", async ({ page }) => {
   const shellSettings: AppSettings = { ...settings, editorMode: "source" };
 
   await page.addInitScript((mockSettings: AppSettings) => {
@@ -298,7 +327,7 @@ test("recent list keeps current order while active and refreshes on re-entry", a
       "beta.md": "# Beta\n\nBeta content"
     };
     window.localStorage.setItem(
-      "nolia:ws_recent_freeze:recentViewed",
+      "nolia:ws_recent_freeze:recentEdited",
       JSON.stringify([
         { pathRel: "alpha.md", title: "Alpha", timestamp: 2000 },
         { pathRel: "beta.md", title: "Beta", timestamp: 1000 }
@@ -367,20 +396,17 @@ test("recent list keeps current order while active and refreshes on re-entry", a
   }, shellSettings);
 
   await gotoApp(page);
-  await page.getByRole("navigation", { name: "工作区导航" }).getByRole("button", { name: "最近", exact: true }).click();
-  const recentItems = page.locator(".document-simple-list .document-simple-item");
-  await expect(recentItems.nth(0).locator(".document-simple-name")).toHaveText("alpha.md");
-  await expect(recentItems.nth(1).locator(".document-simple-name")).toHaveText("beta.md");
+  await page.getByRole("navigation", { name: "工作区导航" }).getByRole("button", { name: "发现", exact: true }).click();
+  const recentItems = page.locator(".discover-recent-list > button");
+  await expect(recentItems.nth(0)).toContainText("Alpha");
+  await expect(recentItems.nth(1)).toContainText("Beta");
 
+  await page.getByRole("navigation", { name: "工作区导航" }).getByRole("button", { name: "文件", exact: true }).click();
   await page.getByRole("button", { name: "beta.md", exact: true }).click();
   await expect(page.locator(".statusbar")).toContainText("beta.md");
-  await expect(recentItems.nth(0).locator(".document-simple-name")).toHaveText("alpha.md");
-  await expect(recentItems.nth(1).locator(".document-simple-name")).toHaveText("beta.md");
-
-  await page.getByRole("navigation", { name: "工作区导航" }).getByRole("button", { name: "笔记", exact: true }).click();
-  await page.getByRole("navigation", { name: "工作区导航" }).getByRole("button", { name: "最近", exact: true }).click();
-  await expect(recentItems.nth(0).locator(".document-simple-name")).toHaveText("beta.md");
-  await expect(recentItems.nth(1).locator(".document-simple-name")).toHaveText("alpha.md");
+  await page.getByRole("navigation", { name: "工作区导航" }).getByRole("button", { name: "发现", exact: true }).click();
+  await expect(recentItems.nth(0)).toContainText("Alpha");
+  await expect(recentItems.nth(1)).toContainText("Beta");
 });
 
 test("settings apply theme, focus, and editor width preferences", async ({ page }) => {
@@ -809,11 +835,8 @@ test("workspace shell creates notes without native dialogs", async ({ page }) =>
 
   await gotoApp(page);
   await expect(page.getByRole("navigation", { name: "工作区导航" })).toBeVisible();
-  await expect(page.getByRole("navigation", { name: "工作区导航" }).getByRole("button")).toContainText(["最近", "笔记", "收藏", "搜索"]);
+  await expect(page.getByRole("navigation", { name: "工作区导航" }).getByRole("button")).toContainText(["文件", "发现", "AI", "", ""]);
   await expect(page.getByText("文件与资源")).toBeVisible();
-  await page.getByRole("button", { name: "最近", exact: true }).click();
-  await expect(page.getByText("最近浏览")).toBeVisible();
-  await page.getByRole("button", { name: "笔记" }).click();
   await expect(page.getByPlaceholder("搜索文件或资源")).toBeVisible();
   await expect(page.locator(".tree-section-header").getByText("全部文件")).toBeVisible();
   await expect(page.getByTitle("收起左侧栏")).toBeVisible();
@@ -934,30 +957,14 @@ test("workspace shell creates notes without native dialogs", async ({ page }) =>
   await page.getByRole("button", { name: "alpha.md", exact: true }).first().click({ button: "right" });
   await expect(page.getByRole("menu")).toBeVisible();
   await page.getByRole("menuitem", { name: "收藏", exact: true }).click();
-  await page.getByRole("navigation", { name: "工作区导航" }).getByRole("button", { name: "收藏", exact: true }).click();
-  await expect(page.getByText("暂无收藏文档。")).toHaveCount(0);
-  await expect(page.getByRole("button", { name: "alpha.md", exact: true }).first()).toBeVisible();
+  await page.getByRole("navigation", { name: "工作区导航" }).getByRole("button", { name: "发现", exact: true }).click();
+  await expect(page.locator(".discover-nav").getByRole("button", { name: "alpha", exact: true })).toBeVisible();
+  await page.getByRole("navigation", { name: "工作区导航" }).getByRole("button", { name: "文件", exact: true }).click();
   await page.getByRole("button", { name: "alpha.md", exact: true }).first().click({ button: "right" });
   await expect(page.getByRole("menu")).toBeVisible();
-  await expect(page.getByRole("menuitem", { name: "取消收藏" })).toBeVisible();
   await expect(page.getByRole("menuitem", { name: "重命名" })).toBeVisible();
   await expect(page.getByRole("menuitem", { name: "删除" })).toBeVisible();
   await page.keyboard.press("Escape");
-  await page.getByRole("button", { name: "最近" }).click();
-  await expect(page.getByText("最近浏览")).toBeVisible();
-  await expect(page.getByText("最近工作区")).toHaveCount(0);
-  await expect(page.getByRole("button", { name: "alpha.md", exact: true }).first()).toBeVisible();
-  await expect(page.getByRole("button", { name: "Nested.md", exact: true })).toBeVisible();
-  await expect(page.getByRole("button", { name: "Archive/Nested.md" })).toHaveCount(0);
-  await page.getByRole("button", { name: "alpha.md", exact: true }).first().click({ button: "right" });
-  await expect(page.getByRole("menu")).toBeVisible();
-  await expect(page.getByRole("menuitem", { name: "取消收藏" })).toBeVisible();
-  await expect(page.getByRole("menuitem", { name: "重命名" })).toBeVisible();
-  await expect(page.getByRole("menuitem", { name: "删除" })).toBeVisible();
-  await page.keyboard.press("Escape");
-  await page.getByRole("tab", { name: "最近编辑" }).click();
-  await expect(page.getByRole("tab", { name: "最近编辑" })).toHaveAttribute("aria-selected", "true");
-  await page.getByRole("navigation", { name: "工作区导航" }).getByRole("button", { name: "笔记", exact: true }).click();
   const sourceContentWidth = await page.locator(".source-editor .cm-content").evaluate((element) => element.getBoundingClientRect().width);
   const sourceEditorWidth = await page.locator(".source-editor").evaluate((element) => element.getBoundingClientRect().width);
   expect(sourceContentWidth).toBeGreaterThan(sourceEditorWidth * 0.65);
@@ -982,7 +989,7 @@ test("workspace shell creates notes without native dialogs", async ({ page }) =>
   await page.getByRole("button", { name: "编辑", exact: true }).click();
   await expect(page.getByRole("button", { name: /运行.*代码块/ })).toHaveCount(0);
 
-  await page.getByRole("navigation", { name: "工作区导航" }).getByRole("button", { name: "笔记", exact: true }).click();
+  await page.getByRole("navigation", { name: "工作区导航" }).getByRole("button", { name: "文件", exact: true }).click();
   await page.getByRole("button", { name: /assets/ }).click();
   await page.getByRole("button", { name: "mock.png", exact: true }).click();
   await expect(page.locator(".resource-kind-pill")).toHaveText("图片预览");
@@ -1154,7 +1161,7 @@ test("source and split editors support long document scrolling", async ({ page }
   await expect.poll(() => splitSourceScroller.evaluate((element) => element.scrollTop)).toBeGreaterThan(0);
 });
 
-test("immersive mode supports menu toggling and direct system Markdown files", async ({ page }) => {
+test("immersive mode remains optional while direct system Markdown files coexist as tabs", async ({ page }) => {
   await page.setViewportSize({ width: 1360, height: 860 });
   const shellSettings: AppSettings = { ...settings, editorMode: "wysiwyg" };
 
@@ -1229,7 +1236,19 @@ test("immersive mode supports menu toggling and direct system Markdown files", a
         consumePendingOpen: async () => [],
         read: async ({ filePath }) => {
           const content = externalFiles.get(filePath) ?? "";
-          return { content, stat: { size: content.length, mtimeMs: 0, birthtimeMs: 0 }, sha256: `${filePath}-hash`, encoding: "utf-8" };
+          return {
+            filePath,
+            realPath: filePath,
+            content,
+            size: content.length,
+            mtimeMs: 0,
+            readonly: false,
+            encodingSupported: true,
+            bom: false,
+            eol: "lf" as const,
+            sha256: `${filePath}-hash`,
+            encoding: "utf-8" as const
+          };
         },
         writeAtomic: async ({ filePath, content }) => {
           externalFiles.set(filePath, content);
@@ -1269,7 +1288,7 @@ test("immersive mode supports menu toggling and direct system Markdown files", a
   }, shellSettings);
 
   await gotoApp(page);
-  await page.getByRole("navigation", { name: "工作区导航" }).getByRole("button", { name: "笔记", exact: true }).click();
+  await page.getByRole("navigation", { name: "工作区导航" }).getByRole("button", { name: "文件", exact: true }).click();
   await page.getByRole("button", { name: "alpha.md", exact: true }).click();
   await expect(page.locator(".statusbar")).toContainText("alpha.md");
 
@@ -1301,12 +1320,12 @@ test("immersive mode supports menu toggling and direct system Markdown files", a
   await expect(page.locator(".editor-toolbar")).toBeVisible();
 
   await page.evaluate(() => (window as Window & { __emitExternalFile?: (filePath: string) => void }).__emitExternalFile?.("/tmp/direct-note.md"));
-  await expect(page.locator(".app-shell")).toHaveClass(/is-immersive/);
-  await expect(page.getByRole("navigation", { name: "工作区导航" })).toHaveCount(0);
-  await expect(page.locator(".immersive-title strong")).toHaveText("direct-note.md");
-  await expect(page.locator(".immersive-topbar")).toHaveText("direct-note.md");
-  await expect(page.locator(".immersive-title")).not.toContainText("/tmp");
-  await expect(page.locator(".editor-toolbar")).toHaveCount(0);
+  await expect(page.locator(".app-shell")).not.toHaveClass(/is-immersive/);
+  await expect(page.getByRole("navigation", { name: "工作区导航" })).toBeVisible();
+  await expect(page.locator(".document-tab")).toHaveCount(2);
+  await expect(page.locator(".document-tab-label")).toHaveText(["alpha.md", "direct-note.md"]);
+  await expect(page.locator(".editor-document-identity strong")).toHaveText("direct-note.md");
+  await expect(page.locator(".editor-toolbar")).toBeVisible();
   await expect(page.locator(".ProseMirror")).toContainText("Direct");
 
   await page.evaluate(() => (window as Window & { __emitAppCommand?: (command: string) => void }).__emitAppCommand?.("mode.source"));
@@ -1316,10 +1335,38 @@ test("immersive mode supports menu toggling and direct system Markdown files", a
   await page.keyboard.press(shortcut("S"));
   await expect.poll(() => page.evaluate(() => (window as Window & { __externalSaved?: string }).__externalSaved)).toContain("Direct Changed");
 
-  await page.evaluate(() => (window as Window & { __emitAppCommand?: (command: string) => void }).__emitAppCommand?.("view.immersive.toggle"));
-  await expect(page.locator(".app-shell")).not.toHaveClass(/is-immersive/);
-  await expect(page.getByRole("navigation", { name: "工作区导航" })).toBeVisible();
-  await expect(page.locator(".statusbar")).toContainText("alpha.md");
+  await page.evaluate(() => (window as Window & { __emitAppCommand?: (command: string) => void }).__emitAppCommand?.("workspace.close"));
+  await expect(page.locator(".workspace-grid")).toHaveClass(/is-single-file/);
+  await expect(page.getByRole("navigation", { name: "工作区导航" })).toHaveCount(0);
+  await expect(page.locator(".document-tab")).toHaveCount(1);
+  await expect(page.locator(".document-tab-label")).toHaveText("direct-note.md");
+  await expect(page.locator(".editor-document-identity")).toHaveCount(0);
+  await expect(page.locator(".editor-topbar-left .editor-shell-actions")).toBeVisible();
+
+  const editorWidthBeforeInspectorCollapse = await page.locator(".editor-zone").evaluate((element) => element.getBoundingClientRect().width);
+  await page.locator(".right-panel").getByRole("button", { name: "收起右侧面板" }).click();
+  await expect(page.locator(".right-panel")).toBeHidden();
+  const editorWidthAfterInspectorCollapse = await page.locator(".editor-zone").evaluate((element) => element.getBoundingClientRect().width);
+  const singleFileGridWidth = await page.locator(".workspace-grid").evaluate((element) => element.getBoundingClientRect().width);
+  expect(editorWidthAfterInspectorCollapse).toBeGreaterThan(editorWidthBeforeInspectorCollapse + 300);
+  expect(Math.abs(singleFileGridWidth - editorWidthAfterInspectorCollapse)).toBeLessThan(2);
+
+  const inspectorTrigger = page.getByRole("button", { name: "展开右侧面板" });
+  await expect(inspectorTrigger).toBeFocused();
+  await inspectorTrigger.click();
+  await expect(page.locator(".right-panel")).toBeVisible();
+  await page.locator(".right-panel").getByRole("button", { name: "收起右侧面板" }).click();
+  await expect(page.locator(".right-panel")).toBeHidden();
+
+  await page.setViewportSize({ width: 780, height: 520 });
+  await page.getByRole("button", { name: "展开右侧面板" }).click();
+  await expect(page.locator(".right-panel")).toBeVisible();
+  await page.locator(".right-panel").getByRole("button", { name: "收起右侧面板" }).click();
+  await expect(page.locator(".right-panel")).toBeHidden();
+
+  await page.getByRole("button", { name: "关闭文档 direct-note.md" }).click();
+  await expect(page.locator(".document-tab")).toHaveCount(0);
+  await expect(page.getByRole("heading", { name: "Nolia" })).toBeVisible();
 });
 
 test("wysiwyg keeps Markdown list and code block editing behavior", async ({ page }) => {
@@ -1395,7 +1442,7 @@ test("wysiwyg keeps Markdown list and code block editing behavior", async ({ pag
   }, shellSettings);
 
   await gotoApp(page);
-  await page.getByRole("navigation", { name: "工作区导航" }).getByRole("button", { name: "笔记", exact: true }).click();
+  await page.getByRole("navigation", { name: "工作区导航" }).getByRole("button", { name: "文件", exact: true }).click();
   await page.getByRole("button", { name: "alpha.md", exact: true }).click();
 
   const editor = page.locator(".ProseMirror");
@@ -1627,7 +1674,7 @@ test("wysiwyg keeps code block selection stable around autosave", async ({ page 
   }, shellSettings);
 
   await gotoApp(page);
-  await page.getByRole("navigation", { name: "工作区导航" }).getByRole("button", { name: "笔记", exact: true }).click();
+  await page.getByRole("navigation", { name: "工作区导航" }).getByRole("button", { name: "文件", exact: true }).click();
   await page.getByRole("button", { name: "alpha.md", exact: true }).click();
 
   const editor = page.locator(".ProseMirror");

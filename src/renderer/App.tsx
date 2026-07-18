@@ -20,16 +20,15 @@ import {
   type ErrorInfo
 } from "react";
 import type { ReactCodeMirrorRef } from "@uiw/react-codemirror";
+import { useVirtualizer } from "@tanstack/react-virtual";
 import { redo as redoCodeMirror, redoDepth as redoDepthCodeMirror, undo as undoCodeMirror, undoDepth as undoDepthCodeMirror } from "@codemirror/commands";
 import {
   Bold,
   ChevronDown,
   ChevronRight,
-  Clock3,
   Code,
   ClipboardPaste,
   Copy,
-  Dot,
   ExternalLink,
   FileArchive,
   FileAudio,
@@ -42,7 +41,6 @@ import {
   FilePlus,
   Folder,
   FolderSearch,
-  FolderOpen,
   FolderPlus,
   Heading1,
   Heading2,
@@ -54,12 +52,9 @@ import {
   ListChecks,
   ListOrdered,
   Rows3,
-  Menu,
   Minus,
   Move,
   Pilcrow,
-  PanelLeftClose,
-  PanelLeftOpen,
   PanelRightClose,
   Pencil,
   Plug,
@@ -81,13 +76,16 @@ import {
   X
 } from "lucide-react";
 
-import { createMarkdownTocBlock, hasMarkdownToc, htmlToMarkdown, isMermaidFenceLanguage, mergeWysiwygBodyIntoSource, renderMarkdownToHtml, slugifyMarkdownHeadingId, updateFencedCodeBlockLanguage, updateMarkdownToc } from "../shared/markdown";
+import { applyFrontmatterMutation, createMarkdownTocBlock, hasMarkdownToc, htmlToMarkdown, isMermaidFenceLanguage, mergeWysiwygBodyIntoSource, slugifyMarkdownHeadingId, updateFencedCodeBlockLanguage, updateMarkdownToc } from "../shared/markdown";
+import { parseMarkdownOffThread, renderMarkdownOffThread } from "./services/markdownWorkerClient";
 import { DEFAULT_SETTINGS } from "../shared/constants";
 import { getBuiltInExtensionManifests } from "../shared/builtinExtensions";
 import { createTranslator, formatFileSize as formatLocalizedFileSize, resolveLocale, type Translator } from "../shared/i18n";
-import { hasExtensionPermission, type ExtensionContributions, type ExtensionManifest, type ExtensionPermission, type FileEditorContribution, type PluginDescriptor, type SettingContribution, type SidebarPanelContribution } from "../shared/extensions";
-import { normalizeAiSettings, normalizeAiSettingsPublic, type AiEmbeddingSettings, type AiPatchOperation, type AiPatchProposal, type AiProviderProfile, type AiProviderTestResult, type AiRunEvent, type AiSelectionActionId, type AiSemanticIndexStatus, type AiSettings, type AiSettingsPublic, type AiSourceRef } from "../shared/ai";
-import type { AppSettings, BacklinksResponse, EditorMode, FileBinaryReadResponse, FileHistoryEntry, FileReadResponse, FileTreeNode, FileWriteResponse, RecentWorkspace, ResolvedLocale, SearchResultItem, WorkspaceInfo } from "../shared/types";
+import { hasExtensionPermission, type ExtensionManifest, type ExtensionPermission, type FileEditorContribution, type PluginDescriptor, type SettingContribution } from "../shared/extensions";
+import { normalizeAiSettings, normalizeAiSettingsPublic, type AiEmbeddingSettings, type AiPatchOperation, type AiPatchProposal, type AiProviderProfile, type AiProviderTestResult, type AiRunEvent, type AiSelectionActionId, type AiSemanticIndexStatus, type AiSettings, type AiSettingsPublic, type AiSourceRef, type AiTaskSummary } from "../shared/ai";
+import type { AppSettings, BacklinksResponse, EditorMode, FileBinaryReadResponse, FileHistoryEntry, FileReadResponse, FileTreeNode, FileWriteResponse, RecentWorkspace, RenameReferencePreview, ResolvedLocale, SearchResultItem, WorkspaceInfo } from "../shared/types";
+import type { LocalGraphResponse, PropertyMutation, SavedSearch, SearchMode, TagRenamePreview, TagSummary, UnifiedSearchResult, WikiLinkTarget, WorkspaceHealthSnapshot, WorkspaceProbeResult, WorkspaceSessionSnapshot } from "../shared/contracts";
+import type { ExternalDocumentChangedEvent, ExternalDocumentSaveResponse, ExternalFolderSession, RecentExternalFile } from "../shared/externalDocuments";
 import type { AiMessageView } from "./ai/AiSidebar";
 import { CommandPalette, type PaletteAction } from "./components/CommandPalette";
 import type { SourceEditorHandle } from "./components/SourceEditor";
@@ -96,9 +94,27 @@ import { WelcomeScreen, recentWorkspaceUnavailableReason } from "./components/We
 import type { WysiwygEditorHandle } from "./components/WysiwygEditor";
 import type { FindReplaceOptions, FindReplaceResult } from "./components/findReplace";
 import type { MarkdownOpenTarget } from "./components/markdownOpenTarget";
-import noliaIconUrl from "../../build/icon.svg";
 import { RendererI18nProvider, useRendererI18n } from "./app/i18n";
+import { AppNavigation as AppNav } from "./app/AppNavigation";
 import { useUiStore } from "./app/store";
+import { useDocumentSession } from "./features/documents/useDocumentSession";
+import { DocumentTabBar } from "./features/documents/DocumentTabBar";
+import { EditorTopBar } from "./features/documents/EditorTopBar";
+import { WorkspaceHome } from "./features/workspace/WorkspaceHome";
+import { QuickCaptureDialog } from "./features/workspace/QuickCaptureDialog";
+import { TemplatePickerDialog } from "./features/workspace/TemplatePickerDialog";
+import { WorkspaceHealthPage } from "./features/workspace/WorkspaceHealthPage";
+import { DiscoverPage } from "./features/discovery/DiscoverPage";
+import { AiTaskCenter } from "./features/ai/AiTaskCenter";
+import { AiApprovalView } from "./features/ai/AiApprovalView";
+import { PluginFrameHost } from "./features/plugins/PluginFrameHost";
+import { InspectorTabs, LinksPanel, PropertiesPanel, type InspectorTab } from "./features/documents/DocumentInspector";
+import { LocalGraphView } from "./features/discovery/LocalGraphView";
+import { beginDocumentSave, completeDocumentSave, createDocumentRevision, editDocumentRevision, failDocumentSave } from "./features/documents/documentStateMachine";
+import type { WikiLinkCompletionTarget } from "./features/documents/wikiLinkCompletion";
+import { applyWorkspaceTreeEvent } from "./features/explorer/treePatch";
+import { ConfirmDialog, MoveDialog, NewNoteDialog, RenameDialog, RenameReferenceDialog, TagRenameDialog, WorkspaceProbeDialog } from "./features/explorer/WorkspaceDialogs";
+import { renderWorkspaceTemplate } from "./features/workspace/template";
 import type {
   ActiveResource,
   CreateMenuState,
@@ -113,9 +129,7 @@ import type {
   OpenDocumentTab,
   RenameTarget,
   ResourceCategory,
-  SidebarView,
   StoredDocumentItem,
-  SuspendedShellState,
   TreeSelection
 } from "./app/types";
 import { isDocumentListItem, isFavoriteDocument, loadWorkspaceLocalLists, saveWorkspaceLocalList, upsertDocumentListItem } from "./app/documentLists";
@@ -128,7 +142,6 @@ import {
   fileNameFor,
   filterTreeNodes,
   findFileTreeNode,
-  firstOpenableFileTreeNode,
   joinPath,
   pathParent,
   sanitizeItemName,
@@ -136,8 +149,6 @@ import {
   uniqueMovedPath
 } from "./app/workspaceTree";
 import {
-  activateRendererPlugin,
-  type Disposable,
   type PluginFileEditorContext,
   type PluginFileViewerContext,
   type PluginRenderProvider,
@@ -194,10 +205,13 @@ const MAX_RIGHT_PANEL_WIDTH = 520;
 const DEFAULT_SPLIT_LEFT_PERCENT = 50;
 const MIN_SPLIT_LEFT_PERCENT = 25;
 const MAX_SPLIT_LEFT_PERCENT = 75;
-const EXTERNAL_PARSE_WORKSPACE_ID = "external";
 const SPLIT_PREVIEW_RENDER_DELAY_MS = 180;
 const USER_STATUS_PROTECT_MS = 1800;
 const AI_RUN_UI_WATCHDOG_MS = Number(import.meta.env.VITE_NOLIA_AI_IDLE_WATCHDOG_MS ?? import.meta.env.VITE_NOLIA_AI_WATCHDOG_MS ?? 120_000);
+
+function searchSignatureFor(workspaceId: string | undefined, query: string, mode: SearchMode, tag: string | undefined): string {
+  return JSON.stringify([workspaceId ?? "", query.trim(), mode, tag ?? ""]);
+}
 const AI_RUN_UI_MAX_WATCHDOG_MS = Number(import.meta.env.VITE_NOLIA_AI_MAX_WATCHDOG_MS ?? 10 * 60_000);
 const AI_RUN_START_WATCHDOG_MS = Math.min(10_000, AI_RUN_UI_WATCHDOG_MS);
 const AI_TERMINAL_EVENT_TTL_MS = 5 * 60_000;
@@ -226,14 +240,22 @@ type WorkspaceLoadingOverlayProps = {
   onRetry: () => void;
 };
 
+type SaveAttemptResult =
+  | { status: "saved"; pathRel: string }
+  | { status: "clean"; pathRel?: string }
+  | { status: "conflict" | "missing" | "readonly" | "cancelled" | "error"; pathRel: string; error?: string };
+
 export function App() {
   const [startupLocale, setStartupLocale] = useState<ResolvedLocale>("zh-CN");
   const startupLocaleInitializedRef = useRef(false);
   const tr = useMemo(() => createTranslator(startupLocale), [startupLocale]);
   const [workspace, setWorkspace] = useState<WorkspaceInfo | undefined>();
   const [recentWorkspaces, setRecentWorkspaces] = useState<RecentWorkspace[]>([]);
+  const [recentExternalFiles, setRecentExternalFiles] = useState<RecentExternalFile[]>([]);
   const [welcomeOpeningWorkspaceId, setWelcomeOpeningWorkspaceId] = useState<string | undefined>();
   const [welcomeErrorMessage, setWelcomeErrorMessage] = useState<string | undefined>();
+  const [workspaceProbe, setWorkspaceProbe] = useState<WorkspaceProbeResult>();
+  const [externalConflictPath, setExternalConflictPath] = useState<string>();
   const [workspaceLoading, setWorkspaceLoading] = useState(false);
   const [workspaceLoadError, setWorkspaceLoadError] = useState<string | undefined>();
   const [fileTree, setFileTree] = useState<FileTreeNode[]>([]);
@@ -243,9 +265,38 @@ export function App() {
   const [recentEditedDocs, setRecentEditedDocs] = useState<DocumentListItem[]>([]);
   const [noteFilterQuery, setNoteFilterQuery] = useState("");
   const [workspaceSearchQuery, setWorkspaceSearchQuery] = useState("");
+  const [searchMode, setSearchMode] = useState<SearchMode>("hybrid");
+  const [unifiedSearchResults, setUnifiedSearchResults] = useState<UnifiedSearchResult[]>([]);
+  const [searchFallbackReason, setSearchFallbackReason] = useState<string | undefined>();
+  const [searchLoading, setSearchLoading] = useState(false);
+  const [searchError, setSearchError] = useState<string | undefined>();
+  const [completedSearchSignature, setCompletedSearchSignature] = useState("");
+  const searchRequestSequence = useRef(0);
+  const [savedSearches, setSavedSearches] = useState<SavedSearch[]>([]);
+  const [workspaceTags, setWorkspaceTags] = useState<TagSummary[]>([]);
+  const [selectedSearchTag, setSelectedSearchTag] = useState<string>();
+  const [pendingTagRename, setPendingTagRename] = useState<TagRenamePreview>();
+  const [wikiLinkTargets, setWikiLinkTargets] = useState<WikiLinkTarget[]>([]);
   const [backlinks, setBacklinks] = useState(emptyBacklinks);
-  const [openDocs, setOpenDocs] = useState<OpenDocumentTab[]>([]);
-  const [activePathRel, setActivePathRel] = useState<string | undefined>();
+  const [localGraph, setLocalGraph] = useState<LocalGraphResponse | undefined>();
+  const [localGraphOpen, setLocalGraphOpen] = useState(false);
+  const [localGraphLoading, setLocalGraphLoading] = useState(false);
+  const [workspaceHealth, setWorkspaceHealth] = useState<WorkspaceHealthSnapshot>();
+  const [workspaceHealthOpen, setWorkspaceHealthOpen] = useState(false);
+  const {
+    openDocs,
+    openDocsRef,
+    activePathRel,
+    setActivePathRel,
+    currentDocument,
+    currentDocumentFromRef,
+    updateOpenDocs,
+    updateOpenDocument,
+    recentlyClosedRef,
+    recordClosedDocument,
+    takeRecentlyClosedDocument,
+    replaceRecentlyClosedDocuments
+  } = useDocumentSession();
   const [activeResource, setActiveResource] = useState<ActiveResource | undefined>();
   const [activeHtml, setActiveHtml] = useState("");
   const [statusMessage, setStatusMessage] = useState(() => tr("就绪"));
@@ -259,6 +310,7 @@ export function App() {
   const [createMenu, setCreateMenu] = useState<CreateMenuState | undefined>();
   const [renameTarget, setRenameTarget] = useState<RenameTarget | undefined>();
   const [renameValue, setRenameValue] = useState("");
+  const [pendingRename, setPendingRename] = useState<{ target: RenameTarget; targetPathRel: string; displayName?: string; preview: RenameReferencePreview }>();
   const [deleteTarget, setDeleteTarget] = useState<DeleteTarget | undefined>();
   const [fileClipboard, setFileClipboard] = useState<FileClipboard | undefined>();
   const [moveDialog, setMoveDialog] = useState<MoveDialogState | undefined>();
@@ -270,16 +322,15 @@ export function App() {
   const [leftPanelCollapsed, setLeftPanelCollapsed] = useState(false);
   const [leftPanelWidth, setLeftPanelWidth] = useState(readStoredLeftPanelWidth);
   const [rightPanelWidth, setRightPanelWidth] = useState(readStoredRightPanelWidth);
-  const [rightPanelCollapsed, setRightPanelCollapsed] = useState(true);
+  const [rightPanelCollapsed, setRightPanelCollapsed] = useState(false);
+  const [inspectorDrawerMode, setInspectorDrawerMode] = useState(() => window.matchMedia?.("(max-width: 1180px)").matches ?? false);
   const [immersiveMode, setImmersiveMode] = useState(false);
   const [appSettings, setAppSettings] = useState<AppSettings | undefined>();
   const [appInfo, setAppInfo] = useState<AppRuntimeInfo | undefined>();
   const [pluginDescriptors, setPluginDescriptors] = useState<PluginDescriptor[]>([]);
-  const [pluginRuntimeManifests, setPluginRuntimeManifests] = useState<ExtensionManifest[]>([]);
-  const [pluginCommandIds, setPluginCommandIds] = useState<string[]>([]);
-  const [pluginSidebarPanels, setPluginSidebarPanels] = useState<Map<string, PluginRenderProvider<PluginSidebarPanelContext>>>(new Map());
-  const [pluginFileViewers, setPluginFileViewers] = useState<Map<string, RegisteredPluginRenderer<PluginFileViewerContext>>>(new Map());
-  const [pluginFileEditors, setPluginFileEditors] = useState<Map<string, RegisteredPluginRenderer<PluginFileEditorContext>>>(new Map());
+  const pluginSidebarPanels = useMemo(() => new Map<string, PluginRenderProvider<PluginSidebarPanelContext>>(), []);
+  const pluginFileViewers = useMemo(() => new Map<string, RegisteredPluginRenderer<PluginFileViewerContext>>(), []);
+  const pluginFileEditors = useMemo(() => new Map<string, RegisteredPluginRenderer<PluginFileEditorContext>>(), []);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [settingsInitialTab, setSettingsInitialTab] = useState<SettingsTabId>("preferences");
   const [selectedCharCount, setSelectedCharCount] = useState(0);
@@ -288,12 +339,17 @@ export function App() {
   const [historyLoading, setHistoryLoading] = useState(false);
   const [historyPreview, setHistoryPreview] = useState<{ entry: FileHistoryEntry; content: string } | undefined>();
   const [aiSettings, setAiSettings] = useState<AiSettingsPublic | undefined>();
+  const [aiTaskSummaries, setAiTaskSummaries] = useState<AiTaskSummary[]>([]);
+  const [quickCaptureOpen, setQuickCaptureOpen] = useState(false);
+  const [quickCaptureSaving, setQuickCaptureSaving] = useState(false);
+  const [templatePickerOpen, setTemplatePickerOpen] = useState(false);
   const [aiSemanticStatus, setAiSemanticStatus] = useState<AiSemanticIndexStatus | undefined>();
   const [aiSidebarOpen, setAiSidebarOpen] = useState(false);
   const [aiSidebarEverOpened, setAiSidebarEverOpened] = useState(false);
   const [aiMessages, setAiMessages] = useState<AiMessageView[]>([]);
   const [aiSources, setAiSources] = useState<AiSourceRef[]>([]);
   const [aiPatchProposal, setAiPatchProposal] = useState<AiPatchProposal | undefined>();
+  const [aiPatchApplying, setAiPatchApplying] = useState(false);
   const [aiPatchApplyMode, setAiPatchApplyMode] = useState<"current-document" | "new-document">("current-document");
   const [aiActiveRunId, setAiActiveRunId] = useState<string | undefined>();
   const [aiRunning, setAiRunning] = useState(false);
@@ -307,9 +363,9 @@ export function App() {
   const aiRunStatesRef = useRef<Map<string, AiRunUiState>>(new Map());
   const aiStartWatchdogRef = useRef<number | undefined>(undefined);
   const aiStartSequenceRef = useRef(0);
-  const openDocsRef = useRef(openDocs);
   const activeResourceRef = useRef(activeResource);
-  const suspendedShellRef = useRef<SuspendedShellState | undefined>(undefined);
+  const externalOpenQueueRef = useRef<Promise<void>>(Promise.resolve());
+  const closeHandshakeRunningRef = useRef(false);
   const leftPanelWidthRef = useRef(leftPanelWidth);
   const rightPanelWidthRef = useRef(rightPanelWidth);
   const viewPreferencesLoadedRef = useRef(false);
@@ -318,11 +374,11 @@ export function App() {
   const renderToken = useRef(0);
   const sourceParseTokensRef = useRef<Map<string, number>>(new Map());
   const htmlDraftsRef = useRef<Map<string, string>>(new Map());
-  const pluginCommandHandlersRef = useRef<Map<string, () => void | Promise<void>>>(new Map());
   const pluginEditorSaveHandlersRef = useRef<Map<string, () => Promise<void>>>(new Map());
   const runCommandRef = useRef<(command: string) => void | Promise<void>>(() => undefined);
   const workspaceLoadTokenRef = useRef(0);
   const workspaceIdRef = useRef<string | undefined>(undefined);
+  const treeSequenceRef = useRef(0);
   const theme = useUiStore((state) => state.theme);
   const setTheme = useUiStore((state) => state.setTheme);
   const sidebarView = useUiStore((state) => state.sidebarView);
@@ -342,6 +398,7 @@ export function App() {
   const lineNumbersVisible = useUiStore((state) => state.lineNumbersVisible);
   const setLineNumbersVisible = useUiStore((state) => state.setLineNumbersVisible);
   const visibleDocument = activeResource ? undefined : currentDocument();
+  const externalConflictDocument = externalConflictPath ? openDocs.find((document) => document.pathRel === externalConflictPath) : undefined;
   const visibleResource = activeResource;
   const visibleDocumentFavorite = visibleDocument ? favoriteDocs.some((item) => item.pathRel === visibleDocument.pathRel) : false;
   const showWelcome = !workspace && !visibleDocument;
@@ -349,18 +406,12 @@ export function App() {
   const effectiveSettings = appSettings ?? defaultAppSettings();
   const languageRestartRequired = appSettings ? resolveLocale(appSettings.language, navigator.language) !== startupLocale : false;
   const builtInExtensionManifests = useMemo(() => getBuiltInExtensionManifests(startupLocale), [startupLocale]);
-  const pluginManifests = useMemo(() => pluginDescriptors.map((descriptor) => descriptor.manifest).filter(isExtensionManifest), [pluginDescriptors]);
-  const allExtensionManifests = useMemo(
-    () => [...builtInExtensionManifests, ...pluginManifests, ...pluginRuntimeManifests],
-    [builtInExtensionManifests, pluginManifests, pluginRuntimeManifests]
-  );
+  const pluginManifests = useMemo(() => pluginDescriptors.filter((descriptor) => descriptor.enabled && descriptor.manifest?.apiVersion === 3 && !descriptor.diagnostics.some((item) => item.level === "error")).map((descriptor) => descriptor.manifest).filter(isExtensionManifest), [pluginDescriptors]);
+  const allExtensionManifests = useMemo(() => [...builtInExtensionManifests, ...pluginManifests], [builtInExtensionManifests, pluginManifests]);
+  const settingsExtensionManifests = useMemo(() => [...builtInExtensionManifests, ...pluginDescriptors.map((descriptor) => descriptor.manifest).filter(isExtensionManifest)], [builtInExtensionManifests, pluginDescriptors]);
   const extensionRegistry = useMemo(() => createExtensionRegistry(allExtensionManifests, effectiveSettings), [allExtensionManifests, effectiveSettings]);
   const sidebarPanels = extensionRegistry.sidebarPanels;
   const settingContributions = extensionRegistry.settings;
-
-  useEffect(() => {
-    openDocsRef.current = openDocs;
-  }, [openDocs]);
 
   useEffect(() => {
     activeResourceRef.current = activeResource;
@@ -369,6 +420,31 @@ export function App() {
   useEffect(() => {
     workspaceIdRef.current = workspace?.workspaceId;
   }, [workspace?.workspaceId]);
+
+  useEffect(() => {
+    if (!workspace || workspaceLoading || !window.nolia.workspace.writeSession) {
+      return;
+    }
+    const timeout = window.setTimeout(() => {
+      const session: WorkspaceSessionSnapshot = {
+        workspaceId: workspace.workspaceId,
+        activePathRel,
+        documents: openDocs
+          .filter((document) => document.sourceKind !== "external")
+          .slice(-20)
+          .map((document, index) => ({ pathRel: document.pathRel, mode: document.mode, lastActiveAt: document.pathRel === activePathRel ? Date.now() : Date.now() - index - 1 })),
+        recentlyClosed: recentlyClosedRef.current
+          .filter((document) => document.sourceKind !== "external")
+          .slice(0, 20)
+          .map((document, index) => ({ pathRel: document.pathRel, mode: document.mode, lastActiveAt: Date.now() - index })),
+        sidebarView: sidebarView === "files" ? "files" : sidebarView === "ai" ? "ai" : "discover",
+        inspectorView: rightPanelView === "outline" ? "outline" : rightPanelView === "history" ? "history" : rightPanelView === "details" ? "properties" : "links",
+        updatedAt: Date.now()
+      };
+      void window.nolia.workspace.writeSession?.({ workspaceId: workspace.workspaceId, session });
+    }, 500);
+    return () => window.clearTimeout(timeout);
+  }, [workspace?.workspaceId, workspaceLoading, activePathRel, openDocs, sidebarView, rightPanelView]);
 
   useEffect(() => {
     setStatusMessage((message) => (message === "就绪" || message === "Ready" ? tr("就绪") : message));
@@ -391,6 +467,27 @@ export function App() {
     rightPanelWidthRef.current = rightPanelWidth;
     window.localStorage.setItem(RIGHT_PANEL_WIDTH_STORAGE_KEY, String(rightPanelWidth));
   }, [rightPanelWidth]);
+
+  useEffect(() => {
+    const mediaQuery = window.matchMedia?.("(max-width: 1180px)");
+    if (!mediaQuery) return;
+    const updateInspectorMode = () => {
+      setInspectorDrawerMode(mediaQuery.matches);
+      if (mediaQuery.matches) setRightPanelCollapsed(true);
+    };
+    updateInspectorMode();
+    mediaQuery.addEventListener("change", updateInspectorMode);
+    return () => mediaQuery.removeEventListener("change", updateInspectorMode);
+  }, []);
+
+  useEffect(() => {
+    if (!inspectorDrawerMode || rightPanelCollapsed) return;
+    const closeInspector = (event: KeyboardEvent) => {
+      if (event.key === "Escape") setRightPanelCollapsed(true);
+    };
+    window.addEventListener("keydown", closeInspector);
+    return () => window.removeEventListener("keydown", closeInspector);
+  }, [inspectorDrawerMode, rightPanelCollapsed]);
 
   useEffect(() => {
     void bootstrap();
@@ -435,93 +532,12 @@ export function App() {
   useEffect(() => {
     void window.nolia?.extensions?.syncMenus({
       menus: filterMenuContributions(extensionRegistry.menus, {
-        workspace: Boolean(workspace),
+        workspace: Boolean(workspace && visibleDocument?.sourceKind !== "external"),
         document: Boolean(visibleDocument),
         resource: Boolean(visibleResource)
       })
     });
-  }, [extensionRegistry.menus, visibleDocument?.pathRel, visibleResource?.pathRel, workspace?.workspaceId]);
-
-  useEffect(() => {
-    const activePlugins = pluginDescriptors.filter((descriptor) => descriptor.manifest && descriptor.rendererUrl && isExtensionEnabled(descriptor.manifest, effectiveSettings));
-    const disposables: Disposable[] = [];
-    let cancelled = false;
-    for (const descriptor of activePlugins) {
-      void activateRendererPlugin(descriptor, {
-        registerContributions: (pluginId, contributions) => registerPluginRuntimeContributions(pluginId, contributions),
-        registerCommand: (pluginId, id, handler) => registerPluginCommandHandler(pluginId, id, handler),
-        registerSidebarPanel: (pluginId, id, render) => registerPluginSidebarPanel(pluginId, id, render),
-        registerFileViewer: (pluginId, id, render) => registerPluginFileViewer(pluginId, id, render),
-        registerFileEditor: (pluginId, id, render) => registerPluginFileEditor(pluginId, id, render),
-        getActiveWorkspace: () => (workspace ? { workspaceId: workspace.workspaceId, name: workspace.name, rootPath: workspace.rootPath } : undefined),
-        readWorkspaceFile: async (pluginId, pathRel) => {
-          assertPluginPermission(pluginId, "workspace:file:read");
-          if (!workspace) {
-            throw new Error("No active workspace");
-          }
-          return (await window.nolia.file.read({ workspaceId: workspace.workspaceId, pathRel })).content;
-        },
-        writeWorkspaceFile: async (pluginId, pathRel, content) => {
-          assertPluginPermission(pluginId, "workspace:file:write");
-          if (!workspace) {
-            throw new Error("No active workspace");
-          }
-          const current = await window.nolia.file.read({ workspaceId: workspace.workspaceId, pathRel });
-          const result = await window.nolia.file.writeAtomic({ workspaceId: workspace.workspaceId, pathRel, content, baseHash: current.sha256, createSnapshot: true });
-          if (result.status !== "saved") {
-            throw new Error(`Write failed: ${result.status}`);
-          }
-        },
-        readWorkspaceBinaryFile: async (pluginId, pathRel) => {
-          assertPluginPermission(pluginId, "workspace:file:read");
-          if (!workspace) {
-            throw new Error("No active workspace");
-          }
-          if (!window.nolia.file.readBinary) {
-            throw new Error("Binary file reads are unavailable");
-          }
-          return window.nolia.file.readBinary({ workspaceId: workspace.workspaceId, pathRel });
-        },
-        writeWorkspaceBinaryFile: async (pluginId, pathRel, data) => {
-          assertPluginPermission(pluginId, "workspace:file:write");
-          if (!workspace) {
-            throw new Error("No active workspace");
-          }
-          if (!window.nolia.file.readBinary || !window.nolia.file.writeBinaryAtomic) {
-            throw new Error("Binary file writes are unavailable");
-          }
-          const current = await window.nolia.file.readBinary({ workspaceId: workspace.workspaceId, pathRel });
-          const result = await window.nolia.file.writeBinaryAtomic({ workspaceId: workspace.workspaceId, pathRel, data, baseHash: current.sha256, createSnapshot: true });
-          if (result.status !== "saved") {
-            throw new Error(`Write failed: ${result.status}`);
-          }
-        },
-        hasPermission: (pluginId, permission) => pluginHasPermission(pluginId, permission),
-        requestNetwork: async (pluginId, url, options) => {
-          assertNetworkPermission(pluginId, url);
-          return fetch(url, options);
-        }
-      })
-        .then((disposable) => {
-          if (cancelled) {
-            disposable.dispose();
-            return;
-          }
-          disposables.push(disposable);
-        })
-        .catch((error: unknown) => {
-          const message = error instanceof Error ? error.message : tr("插件加载失败");
-          setStatusMessage(tr("插件加载失败：{message}", { message }));
-          void recordPluginFailure(descriptor.pluginId, message);
-        });
-    }
-    return () => {
-      cancelled = true;
-      for (const disposable of disposables.reverse()) {
-        disposable.dispose();
-      }
-    };
-  }, [pluginDescriptors, effectiveSettings, workspace?.workspaceId]);
+  }, [extensionRegistry.menus, visibleDocument?.pathRel, visibleDocument?.sourceKind, visibleResource?.pathRel, workspace?.workspaceId]);
 
   useEffect(() => {
     if (!appSettings) {
@@ -557,7 +573,16 @@ export function App() {
       if (!workspace || event.workspaceId !== workspace.workspaceId) {
         return;
       }
-      void loadWorkspaceData(workspace);
+      const expectedSequence = treeSequenceRef.current + 1;
+      if (event.sequence && event.operation && event.pathRel && event.sequence === expectedSequence) {
+        treeSequenceRef.current = event.sequence;
+        setFileTree((nodes) => applyWorkspaceTreeEvent(nodes, event));
+      } else {
+        if (event.sequence) {
+          treeSequenceRef.current = event.sequence;
+        }
+        void loadWorkspaceData(workspace);
+      }
       void refreshOpenWorkspaceDocuments(workspace, event.pathRel, "external");
       void refreshAiSemanticStatus();
       if (Date.now() > userStatusProtectedUntilRef.current) {
@@ -615,17 +640,40 @@ export function App() {
 
   useEffect(() => {
     const externalUnsub = window.nolia.events.onExternalFileOpen((filePath) => {
-      void handleExternalFileOpen(filePath);
+      enqueueExternalFileOpen(filePath);
     });
     void window.nolia.externalFile?.consumePendingOpen().then((filePaths) => {
       for (const filePath of filePaths) {
-        void handleExternalFileOpen(filePath);
+        enqueueExternalFileOpen(filePath);
       }
+    });
+    const changedUnsub = window.nolia.events.onExternalFileChanged?.((event) => {
+      void handleExternalDocumentChanged(event);
+    });
+    const closeUnsub = window.nolia.events.onWindowCloseRequest?.(() => {
+      void handleWindowCloseRequest();
     });
     return () => {
       externalUnsub();
+      changedUnsub?.();
+      closeUnsub?.();
     };
-  }, [workspace?.rootPath, openDocs, immersiveMode]);
+  }, []);
+
+  useEffect(() => {
+    const active = currentDocument();
+    const fileName = active ? fileNameFor(active.pathRel) : workspace?.name;
+    const title = active
+      ? active.sourceKind === "external"
+        ? `${fileName} - Nolia`
+        : `${fileName} - ${workspace?.name ?? "Nolia"} - Nolia`
+      : workspace ? `${workspace.name} - Nolia` : "Nolia";
+    void window.nolia.window?.setDocumentState({
+      title,
+      representedFilename: active?.sourceKind === "external" ? active.filePath ?? active.pathRel : undefined,
+      dirty: Boolean(active?.dirty)
+    });
+  }, [activePathRel, workspace?.name, openDocs.map((document) => `${document.pathRel}:${document.dirty}`).join("|")]);
 
   useEffect(() => {
     const updateFromKeyboardEvent = (event: KeyboardEvent) => {
@@ -656,7 +704,7 @@ export function App() {
     }
     const token = ++renderToken.current;
     const render = () => {
-      void renderMarkdownToHtml(activeDoc.sourceText).then((html) => {
+      void renderMarkdownOffThread(activeDoc.sourceText).then((html) => {
         if (renderToken.current === token) {
           setActiveHtml(rewritePreviewAssets(html, activeDoc, workspace?.workspaceId));
         }
@@ -670,14 +718,26 @@ export function App() {
     return () => window.clearTimeout(timer);
   }, [activePathRel, openDocs.map((doc) => `${doc.pathRel}:${doc.mode}:${doc.pendingHtml ? "html-draft" : doc.sourceText}`).join("|"), workspace?.workspaceId]);
 
+  const activeSearchSignature = searchSignatureFor(workspace?.workspaceId, workspaceSearchQuery, searchMode, selectedSearchTag);
+
   useEffect(() => {
+    if (!workspace || sidebarView !== "search") {
+      return;
+    }
+    if (!workspaceSearchQuery.trim() && !selectedSearchTag) {
+      searchRequestSequence.current += 1;
+      setSearchLoading(false);
+      setSearchError(undefined);
+      setSearchFallbackReason(undefined);
+      setUnifiedSearchResults([]);
+      setCompletedSearchSignature(activeSearchSignature);
+      return;
+    }
     const timer = window.setTimeout(() => {
-      if (workspace && sidebarView === "search") {
-        void runSearch(workspaceSearchQuery);
-      }
-    }, 200);
+      void runSearch(workspaceSearchQuery, activeSearchSignature);
+    }, 150);
     return () => window.clearTimeout(timer);
-  }, [workspaceSearchQuery, sidebarView, workspace?.workspaceId]);
+  }, [activeSearchSignature, sidebarView, workspace?.workspaceId]);
 
   useEffect(() => {
     if (workspace && sidebarView === "backlinks" && activePathRel && currentDocument()?.sourceKind !== "external") {
@@ -699,11 +759,13 @@ export function App() {
 
   const commandHandlers = useMemo<Record<string, () => void | Promise<void>>>(
     () => ({
+      "file.open": () => pickExternalFiles(),
       "workspace.open": () => openWorkspace(),
       "workspace.create": () => createWorkspace(),
       "workspace.close": () => closeWorkspace(),
       "file.new": () => openNewNoteDialog(),
-      "document.save": () => saveActiveDocument(),
+      "document.save": async () => { await saveActiveDocument(); },
+      "document.close": async () => { const active = currentDocumentFromRef(); if (active) await closeDocumentTab(active); },
       "document.export": () => exportActiveDocument(),
       "edit.undo": () => runEditorHistoryCommand("undo"),
       "edit.redo": () => runEditorHistoryCommand("redo"),
@@ -735,6 +797,38 @@ export function App() {
     runCommandRef.current = runCommand;
   }, [commandHandlers]);
 
+  useEffect(() => {
+    const closeActiveDocument = (event: KeyboardEvent) => {
+      if (!(event.metaKey || event.ctrlKey) || event.altKey) {
+        return;
+      }
+      if (event.shiftKey && event.key.toLowerCase() === "t") {
+        const closed = takeRecentlyClosedDocument();
+        if (!closed) {
+          return;
+        }
+        event.preventDefault();
+        if (closed.sourceKind === "external") {
+          enqueueExternalFileOpen(closed.filePath ?? closed.pathRel);
+        } else {
+          void openDocument(closed.pathRel).then(() => setActiveMode(closed.mode));
+        }
+        return;
+      }
+      if (event.shiftKey || event.key.toLowerCase() !== "w") {
+        return;
+      }
+      const active = currentDocumentFromRef();
+      if (!active || settingsOpen || commandPaletteOpen) {
+        return;
+      }
+      event.preventDefault();
+      void closeDocumentTab(active);
+    };
+    window.addEventListener("keydown", closeActiveDocument);
+    return () => window.removeEventListener("keydown", closeActiveDocument);
+  }, [settingsOpen, commandPaletteOpen, activePathRel]);
+
   const paletteActions = useMemo<PaletteAction[]>(
     () =>
       [
@@ -746,14 +840,14 @@ export function App() {
         { id: "ai.selection.translate", title: tr("翻译选中文本"), keywords: ["ai", "translate"], order: 24 },
         { id: "ai.selection.todo", title: tr("转为待办"), keywords: ["ai", "todo"], order: 25 }
       ]
-        .filter((command) => Boolean(commandHandlers[command.id] ?? pluginCommandIds.includes(command.id)))
+        .filter((command) => Boolean(commandHandlers[command.id]))
         .map((command) => ({
           id: command.id,
           label: commandLabel(command.id, command.title, { immersiveMode, toolbarVisible, lineNumbersVisible }, tr),
           keywords: command.keywords ?? [],
           run: () => void runCommand(command.id)
         })),
-    [extensionRegistry.commands, commandHandlers, pluginCommandIds, immersiveMode, toolbarVisible, lineNumbersVisible, tr]
+    [extensionRegistry.commands, commandHandlers, immersiveMode, toolbarVisible, lineNumbersVisible, tr]
   );
 
   if (showWelcome) {
@@ -793,14 +887,28 @@ export function App() {
           onCancel={() => setDeleteTarget(undefined)}
           onConfirm={() => void deleteItem()}
         />
+        <WorkspaceProbeDialog
+          probe={workspaceProbe}
+          onCancel={() => setWorkspaceProbe(undefined)}
+          onConfirm={() => {
+            const probe = workspaceProbe;
+            if (!probe) return;
+            setWorkspaceProbe(undefined);
+            void initializeProbedWorkspace(probe);
+          }}
+        />
         <WelcomeScreen
           recentWorkspaces={recentWorkspaces}
+          recentExternalFiles={recentExternalFiles}
           openingWorkspaceId={welcomeOpeningWorkspaceId}
           errorMessage={welcomeErrorMessage}
           onOpenWorkspace={() => void openWorkspace()}
+          onOpenFile={() => void pickExternalFiles()}
           onCreateWorkspace={() => void createWorkspace()}
           onOpenRecent={(item) => void openRecentWorkspace(item)}
           onRemoveRecent={(item) => void removeRecentWorkspace(item)}
+          onOpenRecentFile={(item) => enqueueExternalFileOpen(item.filePath)}
+          onRemoveRecentFile={(item) => void removeRecentExternalFile(item)}
         />
       </RendererI18nProvider>
     );
@@ -809,6 +917,11 @@ export function App() {
   const platformClass = appInfo?.platform ? ` is-platform-${appInfo.platform}` : "";
   const statusMessageLabel = statusBarMessage(statusMessage, tr);
   const showStatusMessage = statusMessageLabel !== tr("就绪");
+  const showDocumentInspector = Boolean(visibleDocument && sidebarView !== "search" && sidebarView !== "ai" && !workspaceHealthOpen && !localGraphOpen && !immersiveMode);
+  const editorPageView = Boolean(workspaceHealthOpen || localGraphOpen || sidebarView === "search" || sidebarView === "ai");
+  const hasSearchCriteria = Boolean(workspaceSearchQuery.trim() || selectedSearchTag);
+  const searchResultsAreCurrent = completedSearchSignature === activeSearchSignature;
+  const discoverySearchLoading = searchLoading || Boolean(workspace && sidebarView === "search" && hasSearchCriteria && !searchResultsAreCurrent);
 
   return (
     <RendererI18nProvider locale={startupLocale}>
@@ -822,6 +935,13 @@ export function App() {
           setCommandPaletteOpen(false);
           setCommandQuery("");
         }}
+      />
+      <ExternalConflictDialog
+        document={externalConflictDocument}
+        onContinue={() => void resolveExternalConflict("continue")}
+        onReload={() => void resolveExternalConflict("reload")}
+        onSaveAs={() => void resolveExternalConflict("saveAs")}
+        onForce={() => void resolveExternalConflict("force")}
       />
       <NewNoteDialog
         open={newNoteDialogOpen}
@@ -846,6 +966,21 @@ export function App() {
         confirmLabel={tr("删除")}
         onCancel={() => setDeleteTarget(undefined)}
         onConfirm={() => void deleteItem()}
+      />
+      <RenameReferenceDialog
+        pending={pendingRename}
+        onCancel={() => setPendingRename(undefined)}
+        onConfirm={() => {
+          const pending = pendingRename;
+          if (!pending) return;
+          setPendingRename(undefined);
+          void executeRename(pending.target, pending.targetPathRel, pending.displayName);
+        }}
+      />
+      <TagRenameDialog
+        pending={pendingTagRename}
+        onCancel={() => setPendingTagRename(undefined)}
+        onConfirm={() => void applyPendingTagRename()}
       />
           <MoveDialog
             dialog={moveDialog}
@@ -879,7 +1014,7 @@ export function App() {
         aiSettings={aiSettings}
         workspaceId={workspace?.workspaceId}
         aiSemanticStatus={aiSemanticStatus}
-        extensionManifests={allExtensionManifests}
+        extensionManifests={settingsExtensionManifests}
         pluginDescriptors={pluginDescriptors}
         settingContributions={settingContributions}
         onClose={() => setSettingsOpen(false)}
@@ -899,8 +1034,31 @@ export function App() {
         languageRestartRequired={languageRestartRequired}
         pluginDirectory={appInfo?.pluginDirectory}
       />
+      <QuickCaptureDialog
+        open={quickCaptureOpen}
+        saving={quickCaptureSaving}
+        target={quickCaptureTarget(effectiveSettings, new Date())}
+        onOpenChange={setQuickCaptureOpen}
+        onSubmit={(value) => void submitQuickCapture(value)}
+      />
+      <TemplatePickerDialog
+        open={templatePickerOpen}
+        templates={collectMarkdownNotes(fileTree).map((item) => item.pathRel).filter((pathRel) => pathRel.startsWith(`${workspaceDirectory(effectiveSettings.templatesDirectory, "Templates")}/`))}
+        onClose={() => setTemplatePickerOpen(false)}
+        onCreate={(templatePath, title) => void createDocumentFromTemplate(templatePath, title)}
+      />
+      <WorkspaceProbeDialog
+        probe={workspaceProbe}
+        onCancel={() => setWorkspaceProbe(undefined)}
+        onConfirm={() => {
+          const probe = workspaceProbe;
+          if (!probe) return;
+          setWorkspaceProbe(undefined);
+          void initializeProbedWorkspace(probe);
+        }}
+      />
       <div
-        className={`workspace-grid${leftPanelCollapsed ? " is-left-collapsed" : ""}${rightPanelCollapsed ? " is-right-collapsed" : ""}${immersiveMode ? " is-immersive" : ""}${!showWorkspacePanels ? " is-single-file" : ""}`}
+        className={`workspace-grid${leftPanelCollapsed || sidebarView === "search" || sidebarView === "ai" ? " is-left-collapsed" : ""}${rightPanelCollapsed || !showDocumentInspector ? " is-right-collapsed" : ""}${immersiveMode ? " is-immersive" : ""}${!showWorkspacePanels ? " is-single-file" : ""}`}
         style={{ "--left-panel-width": `${leftPanelWidth}px`, "--right-panel-width": `${rightPanelWidth}px` } as CSSProperties}
       >
         {showWorkspacePanels && (workspaceLoading || workspaceLoadError) ? (
@@ -917,26 +1075,19 @@ export function App() {
         {showWorkspacePanels ? (
           <AppNav
             sidebarView={sidebarView}
-            panels={sidebarPanels}
             onChange={(view) => {
               setLeftPanelCollapsed(false);
               setSidebarView(view);
             }}
-            onOpenOutline={() => {
-              setRightPanelView("outline");
-              setRightPanelCollapsed(false);
-            }}
             onOpenCommandPalette={() => setCommandPaletteOpen(true)}
-            onToggleAi={() => setAiSidebarOpen((open) => !open)}
             onToggleSettings={() => {
               openSettings("preferences");
             }}
-            aiOpen={aiSidebarOpen}
             settingsOpen={settingsOpen}
           />
         ) : null}
 
-        {showWorkspacePanels ? (
+        {showWorkspacePanels && sidebarView !== "search" && sidebarView !== "ai" ? (
         <aside className={`sidebar ${sidebarView === "files" ? "" : "is-condensed"}`} aria-hidden={leftPanelCollapsed}>
           {sidebarView === "files" ? (
             <NotesWorkspaceView
@@ -986,7 +1137,7 @@ export function App() {
         </aside>
         ) : null}
 
-        {showWorkspacePanels ? (
+        {showWorkspacePanels && sidebarView !== "search" && sidebarView !== "ai" ? (
           <button
             type="button"
             className="left-panel-resizer"
@@ -998,16 +1149,103 @@ export function App() {
           />
         ) : null}
 
-        <main className="editor-zone">
+        <main className={`editor-zone${openDocs.length && !immersiveMode && !editorPageView ? " has-document-tabs" : ""}${editorPageView ? " is-page-view" : ""}`}>
+          {workspace && workspaceHealthOpen ? <WorkspaceHealthPage health={workspaceHealth} onBack={() => setWorkspaceHealthOpen(false)} /> : null}
+          {workspace && !workspaceHealthOpen && localGraphOpen && visibleDocument ? (
+            <LocalGraphView
+              title={visibleDocument.title}
+              graph={localGraph}
+              loading={localGraphLoading}
+              onBack={() => setLocalGraphOpen(false)}
+              onDepthChange={(depth) => void openLocalGraph(depth)}
+              onOpen={(pathRel) => { setLocalGraphOpen(false); void openWorkspacePath(pathRel); }}
+            />
+          ) : null}
+          {workspace && !workspaceHealthOpen && !localGraphOpen && sidebarView === "search" ? (
+            <DiscoverPage
+              query={workspaceSearchQuery}
+              mode={searchMode}
+              results={searchResultsAreCurrent ? unifiedSearchResults : []}
+              fallbackReason={searchResultsAreCurrent ? searchFallbackReason : undefined}
+              loading={discoverySearchLoading}
+              error={searchResultsAreCurrent ? searchError : undefined}
+              recent={recentEditedDocs}
+              favorites={favoriteDocs}
+              savedSearches={savedSearches}
+              tags={workspaceTags}
+              selectedTag={selectedSearchTag}
+              writable={workspace.permissions.writable}
+              onQueryChange={setWorkspaceSearchQuery}
+              onModeChange={setSearchMode}
+              onOpen={(pathRel) => void openWorkspacePath(pathRel)}
+              onSaveSearch={(name) => void saveCurrentSearch(name)}
+              onRunSaved={(search) => { setWorkspaceSearchQuery(search.query.text); setSearchMode(search.query.mode); setSelectedSearchTag(search.query.tags?.[0]); }}
+              onDeleteSaved={(id) => void deleteSavedSearch(id)}
+              onSelectTag={setSelectedSearchTag}
+              onRenameTag={(sourceTag, targetTag) => void previewTagRename(sourceTag, targetTag)}
+            />
+          ) : null}
+          {workspace && !workspaceHealthOpen && !localGraphOpen && sidebarView === "ai" && aiPatchProposal ? (
+            <AiApprovalView
+              proposal={aiPatchProposal}
+              applying={aiPatchApplying}
+              onBack={() => setAiPatchProposal(undefined)}
+              onReject={() => void discardAiPatchProposal().then(refreshAiTasks)}
+              onApply={(selectedOperationIds) => {
+                setAiPatchApplying(true);
+                void applyWorkspacePatchProposal(aiPatchProposal, selectedOperationIds).finally(() => {
+                  setAiPatchApplying(false);
+                  void refreshAiTasks();
+                });
+              }}
+            />
+          ) : null}
+          {workspace && !workspaceHealthOpen && !localGraphOpen && sidebarView === "ai" && !aiPatchProposal ? (
+            <AiTaskCenter
+              tasks={aiTaskSummaries}
+              onNewTask={() => setAiSidebarOpen(true)}
+              onOpenTask={() => setAiSidebarOpen(true)}
+            />
+          ) : null}
+          {!workspaceHealthOpen && !localGraphOpen && sidebarView !== "search" && sidebarView !== "ai" ? <>
+          {!immersiveMode ? (
+            <DocumentTabBar
+              documents={openDocs}
+              activePathRel={activeResource ? undefined : activePathRel}
+              onActivate={(document) => void activateDocumentTab(document)}
+              onClose={(document) => void closeDocumentTab(document)}
+            />
+          ) : null}
+          {workspace && !visibleDocument && !visibleResource ? (
+            <WorkspaceHome
+              workspace={workspace}
+              recent={recentEditedDocs}
+              favorites={favoriteDocs}
+              aiTasks={aiTaskSummaries}
+              onNewNote={() => openNewNoteDialog("file", "")}
+              onDailyNote={() => void openDailyNote()}
+              onQuickCapture={() => setQuickCaptureOpen(true)}
+              onFromTemplate={() => setTemplatePickerOpen(true)}
+              onOpenHealth={() => void openWorkspaceHealth()}
+              onOpen={(pathRel) => void openWorkspacePath(pathRel)}
+              onOpenAiTask={() => {
+                setSidebarView("ai");
+                setAiSidebarOpen(true);
+              }}
+            />
+          ) : (
+          <>
           <EditorTopBar
             document={visibleDocument}
             resource={visibleResource}
+            resourceKindLabel={visibleResource ? resourceEditorKindLabel(visibleResource, tr) : undefined}
             mode={visibleDocument?.mode ?? editorModeSetting}
             leftPanelCollapsed={leftPanelCollapsed}
             canToggleLeft={showWorkspacePanels}
             isImmersive={immersiveMode}
             isFavorite={visibleDocumentFavorite}
             showShellActions={!showWorkspacePanels}
+            inspectorCollapsed={rightPanelCollapsed}
             aiOpen={aiSidebarOpen}
             onToggleLeft={() => setLeftPanelCollapsed((value) => !value)}
             onOpenCommandPalette={() => setCommandPaletteOpen(true)}
@@ -1025,7 +1263,20 @@ export function App() {
             onToggleFavorite={() => toggleFavoriteDocument()}
             onOpenFindReplace={() => editorPaneRef.current?.openFindReplace()}
             onRefresh={() => void refreshWorkspaceTree()}
+            onSave={() => void saveActiveDocument()}
+            onSaveAs={() => void saveActiveDocument(undefined, "saveAs")}
+            onExport={(format) => void exportActiveDocument(format)}
+            onOpenFolder={() => void openExternalFolderContext()}
           />
+          {visibleDocument?.sourceKind === "external" && visibleDocument.folderSession ? (
+            <ExternalFolderBrowser
+              session={visibleDocument.folderSession}
+              activePath={visibleDocument.filePath ?? visibleDocument.pathRel}
+              onOpen={(filePath) => enqueueExternalFileOpen(filePath)}
+              onClose={() => void openExternalFolderContext()}
+              onInitialize={() => void initializeExternalFolderAsWorkspace()}
+            />
+          ) : null}
           <EditorPane
             ref={editorPaneRef}
             document={visibleDocument}
@@ -1033,6 +1284,8 @@ export function App() {
             html={activeHtml}
             platform={appInfo?.platform}
             workspaceId={visibleDocument?.sourceKind === "external" ? undefined : workspace?.workspaceId}
+            wikiLinkTargets={wikiLinkTargets}
+            onCreateWikiLinkTarget={(title) => void createWikiLinkTarget(title)}
             pluginFileViewers={pluginFileViewers}
             pluginFileEditors={pluginFileEditors}
             toolbarVisible={Boolean(visibleDocument && toolbarVisible && !immersiveMode)}
@@ -1052,9 +1305,12 @@ export function App() {
             onPluginEditorStatus={setUserStatusMessage}
             onRegisterPluginEditorSaveHandler={registerPluginEditorSaveHandler}
           />
+          </>
+          )}
+          </> : null}
         </main>
 
-        {showWorkspacePanels ? (
+        {showDocumentInspector ? (
           <button
             type="button"
             className="right-panel-resizer"
@@ -1066,11 +1322,26 @@ export function App() {
           />
         ) : null}
 
-        {showWorkspacePanels ? (
+        {showDocumentInspector ? (
+          <button
+            type="button"
+            className="inspector-drawer-backdrop"
+            aria-label={tr("收起右侧面板")}
+            tabIndex={inspectorDrawerMode && !rightPanelCollapsed ? 0 : -1}
+            onClick={closeDocumentInspector}
+          />
+        ) : null}
+
+        {showDocumentInspector ? (
         <aside className={`right-panel ${rightPanelView}`} aria-hidden={rightPanelCollapsed}>
           <PanelHeader
             title={rightPanelTitle(rightPanelView, tr)}
-            onToggle={() => setRightPanelCollapsed(true)}
+            onToggle={closeDocumentInspector}
+          />
+          <InspectorTabs
+            active={inspectorTabFromPanel(rightPanelView)}
+            onChange={(tab) => setRightPanelView(panelFromInspectorTab(tab))}
+            external={visibleDocument?.sourceKind === "external"}
           />
           <div className="right-panel-body">
             {rightPanelView === "outline" ? (
@@ -1082,8 +1353,8 @@ export function App() {
                 }}
               />
             ) : null}
-            {rightPanelView === "details" ? <DocumentDetails doc={visibleDocument} backlinks={backlinks} /> : null}
-            {rightPanelView === "history" ? (
+            {rightPanelView === "details" ? <PropertiesPanel document={visibleDocument} readOnly={Boolean(visibleDocument?.readonly || (visibleDocument?.sourceKind !== "external" && !workspace?.permissions.writable))} onSet={(key, value) => void mutateDocumentProperty({ type: "set", key, value })} onDelete={(key) => void mutateDocumentProperty({ type: "delete", key })} /> : null}
+            {rightPanelView === "history" && visibleDocument?.sourceKind !== "external" ? (
               <HistoryPanel
                 doc={visibleDocument}
                 entries={historyEntries}
@@ -1096,7 +1367,9 @@ export function App() {
                 onRestore={(entry) => void restoreHistoryEntry(entry)}
               />
             ) : null}
-            {rightPanelView === "errors" ? <ErrorPanel statusMessage={statusMessage} /> : null}
+            {rightPanelView === "history" && visibleDocument?.sourceKind === "external" ? <div className="inspector-empty">历史版本仅在工作区中可用。</div> : null}
+            {rightPanelView === "errors" && visibleDocument?.sourceKind !== "external" ? <LinksPanel document={visibleDocument} backlinks={backlinks} onOpen={(pathRel) => void openWorkspacePath(pathRel)} onOpenGraph={() => void openLocalGraph(1)} onConvertMention={(pathRel) => void convertUnlinkedMention(pathRel)} /> : null}
+            {rightPanelView === "errors" && visibleDocument?.sourceKind === "external" ? <div className="inspector-empty">关系与反向链接仅在工作区中可用。</div> : null}
           </div>
         </aside>
         ) : null}
@@ -1216,10 +1489,6 @@ export function App() {
     document.execCommand(kind);
   }
 
-  function currentDocument(): OpenDocumentTab | undefined {
-    return openDocs.find((doc) => doc.pathRel === activePathRel) ?? openDocs[0];
-  }
-
   function startLeftPanelResize(event: ReactPointerEvent<HTMLButtonElement>) {
     if (leftPanelCollapsed || event.button !== 0) {
       return;
@@ -1288,6 +1557,14 @@ export function App() {
     window.addEventListener("pointercancel", stopResize);
   }
 
+  function closeDocumentInspector() {
+    setRightPanelCollapsed(true);
+    window.requestAnimationFrame(() => {
+      const trigger = document.querySelector<HTMLElement>("[data-inspector-trigger]");
+      trigger?.focus();
+    });
+  }
+
   function handleRightPanelResizeKeyDown(event: ReactKeyboardEvent<HTMLButtonElement>) {
     if (rightPanelCollapsed) {
       return;
@@ -1308,45 +1585,24 @@ export function App() {
     }
   }
 
-  function currentDocumentFromRef(): OpenDocumentTab | undefined {
-    return openDocsRef.current.find((doc) => doc.pathRel === activePathRel) ?? openDocsRef.current[0];
-  }
-
-  function updateOpenDocs(updater: (docs: OpenDocumentTab[]) => OpenDocumentTab[]) {
-    setOpenDocs((docs) => {
-      const next = updater(docs);
-      openDocsRef.current = next;
-      return next;
-    });
-  }
-
-  function updateOpenDocument(pathRel: string, updater: (doc: OpenDocumentTab) => OpenDocumentTab) {
-    updateOpenDocs((docs) =>
-      docs.map((doc) => {
-        if (doc.pathRel !== pathRel) {
-          return doc;
-        }
-        return updater(doc);
-      })
-    );
-  }
-
   function clearEditorDraftState(pathRel: string) {
     htmlDraftsRef.current.delete(pathRel);
     sourceParseTokensRef.current.delete(pathRel);
   }
 
   async function bootstrap() {
-    const [state, plugins, aiState] = await Promise.all([
+    const [state, plugins, aiState, externalFiles] = await Promise.all([
       window.nolia.workspace.bootstrap(),
       window.nolia.plugins?.list?.() ?? Promise.resolve([]),
-      window.nolia.ai?.getSettings?.() ?? Promise.resolve(undefined)
+      window.nolia.ai?.getSettings?.() ?? Promise.resolve(undefined),
+      window.nolia.externalFile?.listRecent?.() ?? Promise.resolve([])
     ]);
     if (!startupLocaleInitializedRef.current) {
       startupLocaleInitializedRef.current = true;
       setStartupLocale(resolveLocale(state.settings.language, navigator.language));
     }
     setRecentWorkspaces(state.recentWorkspaces);
+    setRecentExternalFiles(externalFiles);
     setPluginDescriptors(plugins);
     setAppSettings(state.settings);
     setAiSettings(normalizeAiSettingsPublic(aiState));
@@ -1354,9 +1610,6 @@ export function App() {
     setTheme(state.settings.theme);
     setEditorModeSetting(state.settings.editorMode);
     editorModeSettingRef.current = state.settings.editorMode;
-    if (currentDocumentFromRef()?.sourceKind === "external") {
-      return;
-    }
     if (state.activeWorkspace) {
       await setWorkspaceState(state.activeWorkspace);
     }
@@ -1364,26 +1617,70 @@ export function App() {
 
   async function loadWorkspaceData(workspaceInfo: WorkspaceInfo, options: WorkspaceDataLoadOptions = {}) {
     const { openInitialDocument = false, token } = options;
-    const [tree, recentDocs] = await Promise.all([
+    const [tree, recentDocs, savedSession, tags, linkTargets] = await Promise.all([
       window.nolia.file.listTree({ workspaceId: workspaceInfo.workspaceId, root: "", sortBy: "name", showHidden: false }),
-      window.nolia.search.query({ workspaceId: workspaceInfo.workspaceId, query: "", limit: 30 })
+      window.nolia.search.query({ workspaceId: workspaceInfo.workspaceId, query: "", limit: 30 }),
+      openInitialDocument ? window.nolia.workspace.readSession?.({ workspaceId: workspaceInfo.workspaceId }) ?? Promise.resolve(undefined) : Promise.resolve(undefined),
+      window.nolia.workspace.listTags({ workspaceId: workspaceInfo.workspaceId }),
+      window.nolia.workspace.listLinkTargets?.({ workspaceId: workspaceInfo.workspaceId }) ?? Promise.resolve([])
     ]);
     if (token !== undefined && (token !== workspaceLoadTokenRef.current || workspaceIdRef.current !== workspaceInfo.workspaceId)) {
       return;
     }
     setFileTree(tree.nodes);
     setSearchResults(recentDocs.items);
-    if (openInitialDocument && openDocsRef.current.length === 0 && !activeResourceRef.current) {
-      const firstOpenableNode =
-        recentDocs.items.map((item) => findFileTreeNode(tree.nodes, item.pathRel)).find((node) => node && node.kind !== "directory") ??
-        firstOpenableFileTreeNode(tree.nodes);
-      if (firstOpenableNode) {
-        await openTreeNode(firstOpenableNode, workspaceInfo);
-        if (token !== undefined && (token !== workspaceLoadTokenRef.current || workspaceIdRef.current !== workspaceInfo.workspaceId)) {
-          return;
-        }
+    setWorkspaceTags(tags);
+    setWikiLinkTargets(linkTargets.length ? linkTargets : collectMarkdownNotes(tree.nodes).map((node) => ({ pathRel: node.pathRel, title: fileNameFor(node.pathRel).replace(/\.md(?:own|arkdown)?$/i, "") })));
+    if (openInitialDocument && savedSession?.documents.length) {
+      const restored = await restoreSessionDocuments(savedSession, workspaceInfo, tree.nodes);
+      if (restored.length) {
+        updateOpenDocs((documents) => [...documents.filter((document) => document.sourceKind === "external"), ...restored]);
+        const active = restored.find((document) => document.pathRel === savedSession.activePathRel) ?? restored[0];
+        setActivePathRel(active.pathRel);
+        setTreeSelection({ pathRel: active.pathRel, kind: "file" });
+        replaceRecentlyClosedDocuments(savedSession.recentlyClosed.map((document) => ({ pathRel: document.pathRel, mode: document.mode, sourceKind: "workspace" })));
+        setSidebarView(savedSession.sidebarView === "discover" ? "search" : savedSession.sidebarView);
+        setRightPanelView(savedSession.inspectorView === "properties" ? "details" : savedSession.inspectorView === "links" ? "errors" : savedSession.inspectorView);
+        await refreshBacklinks(active.pathRel, workspaceInfo);
+        return;
       }
     }
+    if (openInitialDocument && !window.nolia.workspace.readSession && recentDocs.items[0]) {
+      await openWorkspacePath(recentDocs.items[0].pathRel, workspaceInfo, tree.nodes);
+    }
+  }
+
+  async function restoreSessionDocuments(session: WorkspaceSessionSnapshot, workspaceInfo: WorkspaceInfo, nodes: FileTreeNode[]): Promise<OpenDocumentTab[]> {
+    const references = session.documents
+      .filter((item) => findFileTreeNode(nodes, item.pathRel)?.kind === "markdown")
+      .sort((left, right) => right.lastActiveAt - left.lastActiveAt)
+      .slice(0, 8);
+    const documents = await Promise.all(references.map(async (reference) => {
+      try {
+        const file = await window.nolia.file.read({ workspaceId: workspaceInfo.workspaceId, pathRel: reference.pathRel });
+        const draft = await window.nolia.document.readDraft?.({ workspaceId: workspaceInfo.workspaceId, pathRel: reference.pathRel });
+        const restoredContent = draft?.baseHash === file.sha256 ? draft.content : file.content;
+        const parsed = await parseMarkdownOffThread(restoredContent, reference.pathRel);
+        const revisionState = draft?.baseHash === file.sha256
+          ? editDocumentRevision(createDocumentRevision(reference.pathRel, reference.pathRel, file.sha256, !workspaceInfo.permissions.writable), draft.content)
+          : createDocumentRevision(reference.pathRel, reference.pathRel, file.sha256, !workspaceInfo.permissions.writable);
+        return {
+          pathRel: reference.pathRel,
+          sourceKind: "workspace" as const,
+          title: parsed.title,
+          sourceText: restoredContent,
+          baseHash: file.sha256,
+          lastSavedHash: file.sha256,
+          dirty: Boolean(draft?.baseHash === file.sha256 && draft.content !== file.content),
+          mode: reference.mode,
+          parsed,
+          revisionState
+        } satisfies OpenDocumentTab;
+      } catch {
+        return undefined;
+      }
+    }));
+    return documents.filter((document): document is Exclude<typeof document, undefined> => document !== undefined);
   }
 
   function handleAiRunEvent(event: AiRunEvent) {
@@ -1442,6 +1739,7 @@ export function App() {
     if (event.type === "approval-required") {
       markAiRunOutput(event.runId, "patch");
       setAiPatchProposal(event.proposal);
+      setSidebarView("ai");
       return;
     }
     if (event.type === "patch-proposal") {
@@ -1966,7 +2264,7 @@ export function App() {
   }
 
   async function applyAiPatch(proposal: AiPatchProposal, mode: "replace" | "insert" | "append" | "new-document") {
-    if (isWorkspacePatchProposal(proposal)) {
+    if ((proposal.taskId && proposal.approvalId) || isWorkspacePatchProposal(proposal)) {
       await applyWorkspacePatchProposal(proposal);
       return;
     }
@@ -2001,7 +2299,7 @@ export function App() {
     queueAutosave(document.pathRel);
   }
 
-  async function applyWorkspacePatchProposal(proposal: AiPatchProposal) {
+  async function applyWorkspacePatchProposal(proposal: AiPatchProposal, selectedOperationIds?: string[]) {
     if (!workspace) {
       const message = tr("未打开工作区");
       setAiMessages((messages) => [...messages, { id: `patch-error:${Date.now()}`, role: "error", text: message }]);
@@ -2009,7 +2307,7 @@ export function App() {
     }
     try {
       if (proposal.taskId && proposal.approvalId) {
-        await getAiApi().approveProposal({ taskId: proposal.taskId, approvalId: proposal.approvalId });
+        await getAiApi().approveProposal({ taskId: proposal.taskId, approvalId: proposal.approvalId, selectedOperationIds });
         setAiPatchProposal(undefined);
         await loadWorkspaceData(workspace);
         const firstPath = firstOpenableWorkspaceOperationPath(proposal.operations, proposal.pathRel);
@@ -2096,7 +2394,7 @@ export function App() {
     if (!existing) {
       return;
     }
-    const parsed = await window.nolia.document.parse({ workspaceId: workspace?.workspaceId ?? EXTERNAL_PARSE_WORKSPACE_ID, pathRel, content, mode: "full" });
+    const parsed = await parseMarkdownOffThread(content, pathRel);
     htmlDraftsRef.current.delete(pathRel);
     updateOpenDocs((docs) =>
       docs.map((doc) =>
@@ -2247,7 +2545,7 @@ export function App() {
       return false;
     }
     const file = await window.nolia.file.read({ workspaceId: workspaceInfo.workspaceId, pathRel });
-    const parsed = await window.nolia.document.parse({ workspaceId: workspaceInfo.workspaceId, pathRel, content: file.content, mode: "full" });
+    const parsed = await parseMarkdownOffThread(file.content, pathRel);
     clearEditorDraftState(pathRel);
     updateOpenDocument(pathRel, (doc) => ({
       ...doc,
@@ -2314,6 +2612,13 @@ export function App() {
       await openMarkdownHrefTarget(target.src, document);
       return;
     }
+    if (document.sourceKind === "external") {
+      const parsedWikilink = parseWikilinkTarget(target.markdown, target.label);
+      if (!parsedWikilink) return;
+      const wikilinkPath = /\.(?:md|markdown|mdown|mkd)$/i.test(parsedWikilink.targetText) ? parsedWikilink.targetText : `${parsedWikilink.targetText}.md`;
+      await openExternalMarkdownLink(wikilinkPath, parsedWikilink.fragment, document);
+      return;
+    }
     const resolved = resolveWikilinkWorkspaceTarget(target, fileTree, document.pathRel);
     if (!resolved) {
       setStatusMessage(tr("未找到文件 {path}", { path: labelForMarkdownOpenTarget(target) }));
@@ -2336,8 +2641,12 @@ export function App() {
       jumpToMarkdownHeading(document.pathRel, trimmed.slice(1));
       return;
     }
-    if (document.sourceKind === "external" || !workspace) {
-      setStatusMessage(tr("单文件模式暂不支持工作区跳转"));
+    if (document.sourceKind === "external") {
+      const [targetPath, fragment] = trimmed.split("#", 2);
+      await openExternalMarkdownLink(targetPath, fragment, document);
+      return;
+    }
+    if (!workspace) {
       return;
     }
     const target = workspaceTargetFromMarkdownHref(trimmed, document.pathRel);
@@ -2346,6 +2655,24 @@ export function App() {
       return;
     }
     await openWorkspaceTarget(target, document);
+  }
+
+  async function openExternalMarkdownLink(href: string, fragment: string | undefined, document: OpenDocumentTab) {
+    try {
+      const resolved = await window.nolia.externalFile?.resolveLink?.({
+        filePath: document.filePath ?? document.pathRel,
+        href: fragment ? `${href}#${fragment}` : href,
+        folderSessionId: document.folderSession?.id
+      });
+      if (!resolved?.filePath) {
+        setStatusMessage(tr("无法打开链接 {path}", { path: href }));
+        return;
+      }
+      await handleExternalFileOpen(resolved.filePath);
+      if (resolved.fragment) jumpToMarkdownHeading(resolved.filePath, resolved.fragment);
+    } catch (error) {
+      setStatusMessage(errorMessageFor(error, tr("无法打开链接 {path}", { path: href })));
+    }
   }
 
   async function openWorkspaceTarget(target: MarkdownWorkspaceTarget, document: OpenDocumentTab) {
@@ -2387,6 +2714,61 @@ export function App() {
       return;
     }
     setBacklinks(await window.nolia.graph.getBacklinks({ workspaceId: workspaceInfo.workspaceId, pathRel, includeUnlinkedMentions: true }));
+  }
+
+  async function mutateDocumentProperty(mutation: PropertyMutation) {
+    const document = currentDocumentFromRef();
+    if (!document) return;
+    if (document.sourceKind === "external") {
+      if (document.readonly) return;
+      try {
+        updateSourceText(applyFrontmatterMutation(document.sourceText, mutation));
+        setStatusMessage(`已更新属性：${"key" in mutation ? mutation.key : ""}`);
+      } catch (error) {
+        setStatusMessage(`无法更新属性：${errorMessageFor(error, "未知错误")}`);
+      }
+      return;
+    }
+    if (!workspace || !window.nolia.document.mutateProperty) return;
+    try {
+      const response = await window.nolia.document.mutateProperty({ workspaceId: workspace.workspaceId, pathRel: document.pathRel, baseHash: document.baseHash, revision: 0, mutation });
+      updateOpenDocument(document.pathRel, (current) => ({ ...current, sourceText: response.content, baseHash: response.sha256, lastSavedHash: response.sha256, parsed: response.parsed, pendingHtml: undefined, dirty: false, lastSavedAt: Date.now() }));
+      rememberEditedDocument(document.pathRel, response.parsed.title, workspace.workspaceId);
+      setStatusMessage(`已更新属性：${"key" in mutation ? mutation.key : ""}`);
+    } catch (error) {
+      setStatusMessage(`无法更新属性：${errorMessageFor(error, "未知错误")}`);
+    }
+  }
+
+  async function openLocalGraph(depth: 1 | 2) {
+    const document = currentDocumentFromRef();
+    if (!workspace || !document || !window.nolia.graph.getLocal) return;
+    setLocalGraphOpen(true);
+    setLocalGraphLoading(true);
+    try {
+      setLocalGraph(await window.nolia.graph.getLocal({ workspaceId: workspace.workspaceId, pathRel: document.pathRel, depth, limit: 60 }));
+    } finally {
+      setLocalGraphLoading(false);
+    }
+  }
+
+  async function openWorkspaceHealth() {
+    if (!workspace || !window.nolia.workspace.health) return;
+    setWorkspaceHealthOpen(true);
+    setWorkspaceHealth(await window.nolia.workspace.health({ workspaceId: workspace.workspaceId }));
+  }
+
+  async function convertUnlinkedMention(sourcePathRel: string) {
+    const target = currentDocumentFromRef();
+    if (!workspace || !target || target.sourceKind === "external") return;
+    const source = await window.nolia.file.read({ workspaceId: workspace.workspaceId, pathRel: sourcePathRel });
+    const targetText = target.title || fileNameFor(target.pathRel).replace(/\.md(?:own|arkdown)?$/i, "");
+    const index = source.content.indexOf(targetText);
+    if (index < 0) return;
+    const content = `${source.content.slice(0, index)}[[${target.pathRel.replace(/\.md(?:own|arkdown)?$/i, "")}|${targetText}]]${source.content.slice(index + targetText.length)}`;
+    const result = await window.nolia.file.writeAtomic({ workspaceId: workspace.workspaceId, pathRel: sourcePathRel, content, baseHash: source.sha256, createSnapshot: true });
+    if (result.status !== "saved") throw new Error(result.status);
+    await refreshBacklinks(target.pathRel);
   }
 
   async function refreshHistory(pathRel = currentDocumentFromRef()?.pathRel, workspaceInfo = workspace) {
@@ -2462,11 +2844,86 @@ export function App() {
     await refreshHistory(doc.pathRel);
   }
 
-  async function runSearch(query: string) {
+  async function runSearch(query: string, requestSignature = activeSearchSignature) {
     if (!workspace) {
       return;
     }
-    setSearchResults((await window.nolia.search.query({ workspaceId: workspace.workspaceId, query, limit: 50 })).items);
+    const sequence = ++searchRequestSequence.current;
+    const workspaceId = workspace.workspaceId;
+    setSearchLoading(true);
+    setSearchError(undefined);
+    try {
+      if (window.nolia.search.unified) {
+        const response = await window.nolia.search.unified({ workspaceId, query: { text: query, mode: searchMode, tags: selectedSearchTag ? [selectedSearchTag] : undefined, limit: 50 } });
+        if (sequence !== searchRequestSequence.current || workspaceId !== workspaceIdRef.current) return;
+        setUnifiedSearchResults(response.items);
+        setSearchFallbackReason(response.fallbackReason);
+        setSearchResults(response.items);
+        setCompletedSearchSignature(requestSignature);
+        return;
+      }
+      const items = (await window.nolia.search.query({ workspaceId, query, filters: { tag: selectedSearchTag }, limit: 50 })).items;
+      if (sequence !== searchRequestSequence.current || workspaceId !== workspaceIdRef.current) return;
+      setSearchResults(items);
+      setUnifiedSearchResults(items.map((item) => ({ ...item, source: "exact", matchedFields: ["title", "body", "path"] })));
+      setSearchFallbackReason(undefined);
+      setCompletedSearchSignature(requestSignature);
+    } catch (error) {
+      if (sequence !== searchRequestSequence.current) return;
+      setSearchResults([]);
+      setUnifiedSearchResults([]);
+      setSearchFallbackReason(undefined);
+      setSearchError(error instanceof Error ? error.message : tr("搜索失败，请重试。"));
+      setCompletedSearchSignature(requestSignature);
+    } finally {
+      if (sequence === searchRequestSequence.current) setSearchLoading(false);
+    }
+  }
+
+  async function saveCurrentSearch(name: string) {
+    if (!workspace || !window.nolia.search.save) return;
+    const now = Date.now();
+    const search: SavedSearch = { id: crypto.randomUUID(), name, query: { text: workspaceSearchQuery, mode: searchMode, tags: selectedSearchTag ? [selectedSearchTag] : undefined, limit: 50 }, createdAt: now, updatedAt: now };
+    setSavedSearches(await window.nolia.search.save({ workspaceId: workspace.workspaceId, search }));
+  }
+
+  async function deleteSavedSearch(searchId: string) {
+    if (!workspace || !window.nolia.search.deleteSaved) return;
+    setSavedSearches(await window.nolia.search.deleteSaved({ workspaceId: workspace.workspaceId, searchId }));
+  }
+
+  async function previewTagRename(sourceTag: string, targetTag: string) {
+    if (!workspace || !window.nolia.workspace.previewTagRename) return;
+    try {
+      const preview = await window.nolia.workspace.previewTagRename({ workspaceId: workspace.workspaceId, sourceTag, targetTag });
+      if (!preview.changes.length) {
+        setStatusMessage(`没有找到标签 #${sourceTag}`);
+        return;
+      }
+      setPendingTagRename(preview);
+    } catch (error) {
+      setStatusMessage(`无法预览标签重命名：${errorMessageFor(error, "未知错误")}`);
+    }
+  }
+
+  async function applyPendingTagRename() {
+    const pending = pendingTagRename;
+    if (!workspace || !pending || !window.nolia.workspace.applyTagRename) return;
+    try {
+      const response = await window.nolia.workspace.applyTagRename({
+        workspaceId: workspace.workspaceId,
+        sourceTag: pending.sourceTag,
+        targetTag: pending.targetTag,
+        expectedBaseHashes: Object.fromEntries(pending.changes.map((change) => [change.pathRel, change.baseHash]))
+      });
+      setPendingTagRename(undefined);
+      if (selectedSearchTag === pending.sourceTag) setSelectedSearchTag(pending.targetTag);
+      await loadWorkspaceData(workspace);
+      for (const pathRel of response.affectedPaths) await refreshOpenWorkspaceDocuments(workspace, pathRel, "external");
+      setUserStatusMessage(`已将 #${pending.sourceTag} 重命名为 #${pending.targetTag}，更新 ${response.replacements} 处`);
+    } catch (error) {
+      setStatusMessage(`标签重命名失败：${errorMessageFor(error, "文件已发生变化，请重新预览")}`);
+    }
   }
 
   function rememberViewedDocument(pathRel: string, title: string, workspaceId = workspace?.workspaceId) {
@@ -2562,7 +3019,16 @@ export function App() {
   async function openWorkspace() {
     setWelcomeErrorMessage(undefined);
     try {
-      const info = await window.nolia.workspace.open({});
+      if (!(await ensureAllDocumentsCanLeave())) return;
+      const probe = await window.nolia.workspace.probe?.({});
+      if (probe?.status === "initializable") {
+        setWorkspaceProbe(probe);
+        return;
+      }
+      if (probe?.status === "inaccessible" || probe?.status === "corrupt") {
+        throw new Error(probe.message ?? (probe.status === "corrupt" ? ".nolia 配置损坏" : "目录不可访问"));
+      }
+      const info = await window.nolia.workspace.open(probe ? { path: probe.path } : {});
       if (!info) {
         return;
       }
@@ -2574,9 +3040,22 @@ export function App() {
     }
   }
 
+  async function initializeProbedWorkspace(probe: WorkspaceProbeResult) {
+    try {
+      if (!(await ensureAllDocumentsCanLeave())) return;
+      const info = await window.nolia.workspace.create({ path: probe.path });
+      if (info) await setWorkspaceState(info);
+    } catch (error) {
+      const message = `无法初始化工作区：${errorMessageFor(error, "未知错误")}`;
+      setWelcomeErrorMessage(message);
+      setStatusMessage(message);
+    }
+  }
+
   async function createWorkspace() {
     setWelcomeErrorMessage(undefined);
     try {
+      if (!(await ensureAllDocumentsCanLeave())) return;
       const info = await window.nolia.workspace.create({});
       if (!info) {
         return;
@@ -2591,6 +3070,7 @@ export function App() {
 
   async function openRecentWorkspace(item: RecentWorkspace) {
     setWelcomeErrorMessage(undefined);
+    if (!(await ensureAllDocumentsCanLeave())) return;
     if (!item.exists) {
       setWelcomeErrorMessage(tr("无法打开「{name}」：{reason}。", { name: item.name, reason: recentWorkspaceUnavailableReason(item, tr) }));
       setStatusMessage(tr("最近工作区打开失败"));
@@ -2628,9 +3108,8 @@ export function App() {
       return;
     }
     try {
-      const active = currentDocumentFromRef();
-      if (active?.dirty) {
-        await saveActiveDocument();
+      for (const document of openDocsRef.current.filter((item) => item.sourceKind !== "external")) {
+        if (!(await ensureDocumentCanLeave(document))) return;
       }
       const resource = activeResourceRef.current;
       if (resource?.editorId && resource.dirty) {
@@ -2647,7 +3126,6 @@ export function App() {
 
   function clearWorkspaceState() {
     workspaceLoadTokenRef.current += 1;
-    suspendedShellRef.current = undefined;
     setImmersiveMode(false);
     setWorkspace(undefined);
     workspaceIdRef.current = undefined;
@@ -2655,13 +3133,23 @@ export function App() {
     setWorkspaceLoadError(undefined);
     setFileTree([]);
     setSearchResults([]);
+    setUnifiedSearchResults([]);
+    setCompletedSearchSignature("");
+    setWorkspaceTags([]);
+    setSelectedSearchTag(undefined);
+    setPendingTagRename(undefined);
+    setWikiLinkTargets([]);
     setFavoriteDocs([]);
     setRecentViewedDocs([]);
     setRecentEditedDocs([]);
-    updateOpenDocs(() => []);
-    htmlDraftsRef.current.clear();
-    sourceParseTokensRef.current.clear();
-    setActivePathRel(undefined);
+    const workspaceDocumentPaths = new Set(openDocsRef.current.filter((document) => document.sourceKind !== "external").map((document) => document.pathRel));
+    const externalDocuments = openDocsRef.current.filter((document) => document.sourceKind === "external");
+    updateOpenDocs(() => externalDocuments);
+    for (const pathRel of workspaceDocumentPaths) {
+      htmlDraftsRef.current.delete(pathRel);
+      sourceParseTokensRef.current.delete(pathRel);
+    }
+    setActivePathRel(externalDocuments[0]?.pathRel);
     activeResourceRef.current = undefined;
     setActiveResource(undefined);
     setActiveHtml("");
@@ -2675,29 +3163,31 @@ export function App() {
     setCreateMenu(undefined);
     setWelcomeErrorMessage(undefined);
     setWelcomeOpeningWorkspaceId(undefined);
-    for (const timer of autosaveTimers.current.values()) {
-      window.clearTimeout(timer);
+    for (const pathRel of workspaceDocumentPaths) {
+      const timer = autosaveTimers.current.get(pathRel);
+      if (timer) window.clearTimeout(timer);
+      autosaveTimers.current.delete(pathRel);
+      autosaveVersionsRef.current.delete(pathRel);
     }
-    autosaveTimers.current.clear();
-    autosaveVersionsRef.current.clear();
   }
 
   async function setWorkspaceState(info: WorkspaceInfo) {
     workspaceLoadTokenRef.current += 1;
-    suspendedShellRef.current = undefined;
     setWelcomeErrorMessage(undefined);
     setWelcomeOpeningWorkspaceId(undefined);
     setImmersiveMode(false);
     workspaceIdRef.current = info.workspaceId;
+    treeSequenceRef.current = 0;
     setWorkspace(info);
     setWorkspaceLoading(false);
     setWorkspaceLoadError(undefined);
     setFileTree([]);
     setSearchResults([]);
-    setOpenDocs([]);
-    openDocsRef.current = [];
+    setUnifiedSearchResults([]);
+    setCompletedSearchSignature("");
+    updateOpenDocs((documents) => documents.filter((document) => document.sourceKind === "external"));
     htmlDraftsRef.current.clear();
-    setActivePathRel(undefined);
+    setActivePathRel(openDocsRef.current.find((document) => document.sourceKind === "external")?.pathRel);
     setActiveResource(undefined);
     setTreeSelection(undefined);
     setCreateMenu(undefined);
@@ -2714,6 +3204,9 @@ export function App() {
     setAiSemanticStatus(undefined);
     setStatusMessage(tr("工作区已加载"));
     await initializeWorkspaceData(info);
+    if (window.nolia.search.listSaved) {
+      setSavedSearches(await window.nolia.search.listSaved({ workspaceId: info.workspaceId }));
+    }
     window.setTimeout(() => void refreshAiSemanticStatus(), 0);
   }
 
@@ -2730,6 +3223,7 @@ export function App() {
       setWorkspaceLoading(false);
       setWorkspaceLoadError(undefined);
       setStatusMessage(tr("工作区已加载"));
+      void refreshAiTasks();
     } catch (error) {
       if (workspaceLoadTokenRef.current !== token || workspaceIdRef.current !== info.workspaceId) {
         return;
@@ -2741,8 +3235,84 @@ export function App() {
     }
   }
 
+  async function refreshAiTasks() {
+    const listTasks = window.nolia.ai?.listTasks;
+    if (!listTasks) {
+      setAiTaskSummaries([]);
+      return;
+    }
+    try {
+      setAiTaskSummaries(await listTasks());
+    } catch {
+      setAiTaskSummaries([]);
+    }
+  }
+
+  async function openDailyNote() {
+    if (!workspace || !workspace.permissions.writable) {
+      return;
+    }
+    const now = new Date();
+    const date = localDateStamp(now);
+    const pathRel = joinPath(workspaceDirectory(effectiveSettings.dailyNoteDirectory, "Daily"), markdownFileName(formatWorkspaceDatePattern(effectiveSettings.dailyNoteFilePattern, now, "YYYY-MM-DD")));
+    if (!findFileTreeNode(fileTree, pathRel)) {
+      await window.nolia.file.create({ workspaceId: workspace.workspaceId, pathRel, kind: "file", content: `# ${date}\n\n` });
+      await refreshWorkspaceTree();
+    }
+    await openDocument(pathRel, workspace);
+  }
+
+  async function submitQuickCapture(value: { title: string; body: string }) {
+    if (!workspace || !workspace.permissions.writable || !value.body.trim()) {
+      return;
+    }
+    setQuickCaptureSaving(true);
+    const now = new Date();
+    const pathRel = quickCaptureTarget(effectiveSettings, now);
+    const heading = value.title.trim() || new Intl.DateTimeFormat(undefined, { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" }).format(now);
+    const entry = `## ${heading}\n\n${value.body.trim()}\n`;
+    try {
+      if (findFileTreeNode(fileTree, pathRel)) {
+        const current = await window.nolia.file.read({ workspaceId: workspace.workspaceId, pathRel });
+        const separator = current.content.endsWith("\n") ? "\n" : "\n\n";
+        const saved = await window.nolia.file.writeAtomic({ workspaceId: workspace.workspaceId, pathRel, content: `${current.content}${separator}${entry}`, baseHash: current.sha256, createSnapshot: true });
+        if (saved.status !== "saved") {
+          throw new Error(saved.status);
+        }
+      } else {
+        await window.nolia.file.create({ workspaceId: workspace.workspaceId, pathRel, kind: "file", content: `# Inbox ${localDateStamp(now).slice(0, 7)}\n\n${entry}` });
+      }
+      setQuickCaptureOpen(false);
+      await refreshWorkspaceTree();
+      await openDocument(pathRel, workspace);
+      setStatusMessage(`已捕获到 ${pathRel}`);
+    } catch (error) {
+      setStatusMessage(`无法快速捕获：${errorMessageFor(error, "未知错误")}`);
+    } finally {
+      setQuickCaptureSaving(false);
+    }
+  }
+
+  async function createDocumentFromTemplate(templatePath: string, title: string) {
+    if (!workspace || !workspace.permissions.writable) return;
+    const template = await window.nolia.file.read({ workspaceId: workspace.workspaceId, pathRel: templatePath });
+    const content = renderWorkspaceTemplate(template.content, { title, workspace: workspace.name, date: localDateStamp(new Date()), time: localTimeStamp(new Date()) });
+    const safeTitle = sanitizeItemName(title).replace(/\.md$/i, "") || "Untitled";
+    const existing = collectPathSet(fileTree);
+    let pathRel = `${safeTitle}.md`;
+    let index = 2;
+    while (existing.has(pathRel)) {
+      pathRel = `${safeTitle} ${index}.md`;
+      index += 1;
+    }
+    await window.nolia.file.create({ workspaceId: workspace.workspaceId, pathRel, kind: "file", content });
+    setTemplatePickerOpen(false);
+    await refreshWorkspaceTree();
+    await openDocument(pathRel, workspace);
+  }
+
   async function runCommand(command: string) {
-    const handler = commandHandlers[command] ?? pluginCommandHandlersRef.current.get(command);
+    const handler = commandHandlers[command];
     if (!handler) {
       return;
     }
@@ -2751,18 +3321,113 @@ export function App() {
 
   async function handleExternalFileOpen(filePath: string) {
     const active = currentDocumentFromRef();
-    if (active?.dirty) {
-      await saveActiveDocument();
+    if (active && active.pathRel !== filePath && !(await ensureDocumentCanLeave(active))) {
+      return;
     }
     const resource = activeResourceRef.current;
     if (resource?.editorId && resource.dirty) {
       await saveActivePluginEditorResource(resource.pathRel);
     }
-    if (active?.sourceKind !== "external" && !suspendedShellRef.current) {
-      suspendedShellRef.current = captureShellState();
-    }
     await openExternalDocument(filePath);
-    setImmersiveMode(true);
+  }
+
+  async function handleExternalDocumentChanged(event: ExternalDocumentChangedEvent) {
+    const document = openDocsRef.current.find((item) => item.sourceKind === "external" && (item.filePath ?? item.pathRel) === event.filePath);
+    if (!document || (event.kind === "change" && event.sha256 === document.baseHash)) return;
+    if (document.dirty) {
+      updateOpenDocument(document.pathRel, (current) => ({
+        ...current,
+        externalConflict: { kind: event.kind, diskHash: event.sha256, mtimeMs: event.mtimeMs }
+      }));
+      setExternalConflictPath(document.pathRel);
+      setUserStatusMessage(event.kind === "delete" ? "文件已被移动或删除，当前内容已保留" : tr("保存冲突"));
+      return;
+    }
+    if (event.kind === "delete") {
+      updateOpenDocument(document.pathRel, (current) => ({
+        ...current,
+        dirty: true,
+        externalConflict: { kind: "delete" },
+        revisionState: current.revisionState ? failDocumentSave(current.revisionState, "missing") : current.revisionState
+      }));
+      setExternalConflictPath(document.pathRel);
+      setUserStatusMessage("文件已被移动或删除，当前内容已保留，请另存为");
+      return;
+    }
+    try {
+      const file = await window.nolia.externalFile?.read({ filePath: event.filePath });
+      if (!file) return;
+      const parsed = await parseMarkdownOffThread(file.content, file.filePath);
+      updateOpenDocument(document.pathRel, (current) => ({
+        ...current,
+        sourceText: file.content,
+        parsed,
+        baseHash: file.sha256,
+        lastSavedHash: file.sha256,
+        bom: file.bom,
+        eol: file.eol,
+        readonly: file.readonly,
+        encodingSupported: file.encodingSupported,
+        externalConflict: undefined,
+        revisionState: createDocumentRevision(file.filePath, file.filePath, file.sha256, file.readonly)
+      }));
+      setUserStatusMessage(`已从磁盘重新加载 ${fileNameFor(file.filePath)}`);
+    } catch (error) {
+      setUserStatusMessage(errorMessageFor(error, tr("重新读取失败")));
+    }
+  }
+
+  async function handleWindowCloseRequest() {
+    if (closeHandshakeRunningRef.current) return;
+    closeHandshakeRunningRef.current = true;
+    try {
+      if (await ensureAllDocumentsCanLeave()) {
+        await window.nolia.window?.confirmClose();
+      }
+    } finally {
+      closeHandshakeRunningRef.current = false;
+    }
+  }
+
+  function enqueueExternalFileOpen(filePath: string) {
+    externalOpenQueueRef.current = externalOpenQueueRef.current
+      .then(() => handleExternalFileOpen(filePath))
+      .catch((error: unknown) => setUserStatusMessage(errorMessageFor(error, "无法打开文件")));
+  }
+
+  async function pickExternalFiles() {
+    const result = await window.nolia.externalFile?.pick?.();
+    for (const filePath of result?.filePaths ?? []) enqueueExternalFileOpen(filePath);
+  }
+
+  async function removeRecentExternalFile(item: RecentExternalFile) {
+    const next = await window.nolia.externalFile?.removeRecent?.({ filePath: item.filePath });
+    if (next) setRecentExternalFiles(next);
+  }
+
+  async function openExternalFolderContext() {
+    const document = currentDocumentFromRef();
+    if (document?.sourceKind !== "external" || !window.nolia.externalFile?.openFolder) return;
+    if (document.folderSession) {
+      await window.nolia.externalFile.closeFolder?.({ sessionId: document.folderSession.id });
+      updateOpenDocument(document.pathRel, (current) => ({ ...current, folderSession: undefined }));
+      return;
+    }
+    if (!window.confirm("打开所在文件夹将读取其中的 Markdown 文件，但不会创建 .nolia 或建立索引。是否继续？")) return;
+    try {
+      const folderSession = await window.nolia.externalFile.openFolder({ filePath: document.filePath ?? document.pathRel });
+      updateOpenDocument(document.pathRel, (current) => ({ ...current, folderSession }));
+      setUserStatusMessage(`已打开文件夹 ${folderSession.rootPath}`);
+    } catch (error) {
+      setUserStatusMessage(errorMessageFor(error, "无法打开所在文件夹"));
+    }
+  }
+
+  async function initializeExternalFolderAsWorkspace() {
+    const session = currentDocumentFromRef()?.folderSession;
+    if (!session || !window.nolia.workspace.probe) return;
+    const probe = await window.nolia.workspace.probe({ path: session.rootPath });
+    if (probe) setWorkspaceProbe(probe);
   }
 
   async function openExternalDocument(filePath: string) {
@@ -2770,27 +3435,50 @@ export function App() {
       setStatusMessage(tr("当前版本不支持直接打开系统文件"));
       return;
     }
+    const existing = openDocsRef.current.find((document) => document.sourceKind === "external" && (document.filePath ?? document.pathRel) === filePath);
+    if (existing) {
+      setActiveResource(undefined);
+      setActivePathRel(existing.pathRel);
+      setTreeSelection(undefined);
+      return;
+    }
     const file = await window.nolia.externalFile.read({ filePath });
-    const parsed = await window.nolia.document.parse({ workspaceId: EXTERNAL_PARSE_WORKSPACE_ID, pathRel: filePath, content: file.content, mode: "full" });
+    void window.nolia.externalFile.listRecent?.().then(setRecentExternalFiles);
+    let restoredContent = file.content;
+    let restoredDraft = false;
+    if (file.draft && file.draft.content !== file.content) {
+      restoredDraft = window.confirm("检测到此文件的恢复草稿，是否恢复未保存内容？");
+      if (restoredDraft) restoredContent = file.draft.content;
+      else await window.nolia.externalFile.deleteDraft?.({ filePath: file.filePath });
+    }
+    const parsed = await parseMarkdownOffThread(restoredContent, file.filePath);
     const nextDoc: OpenDocumentTab = {
-      pathRel: filePath,
+      pathRel: file.filePath,
       sourceKind: "external",
-      filePath,
+      filePath: file.filePath,
+      realPath: file.realPath,
       title: parsed.title,
-      sourceText: file.content,
+      sourceText: restoredContent,
       baseHash: file.sha256,
       lastSavedHash: file.sha256,
-      dirty: false,
+      dirty: restoredDraft,
       mode: editorModeSettingRef.current,
-      parsed
+      parsed,
+      bom: file.bom,
+      eol: file.eol,
+      readonly: file.readonly,
+      encodingSupported: file.encodingSupported,
+      externalConflict: restoredDraft && file.draft?.baseHash !== file.sha256 ? { kind: "change", diskHash: file.sha256, diskContent: file.content, mtimeMs: file.mtimeMs } : undefined,
+      revisionState: restoredDraft
+        ? editDocumentRevision(createDocumentRevision(file.filePath, file.filePath, file.sha256, file.readonly), restoredContent)
+        : createDocumentRevision(file.filePath, file.filePath, file.sha256, file.readonly)
     };
-    htmlDraftsRef.current.clear();
-    updateOpenDocs(() => [nextDoc]);
+    updateOpenDocs((documents) => [...documents, nextDoc]);
     setActiveResource(undefined);
-    setActivePathRel(filePath);
+    setActivePathRel(file.filePath);
     setTreeSelection(undefined);
     setBacklinks(emptyBacklinks);
-    setStatusMessage(tr("已打开 {path}", { path: fileNameFor(filePath) }));
+    setStatusMessage(file.encodingSupported ? tr("已打开 {path}", { path: fileNameFor(file.filePath) }) : "文件编码不是 UTF-8，已只读打开");
   }
 
   async function toggleImmersiveMode() {
@@ -2805,73 +3493,23 @@ export function App() {
 
   async function leaveImmersiveMode() {
     const active = currentDocumentFromRef();
-    if (active?.dirty) {
-      await saveActiveDocument();
+    if (active && !(await ensureDocumentCanLeave(active))) {
+      return;
     }
     const resource = activeResourceRef.current;
     if (resource?.editorId && resource.dirty) {
       await saveActivePluginEditorResource(resource.pathRel);
     }
-    const suspended = suspendedShellRef.current;
-    if (active?.sourceKind === "external" && suspended) {
-      restoreSuspendedShell(suspended);
-      suspendedShellRef.current = undefined;
-      setImmersiveMode(false);
-      setStatusMessage(suspended.workspace ? tr("已返回工作区") : tr("已退出沉浸式编辑"));
-      return;
-    }
     setImmersiveMode(false);
     setStatusMessage(tr("已退出沉浸式编辑"));
-  }
-
-  function captureShellState(): SuspendedShellState | undefined {
-    if (!workspace && openDocsRef.current.length === 0 && !activeResource) {
-      return undefined;
-    }
-    return {
-      workspace,
-      fileTree,
-      searchResults,
-      favoriteDocs,
-      recentViewedDocs,
-      recentEditedDocs,
-      noteFilterQuery,
-      workspaceSearchQuery,
-      openDocs: openDocsRef.current,
-      activePathRel,
-      activeResource,
-      treeSelection,
-      backlinks,
-      sidebarView,
-      leftPanelCollapsed,
-      rightPanelCollapsed
-    };
-  }
-
-  function restoreSuspendedShell(state: SuspendedShellState) {
-    setWorkspace(state.workspace);
-    setFileTree(state.fileTree);
-    setSearchResults(state.searchResults);
-    setFavoriteDocs(state.favoriteDocs);
-    setRecentViewedDocs(state.recentViewedDocs);
-    setRecentEditedDocs(state.recentEditedDocs);
-    setNoteFilterQuery(state.noteFilterQuery);
-    setWorkspaceSearchQuery(state.workspaceSearchQuery);
-    updateOpenDocs(() => state.openDocs);
-    setActivePathRel(state.activePathRel);
-    setActiveResource(state.activeResource);
-    setTreeSelection(state.treeSelection);
-    setBacklinks(state.backlinks);
-    setSidebarView(state.sidebarView);
-    setLeftPanelCollapsed(state.leftPanelCollapsed);
-    setRightPanelCollapsed(state.rightPanelCollapsed);
-    htmlDraftsRef.current.clear();
   }
 
   async function openDocument(pathRel: string, workspaceInfo = workspace) {
     if (!workspaceInfo) {
       return;
     }
+    const active = currentDocumentFromRef();
+    if (active?.pathRel !== pathRel && active && !(await ensureDocumentCanLeave(active))) return;
     const existing = openDocsRef.current.find((doc) => doc.pathRel === pathRel);
     if (existing) {
       if (existing.sourceKind === "workspace" && !existing.dirty) {
@@ -2884,16 +3522,12 @@ export function App() {
       rememberViewedDocument(existing.pathRel, reopened?.title ?? existing.title, workspaceInfo.workspaceId);
       return;
     }
-    const active = currentDocumentFromRef();
-    if (active?.dirty) {
-      await saveActiveDocument();
-    }
     const resource = activeResourceRef.current;
     if (resource?.editorId && resource.dirty) {
       await saveActivePluginEditorResource(resource.pathRel);
     }
     const file = await window.nolia.file.read({ workspaceId: workspaceInfo.workspaceId, pathRel });
-    const parsed = await window.nolia.document.parse({ workspaceId: workspaceInfo.workspaceId, pathRel, content: file.content, mode: "full" });
+    const parsed = await parseMarkdownOffThread(file.content, pathRel);
     const nextDoc: OpenDocumentTab = {
       pathRel,
       sourceKind: "workspace",
@@ -2903,9 +3537,10 @@ export function App() {
       lastSavedHash: file.sha256,
       dirty: false,
       mode: editorModeSettingRef.current,
-      parsed
+      parsed,
+      revisionState: createDocumentRevision(pathRel, pathRel, file.sha256, !workspaceInfo.permissions.writable)
     };
-    updateOpenDocs(() => [nextDoc]);
+    updateOpenDocs((documents) => [...documents, nextDoc]);
     setActiveResource(undefined);
     setActivePathRel(pathRel);
     setTreeSelection({ pathRel, kind: "file" });
@@ -2919,14 +3554,11 @@ export function App() {
       return;
     }
     const active = currentDocumentFromRef();
-    if (active?.dirty) {
-      await saveActiveDocument();
-    }
+    if (active && !(await ensureDocumentCanLeave(active))) return;
     const resource = activeResourceRef.current;
     if (resource?.editorId && resource.dirty) {
       await saveActivePluginEditorResource(resource.pathRel);
     }
-    updateOpenDocs(() => []);
     const viewer = selectFileViewer(extensionRegistry.fileViewers, node.pathRel);
     setActivePathRel(undefined);
     setActiveHtml("");
@@ -2959,9 +3591,7 @@ export function App() {
       }
     }
     const active = currentDocumentFromRef();
-    if (active?.dirty) {
-      await saveActiveDocument();
-    }
+    if (active && !(await ensureDocumentCanLeave(active))) return;
     const resource = activeResourceRef.current;
     if (resource?.editorId && resource.dirty) {
       await saveActivePluginEditorResource(resource.pathRel);
@@ -2979,7 +3609,6 @@ export function App() {
     if (!openedFile) {
       throw new Error("Unable to read plugin editor file");
     }
-    updateOpenDocs(() => []);
     setActivePathRel(undefined);
     setActiveHtml("");
     setBacklinks(emptyBacklinks);
@@ -3003,12 +3632,56 @@ export function App() {
     setStatusMessage(tr("已用 {editor} 打开 {path}", { editor: editor.title, path: node.pathRel }));
   }
 
+  async function activateDocumentTab(document: OpenDocumentTab) {
+    const active = currentDocumentFromRef();
+    if (active?.pathRel !== document.pathRel && active && !(await ensureDocumentCanLeave(active))) return;
+    if (document.sourceKind === "external") {
+      setActiveResource(undefined);
+      setActivePathRel(document.pathRel);
+      setTreeSelection(undefined);
+      return;
+    }
+    await openDocument(document.pathRel);
+  }
+
+  async function closeDocumentTab(document: OpenDocumentTab) {
+    if (!(await ensureDocumentCanLeave(document))) {
+      setUserStatusMessage(tr("无法关闭 {path}，请先处理未保存更改", { path: document.pathRel }));
+      return;
+    }
+
+    const documents = openDocsRef.current;
+    const closingIndex = documents.findIndex((item) => item.pathRel === document.pathRel);
+    const remaining = documents.filter((item) => item.pathRel !== document.pathRel);
+    clearEditorDraftState(document.pathRel);
+    const autosaveTimer = autosaveTimers.current.get(document.pathRel);
+    if (autosaveTimer) {
+      window.clearTimeout(autosaveTimer);
+      autosaveTimers.current.delete(document.pathRel);
+    }
+    autosaveVersionsRef.current.delete(document.pathRel);
+    recordClosedDocument(document);
+    updateOpenDocs(() => remaining);
+
+    if (activePathRel !== document.pathRel) {
+      return;
+    }
+    const nextDocument = remaining[Math.min(closingIndex, remaining.length - 1)] ?? remaining[closingIndex - 1];
+    setActivePathRel(nextDocument?.pathRel);
+    setTreeSelection(nextDocument?.sourceKind === "workspace" ? { pathRel: nextDocument.pathRel, kind: "file" } : undefined);
+    setBacklinks(emptyBacklinks);
+    if (nextDocument?.sourceKind === "workspace") {
+      await refreshBacklinks(nextDocument.pathRel);
+    }
+  }
+
   function updateSourceText(nextSource: string) {
     const active = currentDocumentFromRef();
     if (!active) {
       return;
     }
     const pathRel = active.pathRel;
+    const nextRevision = (active.revisionState?.revision ?? 0) + 1;
     const parseToken = (sourceParseTokensRef.current.get(pathRel) ?? 0) + 1;
     sourceParseTokensRef.current.set(pathRel, parseToken);
     updateOpenDocs((docs) =>
@@ -3018,7 +3691,8 @@ export function App() {
               ...doc,
               sourceText: nextSource,
               dirty: true,
-              pendingHtml: undefined
+              pendingHtml: undefined,
+              revisionState: editDocumentRevision(doc.revisionState ?? createDocumentRevision(doc.pathRel, doc.pathRel, doc.baseHash, !workspace?.permissions.writable))
             }
           : doc
       )
@@ -3026,8 +3700,7 @@ export function App() {
     htmlDraftsRef.current.delete(pathRel);
     setUserStatusMessage(tr("正在编辑 {path}", { path: pathRel }));
     queueAutosave(pathRel);
-    void window.nolia.document
-      .parse({ workspaceId: workspace?.workspaceId ?? EXTERNAL_PARSE_WORKSPACE_ID, pathRel, content: nextSource, mode: "full" })
+    void parseMarkdownOffThread(nextSource, pathRel)
       .then((parsed) => {
         if (sourceParseTokensRef.current.get(pathRel) !== parseToken) {
           return;
@@ -3037,7 +3710,8 @@ export function App() {
             doc.pathRel === pathRel && doc.sourceText === nextSource
               ? {
                   ...doc,
-                  parsed
+                  parsed,
+                  revisionState: doc.revisionState ? { ...doc.revisionState, parsedRevision: nextRevision } : doc.revisionState
                 }
               : doc
           )
@@ -3066,7 +3740,8 @@ export function App() {
           ? {
               ...doc,
               dirty: true,
-              pendingHtml: nextHtml
+              pendingHtml: nextHtml,
+              revisionState: editDocumentRevision(doc.revisionState ?? createDocumentRevision(doc.pathRel, doc.pathRel, doc.baseHash, !workspace?.permissions.writable))
             }
           : doc
       )
@@ -3074,14 +3749,26 @@ export function App() {
     queueAutosave(active.pathRel);
   }
 
-  async function saveActiveDocument(pathRel?: string) {
+  async function saveActiveDocument(pathRel?: string, mode: "normal" | "saveAs" | "force" = "normal"): Promise<SaveAttemptResult> {
     const document = pathRel ? openDocsRef.current.find((doc) => doc.pathRel === pathRel) : currentDocumentFromRef();
     if (!document) {
       if (!pathRel) {
         await saveActivePluginEditorResource();
       }
-      return;
+      return { status: "clean" };
     }
+    if (!document.dirty && mode === "normal") {
+      return { status: "clean", pathRel: document.pathRel };
+    }
+    if (document.readonly && mode === "normal") {
+      setUserStatusMessage("文件为只读，请使用另存为");
+      return { status: "readonly", pathRel: document.pathRel };
+    }
+    const savingRevision = document.revisionState?.revision ?? 0;
+    updateOpenDocument(document.pathRel, (current) => ({
+      ...current,
+      revisionState: beginDocumentSave(current.revisionState ?? createDocumentRevision(current.pathRel, current.pathRel, current.baseHash, !workspace?.permissions.writable))
+    }));
     const pendingAutosave = autosaveTimers.current.get(document.pathRel);
     if (pendingAutosave) {
       window.clearTimeout(pendingAutosave);
@@ -3096,13 +3783,25 @@ export function App() {
     const contentBeforeTocRefresh = content;
     content = refreshMarkdownTocIfPresent(content);
     const contentChangedByTocRefresh = content !== contentBeforeTocRefresh;
-    const result =
-      document.sourceKind === "external"
-        ? await window.nolia.externalFile?.writeAtomic({
-            filePath: document.filePath ?? document.pathRel,
-            content,
-            baseHash: document.baseHash
-          })
+    let externalResult: ExternalDocumentSaveResponse | undefined;
+    let result: FileWriteResponse | ExternalDocumentSaveResponse | undefined;
+    try {
+      result = document.sourceKind === "external"
+        ? window.nolia.externalFile?.save
+          ? (externalResult = await window.nolia.externalFile.save({
+              filePath: document.filePath ?? document.pathRel,
+              content,
+              baseHash: document.baseHash,
+              revision: savingRevision,
+              mode,
+              bom: document.bom,
+              eol: document.eol
+            }))
+          : await window.nolia.externalFile?.writeAtomic({
+              filePath: document.filePath ?? document.pathRel,
+              content,
+              baseHash: document.baseHash
+            })
         : workspace
           ? await window.nolia.file.writeAtomic({
               workspaceId: workspace.workspaceId,
@@ -3112,17 +3811,42 @@ export function App() {
               createSnapshot: true
             })
           : undefined;
+    } catch (error) {
+      updateOpenDocument(document.pathRel, (current) => ({ ...current, revisionState: current.revisionState ? failDocumentSave(current.revisionState, "error") : current.revisionState }));
+      const message = errorMessageFor(error, tr("保存失败"));
+      setUserStatusMessage(message);
+      return { status: "error", pathRel: document.pathRel, error: message };
+    }
     if (!result) {
+      updateOpenDocument(document.pathRel, (current) => ({ ...current, revisionState: current.revisionState ? failDocumentSave(current.revisionState, "error") : current.revisionState }));
       setUserStatusMessage(tr("保存失败"));
-      return;
+      return { status: "error", pathRel: document.pathRel };
     }
     if (result.status !== "saved") {
-      setUserStatusMessage(result.status === "conflict" ? tr("保存冲突") : tr("保存失败"));
-      return;
+      updateOpenDocument(document.pathRel, (current) => ({ ...current, revisionState: current.revisionState ? failDocumentSave(current.revisionState, result.status === "conflict" ? "conflict" : result.status === "missing" ? "missing" : "error") : current.revisionState }));
+      if (externalResult?.status === "conflict") {
+        updateOpenDocument(document.pathRel, (current) => ({
+          ...current,
+          externalConflict: {
+            kind: "change",
+            diskHash: externalResult?.conflict?.diskHash,
+            diskContent: externalResult?.conflict?.diskContent,
+            mtimeMs: externalResult?.conflict?.mtimeMs
+          }
+        }));
+        setExternalConflictPath(document.pathRel);
+      } else if (externalResult?.status === "missing") {
+        updateOpenDocument(document.pathRel, (current) => ({ ...current, externalConflict: { kind: "delete" } }));
+        setExternalConflictPath(document.pathRel);
+      }
+      setUserStatusMessage(result.status === "conflict" ? tr("保存冲突") : result.status === "missing" ? "文件已被移动或删除，请另存为" : result.status === "readonly" || result.status === "permission_denied" ? "文件为只读，请另存为" : tr("保存失败"));
+      const failureStatus = result.status === "permission_denied" ? "readonly" : result.status;
+      return { status: failureStatus, pathRel: document.pathRel, error: externalResult?.error };
     }
-    const parsed = await window.nolia.document.parse({ workspaceId: workspace?.workspaceId ?? EXTERNAL_PARSE_WORKSPACE_ID, pathRel: document.pathRel, content, mode: "full" });
+    const parsed = await parseMarkdownOffThread(content, document.pathRel);
     let savedCurrentRevision = false;
     let hasNewerChanges = false;
+    const savedPath = externalResult?.filePath ?? document.pathRel;
     updateOpenDocs((docs) =>
       docs.map((doc) => {
         if (doc.pathRel !== document.pathRel) {
@@ -3140,7 +3864,8 @@ export function App() {
             baseHash: result.sha256 ?? doc.baseHash,
             lastSavedHash: result.sha256 ?? doc.lastSavedHash,
             dirty: true,
-            lastSavedAt: Date.now()
+            lastSavedAt: Date.now(),
+            revisionState: doc.revisionState ? completeDocumentSave(doc.revisionState, savingRevision, result.sha256 ?? doc.baseHash) : doc.revisionState
           };
         }
         if (contentChangedByTocRefresh && doc.mode === "wysiwyg") {
@@ -3148,18 +3873,29 @@ export function App() {
         }
         return {
           ...doc,
+          pathRel: savedPath,
+          filePath: doc.sourceKind === "external" ? savedPath : doc.filePath,
           sourceText: content,
           baseHash: result.sha256 ?? doc.baseHash,
           lastSavedHash: result.sha256 ?? doc.lastSavedHash,
           dirty: false,
           pendingHtml: document.mode === "wysiwyg" && !contentChangedByTocRefresh ? pendingHtml : undefined,
           parsed,
-          lastSavedAt: Date.now()
+          readonly: doc.sourceKind === "external" ? false : doc.readonly,
+          externalConflict: undefined,
+          lastSavedAt: Date.now(),
+          revisionState: doc.revisionState ? completeDocumentSave(doc.revisionState, savingRevision, result.sha256 ?? doc.baseHash) : doc.revisionState
         };
       })
     );
+    if (savedPath !== document.pathRel && activePathRel === document.pathRel) {
+      setActivePathRel(savedPath);
+    }
     if (workspace && document.sourceKind !== "external") {
       rememberEditedDocument(document.pathRel, parsed.title, workspace.workspaceId);
+      if (savedCurrentRevision) {
+        await window.nolia.document.deleteDraft?.({ workspaceId: workspace.workspaceId, pathRel: document.pathRel });
+      }
     }
     setUserStatusMessage(savedCurrentRevision ? tr("已保存 {path}", { path: document.pathRel }) : tr("已保存 {path}，仍有未保存更改", { path: document.pathRel }));
     if (hasNewerChanges) {
@@ -3168,6 +3904,62 @@ export function App() {
     if (workspace && document.sourceKind !== "external") {
       await loadWorkspaceData(workspace);
       await refreshBacklinks(document.pathRel);
+    }
+    return { status: "saved", pathRel: savedPath };
+  }
+
+  async function ensureDocumentCanLeave(document: OpenDocumentTab): Promise<boolean> {
+    if (!document.dirty) return true;
+    const result = await saveActiveDocument(document.pathRel);
+    return result.status === "saved" || result.status === "clean";
+  }
+
+  async function ensureAllDocumentsCanLeave(): Promise<boolean> {
+    for (const document of openDocsRef.current) {
+      if (!(await ensureDocumentCanLeave(document))) return false;
+    }
+    return true;
+  }
+
+  async function resolveExternalConflict(action: "continue" | "reload" | "saveAs" | "force") {
+    const pathRel = externalConflictPath;
+    const document = pathRel ? openDocsRef.current.find((item) => item.pathRel === pathRel) : undefined;
+    if (!document) {
+      setExternalConflictPath(undefined);
+      return;
+    }
+    if (action === "continue") {
+      setExternalConflictPath(undefined);
+      return;
+    }
+    if (action === "saveAs" || action === "force") {
+      const result = await saveActiveDocument(document.pathRel, action);
+      if (result.status === "saved") setExternalConflictPath(undefined);
+      return;
+    }
+    if (document.externalConflict?.kind === "delete") return;
+    try {
+      const file = await window.nolia.externalFile?.read({ filePath: document.filePath ?? document.pathRel });
+      if (!file) return;
+      const parsed = await parseMarkdownOffThread(file.content, file.filePath);
+      updateOpenDocument(document.pathRel, (current) => ({
+        ...current,
+        sourceText: file.content,
+        parsed,
+        dirty: false,
+        baseHash: file.sha256,
+        lastSavedHash: file.sha256,
+        bom: file.bom,
+        eol: file.eol,
+        readonly: file.readonly,
+        externalConflict: undefined,
+        revisionState: createDocumentRevision(file.filePath, file.filePath, file.sha256, file.readonly)
+      }));
+      await window.nolia.externalFile?.deleteDraft?.({ filePath: file.filePath });
+      setExternalConflictPath(undefined);
+      setUserStatusMessage("已重新加载磁盘版本");
+    } catch (error) {
+      setUserStatusMessage(errorMessageFor(error, tr("重新读取失败")));
     }
   }
 
@@ -3306,18 +4098,17 @@ export function App() {
     };
   }
 
-  async function exportActiveDocument() {
+  async function exportActiveDocument(format: "pdf" | "html" | "markdown" = "html") {
     const active = currentDocument();
-    if (!workspace || !active || active.sourceKind === "external") {
-      setStatusMessage(active?.sourceKind === "external" ? tr("单文件模式暂不支持导出") : tr("未打开文档"));
+    if (!active) {
+      setStatusMessage(tr("未打开文档"));
       return;
     }
-    const result = await window.nolia.export.document({
-      workspaceId: workspace.workspaceId,
-      pathRel: active.pathRel,
-      format: "html",
-      includeAssets: true
-    });
+    if (active.dirty && !(await ensureDocumentCanLeave(active))) return;
+    const result = active.sourceKind === "external"
+      ? await window.nolia.externalFile?.export?.({ filePath: active.filePath ?? active.pathRel, format })
+      : workspace ? await window.nolia.export.document({ workspaceId: workspace.workspaceId, pathRel: active.pathRel, format, includeAssets: true }) : undefined;
+    if (!result) return;
     setStatusMessage(result.status === "completed" ? tr("已导出 {path}", { path: result.outputPath ?? "" }) : tr("导出失败"));
   }
 
@@ -3359,6 +4150,25 @@ export function App() {
       setLeftPanelCollapsed(false);
       setSidebarView("files");
       setStatusMessage(tr("已创建文件夹 {path}", { path: pathRel }));
+    }
+  }
+
+  async function createWikiLinkTarget(title: string) {
+    if (!workspace || !workspace.permissions.writable) return;
+    const trimmedTitle = title.trim();
+    const safeName = sanitizeItemName(trimmedTitle).replace(/\.md(?:own|arkdown)?$/i, "");
+    if (!safeName) return;
+    const pathRel = `${safeName}.md`;
+    if (collectMarkdownNotes(fileTree).some((node) => node.pathRel.toLowerCase() === pathRel.toLowerCase())) {
+      setStatusMessage(`笔记已存在：${pathRel}`);
+      return;
+    }
+    try {
+      await window.nolia.file.create({ workspaceId: workspace.workspaceId, pathRel, kind: "file", content: `# ${trimmedTitle}\n` });
+      await loadWorkspaceData(workspace);
+      setUserStatusMessage(`已创建链接笔记 ${pathRel}`);
+    } catch (error) {
+      setStatusMessage(`创建链接笔记失败：${errorMessageFor(error, "未知错误")}`);
     }
   }
 
@@ -3484,10 +4294,23 @@ export function App() {
       setRenameTarget(undefined);
       return;
     }
+    if (renameTarget.kind === "file" && window.nolia.file.previewRename) {
+      const preview = await window.nolia.file.previewRename({ workspaceId: workspace.workspaceId, sourcePathRel: renameTarget.pathRel, targetPathRel });
+      if (preview.changes.length) {
+        setPendingRename({ target: renameTarget, targetPathRel, displayName: trimmedName.replace(/\.md$/i, ""), preview });
+        setRenameTarget(undefined);
+        return;
+      }
+    }
+    await executeRename(renameTarget, targetPathRel, renameTarget.kind === "file" ? trimmedName.replace(/\.md$/i, "") : undefined);
+  }
+
+  async function executeRename(target: RenameTarget, targetPathRel: string, displayName?: string) {
+    if (!workspace) return;
     try {
       await window.nolia.file.rename({
         workspaceId: workspace.workspaceId,
-        sourcePathRel: renameTarget.pathRel,
+        sourcePathRel: target.pathRel,
         targetPathRel,
         updateReferences: true
       });
@@ -3496,7 +4319,7 @@ export function App() {
       return;
     }
     setRenameTarget(undefined);
-    applyPathRelChange(renameTarget, targetPathRel, renameTarget.kind === "file" ? trimmedName.replace(/\.md$/i, "") : undefined);
+    applyPathRelChange(target, targetPathRel, displayName);
     await loadWorkspaceData(workspace);
     setStatusMessage(tr("已重命名为 {path}", { path: targetPathRel }));
   }
@@ -3690,86 +4513,6 @@ export function App() {
     setAppSettings(await window.nolia.settings.get());
   }
 
-  function registerPluginRuntimeContributions(pluginId: string, contributions: ExtensionContributions): Disposable {
-    const manifest = allExtensionManifests.find((item) => item.id === pluginId);
-    if (!manifest) {
-      return { dispose: () => undefined };
-    }
-    assertPluginPermission(pluginId, "ui:contribute");
-    assertPluginContributionScope(pluginId, contributions);
-    const runtimeManifest: ExtensionManifest = {
-      ...manifest,
-      id: pluginId,
-      name: `${manifest.name} Runtime`,
-      required: false,
-      enabledByDefault: true,
-      contributes: contributions
-    };
-    setPluginRuntimeManifests((current) => [...current.filter((item) => item.id !== runtimeManifest.id), runtimeManifest]);
-    return {
-      dispose: () => {
-        setPluginRuntimeManifests((current) => current.filter((item) => item.id !== runtimeManifest.id));
-      }
-    };
-  }
-
-  function registerPluginCommandHandler(pluginId: string, id: string, handler: () => void | Promise<void>): Disposable {
-    assertPluginContributionScope(pluginId, { commands: [{ id, title: id }] });
-    pluginCommandHandlersRef.current.set(id, handler);
-    setPluginCommandIds((current) => (current.includes(id) ? current : [...current, id]));
-    return {
-      dispose: () => {
-        pluginCommandHandlersRef.current.delete(id);
-        setPluginCommandIds((current) => current.filter((commandId) => commandId !== id));
-      }
-    };
-  }
-
-  function registerPluginSidebarPanel(pluginId: string, id: string, render: PluginRenderProvider<PluginSidebarPanelContext>): Disposable {
-    assertPluginPermission(pluginId, "ui:contribute");
-    assertPluginContributionScope(pluginId, { sidebarPanels: [{ id, title: id }] });
-    setPluginSidebarPanels((current) => new Map(current).set(id, render));
-    return {
-      dispose: () => {
-        setPluginSidebarPanels((current) => {
-          const next = new Map(current);
-          next.delete(id);
-          return next;
-        });
-      }
-    };
-  }
-
-  function registerPluginFileViewer(pluginId: string, id: string, render: PluginRenderProvider<PluginFileViewerContext>): Disposable {
-    assertPluginPermission(pluginId, "ui:contribute");
-    assertPluginContributionScope(pluginId, { fileViewers: [{ id, title: id }] });
-    setPluginFileViewers((current) => new Map(current).set(id, { pluginId, render }));
-    return {
-      dispose: () => {
-        setPluginFileViewers((current) => {
-          const next = new Map(current);
-          next.delete(id);
-          return next;
-        });
-      }
-    };
-  }
-
-  function registerPluginFileEditor(pluginId: string, id: string, render: PluginRenderProvider<PluginFileEditorContext>): Disposable {
-    assertPluginPermission(pluginId, "ui:contribute");
-    assertPluginContributionScope(pluginId, { fileEditors: [{ id, title: id }] });
-    setPluginFileEditors((current) => new Map(current).set(id, { pluginId, render }));
-    return {
-      dispose: () => {
-        setPluginFileEditors((current) => {
-          const next = new Map(current);
-          next.delete(id);
-          return next;
-        });
-      }
-    };
-  }
-
   function pluginIdForContribution(contributionId: string): string | undefined {
     return pluginDescriptors.find((descriptor) => descriptor.manifest && (contributionId === descriptor.pluginId || contributionId.startsWith(`${descriptor.pluginId}.`)))?.pluginId;
   }
@@ -3781,57 +4524,26 @@ export function App() {
     }
   }
 
-  function pluginHasPermission(pluginId: string, permission: ExtensionPermission): boolean {
-    const manifest = pluginDescriptors.find((descriptor) => descriptor.pluginId === pluginId)?.manifest;
-    return hasExtensionPermission(manifest, permission);
-  }
-
-  function assertNetworkPermission(pluginId: string, url: string) {
-    let host: string;
-    try {
-      host = new URL(url).hostname;
-    } catch {
-      throw new Error("Invalid network request URL");
-    }
-    if (!pluginHasPermission(pluginId, "network:request") && !pluginHasPermission(pluginId, `network:request:${host}`)) {
-      throw new Error(`Plugin ${pluginId} lacks network permission for ${host}`);
-    }
-  }
-
-  function assertPluginContributionScope(pluginId: string, contributions: ExtensionContributions) {
-    const ids = [
-      ...(contributions.commands?.map((item) => item.id) ?? []),
-      ...(contributions.sidebarPanels?.map((item) => item.id) ?? []),
-      ...(contributions.fileEditors?.map((item) => item.id) ?? []),
-      ...(contributions.fileViewers?.map((item) => item.id) ?? []),
-      ...(contributions.settings?.map((item) => item.id) ?? []),
-      ...(contributions.markdownRenderers?.map((item) => item.id) ?? []),
-      ...(contributions.markdownBlocks?.map((item) => item.id) ?? []),
-      ...(contributions.editorExtensions?.map((item) => item.id) ?? []),
-      ...(contributions.toolbarItems?.map((item) => item.id) ?? []),
-      ...(contributions.importers?.map((item) => item.id) ?? []),
-      ...(contributions.exporters?.map((item) => item.id) ?? []),
-      ...(contributions.searchProviders?.map((item) => item.id) ?? []),
-      ...(contributions.aiProviders?.map((item) => item.id) ?? []),
-      ...(contributions.automations?.map((item) => item.id) ?? [])
-    ];
-    for (const id of ids) {
-      if (!id.startsWith(`${pluginId}.`) && id !== pluginId) {
-        throw new Error(`Plugin ${pluginId} cannot register contribution ${id}`);
-      }
-    }
-  }
-
-  async function recordPluginFailure(pluginId: string, message: string) {
-    if (!window.nolia.plugins?.recordFailure) {
-      return;
-    }
-    setPluginDescriptors(await window.nolia.plugins.recordFailure({ pluginId, message }));
-    setAppSettings(await window.nolia.settings.get());
-  }
-
   function queueAutosave(pathRel: string) {
     const delay = appSettings?.autoSaveDelayMs ?? 800;
+    const draftDocument = openDocsRef.current.find((document) => document.pathRel === pathRel);
+    if (workspace && draftDocument && draftDocument.sourceKind !== "external" && window.nolia.document.writeDraft) {
+      void window.nolia.document.writeDraft({
+        workspaceId: workspace.workspaceId,
+        pathRel,
+        content: draftDocument.sourceText,
+        baseHash: draftDocument.baseHash,
+        revision: draftDocument.revisionState?.revision ?? 0
+      });
+    }
+    if (draftDocument?.sourceKind === "external") {
+      void window.nolia.externalFile?.writeDraft?.({
+        filePath: draftDocument.filePath ?? draftDocument.pathRel,
+        content: draftDocument.sourceText,
+        baseHash: draftDocument.baseHash,
+        revision: draftDocument.revisionState?.revision ?? 0
+      });
+    }
     const existing = autosaveTimers.current.get(pathRel);
     if (existing) {
       window.clearTimeout(existing);
@@ -3861,15 +4573,101 @@ export function App() {
 function rightPanelTitle(view: "outline" | "details" | "history" | "errors", tr = createTranslator("zh-CN")): string {
   switch (view) {
     case "details":
-      return tr("详情");
+      return "属性";
     case "history":
       return tr("历史版本");
     case "errors":
-      return tr("诊断");
+      return "关系";
     case "outline":
     default:
       return tr("目录");
   }
+}
+
+function ExternalConflictDialog({
+  document,
+  onContinue,
+  onReload,
+  onSaveAs,
+  onForce
+}: {
+  document?: OpenDocumentTab;
+  onContinue: () => void;
+  onReload: () => void;
+  onSaveAs: () => void;
+  onForce: () => void;
+}) {
+  if (!document?.externalConflict) return null;
+  const missing = document.externalConflict.kind === "delete";
+  return (
+    <div className="modal-layer" role="dialog" aria-modal="true" aria-labelledby="external-conflict-title">
+      <div className="modal-backdrop" />
+      <div className="modal-surface external-conflict-dialog">
+        <div className="modal-copy">
+          <strong id="external-conflict-title">{missing ? "文件已被移动或删除" : "文件已在其他应用中修改"}</strong>
+          <p>{missing ? "Nolia 已保留当前编辑内容。你可以继续编辑或另存为新文件。" : "请选择如何处理当前编辑内容与磁盘版本。覆盖操作需要明确确认。"}</p>
+        </div>
+        {!missing ? (
+          <div className="external-conflict-compare" aria-label="版本比较">
+            <section><h3>Nolia 中的版本</h3><pre>{document.sourceText}</pre></section>
+            <section><h3>磁盘版本</h3><pre>{document.externalConflict.diskContent ?? "重新加载后可查看磁盘内容"}</pre></section>
+          </div>
+        ) : null}
+        <div className="modal-actions external-conflict-actions">
+          <button type="button" className="secondary-button" onClick={onContinue}>继续编辑</button>
+          <button type="button" className="secondary-button" disabled={missing} onClick={onReload}>重新加载磁盘版本</button>
+          <button type="button" className="secondary-button" onClick={onSaveAs}>另存副本</button>
+          <button type="button" className="primary-button" disabled={missing} onClick={onForce}>确认覆盖</button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function ExternalFolderBrowser({ session, activePath, onOpen, onClose, onInitialize }: {
+  session: ExternalFolderSession;
+  activePath: string;
+  onOpen: (filePath: string) => void;
+  onClose: () => void;
+  onInitialize: () => void;
+}) {
+  const [query, setQuery] = useState("");
+  const items = flattenExternalFolderNodes(session.nodes).filter((item) => !query.trim() || item.name.toLocaleLowerCase().includes(query.trim().toLocaleLowerCase()));
+  return (
+    <aside className="external-folder-browser" aria-label="临时文件夹">
+      <div className="external-folder-header">
+        <div><strong>{fileNameFor(session.rootPath)}</strong><span>临时文件夹</span></div>
+        <button type="button" className="icon-button" aria-label="关闭文件夹" title="关闭文件夹" onClick={onClose}><X size={15} /></button>
+      </div>
+      <label className="external-folder-filter"><Search size={14} /><input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="筛选 Markdown 文件" /></label>
+      <button type="button" className="external-folder-initialize" onClick={onInitialize}><FolderPlus size={15} /><span>初始化为工作区</span></button>
+      <div className="external-folder-files" role="tree">
+        {items.map((item) => <button type="button" role="treeitem" aria-selected={item.pathRel === activePath} className={item.pathRel === activePath ? "is-active" : ""} style={{ paddingLeft: `${12 + item.depth * 14}px` }} key={item.pathRel} onClick={() => onOpen(item.pathRel)}><FileText size={14} /><span>{item.name}</span></button>)}
+        {!items.length ? <p>没有匹配的 Markdown 文件。</p> : null}
+      </div>
+    </aside>
+  );
+}
+
+function flattenExternalFolderNodes(nodes: FileTreeNode[], depth = 0): Array<FileTreeNode & { depth: number }> {
+  const items: Array<FileTreeNode & { depth: number }> = [];
+  for (const node of nodes) {
+    if (node.kind === "markdown") items.push({ ...node, depth });
+    if (node.children?.length) items.push(...flattenExternalFolderNodes(node.children, depth + 1));
+  }
+  return items;
+}
+
+function inspectorTabFromPanel(view: "outline" | "details" | "history" | "errors"): InspectorTab {
+  if (view === "details") return "properties";
+  if (view === "errors") return "links";
+  return view;
+}
+
+function panelFromInspectorTab(view: InspectorTab): "outline" | "details" | "history" | "errors" {
+  if (view === "properties") return "details";
+  if (view === "links") return "errors";
+  return view;
 }
 
 function refreshMarkdownTocIfPresent(source: string): string {
@@ -4211,6 +5009,7 @@ function flattenFileTree(nodes: FileTreeNode[]): FileTreeNode[] {
   return result;
 }
 
+
 function markdownFileStem(pathRel: string): string {
   return fileNameFor(pathRel).replace(/\.(?:md|markdown|mdown)$/i, "");
 }
@@ -4357,6 +5156,47 @@ function formatHistoryTime(value: number, locale: ResolvedLocale): string {
     minute: "2-digit"
   }).format(value);
 }
+
+function localDateStamp(value: Date): string {
+  const year = value.getFullYear();
+  const month = String(value.getMonth() + 1).padStart(2, "0");
+  const day = String(value.getDate()).padStart(2, "0");
+  return `${year}-${month}-${day}`;
+}
+
+function localTimeStamp(value: Date): string {
+  return `${String(value.getHours()).padStart(2, "0")}:${String(value.getMinutes()).padStart(2, "0")}`;
+}
+
+function workspaceDirectory(value: string, fallback: string): string {
+  const raw = value.trim();
+  const normalized = raw.replace(/\\/g, "/").replace(/^\/+|\/+$/g, "");
+  const segments = normalized.split("/").filter((segment) => segment && segment !== ".");
+  if (!normalized || /^([a-z]:)?\//i.test(raw) || segments.some((segment) => segment === "..")) {
+    return fallback;
+  }
+  return segments.join("/");
+}
+
+function formatWorkspaceDatePattern(pattern: string, value: Date, fallback: string): string {
+  const source = pattern.trim() || fallback;
+  const replacements: Record<string, string> = {
+    YYYY: String(value.getFullYear()),
+    MM: String(value.getMonth() + 1).padStart(2, "0"),
+    DD: String(value.getDate()).padStart(2, "0")
+  };
+  const formatted = source.replace(/YYYY|MM|DD/g, (token) => replacements[token]).replace(/[\\/:*?"<>|]/g, "-").replace(/^\.+|\.+$/g, "").trim();
+  return formatted || formatWorkspaceDatePattern(fallback, value, "YYYY-MM-DD");
+}
+
+function markdownFileName(value: string): string {
+  return /\.md(?:own|arkdown)?$/i.test(value) ? value : `${value}.md`;
+}
+
+function quickCaptureTarget(settings: Pick<AppSettings, "inboxDirectory" | "quickCaptureFilePattern">, value: Date): string {
+  return joinPath(workspaceDirectory(settings.inboxDirectory, "Inbox"), markdownFileName(formatWorkspaceDatePattern(settings.quickCaptureFilePattern, value, "YYYY-MM")));
+}
+
 
 function historyReasonLabel(reason: string, tr = createTranslator("zh-CN")): string {
   switch (reason) {
@@ -4644,221 +5484,6 @@ function dedupeExtensionManifests(manifests: ExtensionManifest[]): ExtensionMani
     }
     return left.name.localeCompare(right.name);
   });
-}
-
-function sidebarPanelIcon(panel: SidebarPanelContribution) {
-  switch (panel.icon) {
-    case "Clock3":
-      return <Clock3 size={18} />;
-    case "FolderOpen":
-      return <FolderOpen size={18} />;
-    case "Star":
-      return <Star size={18} />;
-    case "Search":
-      return <Search size={18} />;
-    case "Link2":
-      return <Link2 size={18} />;
-    default:
-      return <FolderOpen size={18} />;
-  }
-}
-
-function NewNoteDialog({
-  open,
-  kind,
-  value,
-  parentPath,
-  onChange,
-  onCancel,
-  onSubmit
-}: {
-  open: boolean;
-  kind: NewItemKind;
-  value: string;
-  parentPath: string;
-  onChange: (value: string) => void;
-  onCancel: () => void;
-  onSubmit: () => void;
-}) {
-  const { tr } = useRendererI18n();
-  if (!open) {
-    return null;
-  }
-  const title = kind === "directory" ? tr("新建文件夹") : tr("新建笔记");
-  return (
-    <div className="modal-layer" role="dialog" aria-modal="true" aria-label={title}>
-      <button type="button" className="modal-backdrop" aria-label={kind === "directory" ? tr("取消新建文件夹") : tr("取消新建笔记")} onClick={onCancel} />
-      <form
-        className="modal-surface"
-        onSubmit={(event) => {
-          event.preventDefault();
-          onSubmit();
-        }}
-      >
-        <div className="modal-copy">
-          <strong>{title}</strong>
-          {parentPath ? <p>{parentPath}</p> : null}
-        </div>
-        <label className="modal-field">
-          <span>{kind === "directory" ? tr("文件夹名称") : tr("笔记名称")}</span>
-          <input value={value} autoFocus onChange={(event) => onChange(event.target.value)} />
-        </label>
-        <div className="modal-actions">
-          <button type="button" className="secondary-button" onClick={onCancel}>
-            {tr("取消")}
-          </button>
-          <button type="submit" className="primary-button">
-            {tr("创建")}
-          </button>
-        </div>
-      </form>
-    </div>
-  );
-}
-
-function RenameDialog({
-  target,
-  value,
-  onChange,
-  onCancel,
-  onSubmit
-}: {
-  target?: RenameTarget;
-  value: string;
-  onChange: (value: string) => void;
-  onCancel: () => void;
-  onSubmit: () => void;
-}) {
-  const { tr } = useRendererI18n();
-  if (!target) {
-    return null;
-  }
-  const title = target.kind === "directory" ? tr("重命名文件夹") : target.kind === "resource" ? tr("重命名资源") : tr("重命名笔记");
-  const fieldLabel = target.kind === "directory" ? tr("文件夹名称") : target.kind === "resource" ? tr("资源名称") : tr("笔记名称");
-  return (
-    <div className="modal-layer" role="dialog" aria-modal="true" aria-label={title}>
-      <button type="button" className="modal-backdrop" aria-label={tr("取消重命名")} onClick={onCancel} />
-      <form
-        className="modal-surface"
-        onSubmit={(event) => {
-          event.preventDefault();
-          onSubmit();
-        }}
-      >
-        <div className="modal-copy">
-          <strong>{title}</strong>
-          <p>{target.pathRel}</p>
-        </div>
-        <label className="modal-field">
-          <span>{fieldLabel}</span>
-          <input value={value} autoFocus onChange={(event) => onChange(event.target.value)} />
-        </label>
-        <div className="modal-actions">
-          <button type="button" className="secondary-button" onClick={onCancel}>
-            {tr("取消")}
-          </button>
-          <button type="submit" className="primary-button">
-            {tr("保存")}
-          </button>
-        </div>
-      </form>
-    </div>
-  );
-}
-
-function ConfirmDialog({
-  open,
-  title,
-  message,
-  confirmLabel,
-  onCancel,
-  onConfirm
-}: {
-  open: boolean;
-  title: string;
-  message: string;
-  confirmLabel: string;
-  onCancel: () => void;
-  onConfirm: () => void;
-}) {
-  const { tr } = useRendererI18n();
-  if (!open) {
-    return null;
-  }
-  return (
-    <div className="modal-layer" role="dialog" aria-modal="true" aria-label={title}>
-      <button type="button" className="modal-backdrop" aria-label={tr("取消")} onClick={onCancel} />
-      <div className="modal-surface">
-        <div className="modal-copy">
-          <strong>{title}</strong>
-          <p>{message}</p>
-        </div>
-        <div className="modal-actions">
-          <button type="button" className="secondary-button" onClick={onCancel}>
-            {tr("取消")}
-          </button>
-          <button type="button" className="primary-button" onClick={onConfirm}>
-            {confirmLabel}
-          </button>
-        </div>
-      </div>
-    </div>
-  );
-}
-
-function MoveDialog({
-  dialog,
-  folders,
-  onChangeDestination,
-  onCancel,
-  onSubmit
-}: {
-  dialog?: MoveDialogState;
-  folders: Array<{ pathRel: string; label: string }>;
-  onChangeDestination: (pathRel: string) => void;
-  onCancel: () => void;
-  onSubmit: () => void;
-}) {
-  const { tr } = useRendererI18n();
-  if (!dialog) {
-    return null;
-  }
-  const title = dialog.target.kind === "directory" ? tr("移动文件夹") : dialog.target.kind === "resource" ? tr("移动资源") : tr("移动文件");
-  return (
-    <div className="modal-layer" role="dialog" aria-modal="true" aria-label={title}>
-      <button type="button" className="modal-backdrop" aria-label={tr("取消移动")} onClick={onCancel} />
-      <form
-        className="modal-surface"
-        onSubmit={(event) => {
-          event.preventDefault();
-          onSubmit();
-        }}
-      >
-        <div className="modal-copy">
-          <strong>{title}</strong>
-          <p>{dialog.target.pathRel}</p>
-        </div>
-        <label className="modal-field">
-          <span>{tr("目标文件夹")}</span>
-          <select value={dialog.destinationPath} autoFocus onChange={(event) => onChangeDestination(event.target.value)}>
-            {folders.map((folder) => (
-              <option key={folder.pathRel || "__root__"} value={folder.pathRel}>
-                {folder.label}
-              </option>
-            ))}
-          </select>
-        </label>
-        <div className="modal-actions">
-          <button type="button" className="secondary-button" onClick={onCancel}>
-            {tr("取消")}
-          </button>
-          <button type="submit" className="primary-button">
-            {tr("移动")}
-          </button>
-        </div>
-      </form>
-    </div>
-  );
 }
 
 function TreeContextMenu({
@@ -5490,193 +6115,6 @@ function floatingMenuStyle(x: number, y: number, size: { width: number; height: 
   };
 }
 
-function AppNav({
-  sidebarView,
-  panels,
-  onChange,
-  onOpenOutline,
-  onOpenCommandPalette,
-  onToggleAi,
-  onToggleSettings,
-  aiOpen,
-  settingsOpen
-}: {
-  sidebarView: SidebarView;
-  panels: SidebarPanelContribution[];
-  onChange: (view: SidebarView) => void;
-  onOpenOutline: () => void;
-  onOpenCommandPalette: () => void;
-  onToggleAi: () => void;
-  onToggleSettings: () => void;
-  aiOpen: boolean;
-  settingsOpen: boolean;
-}) {
-  const { tr } = useRendererI18n();
-  const items = panels.filter((panel) => panel.visibleInNav !== false);
-  return (
-    <nav className="app-nav" aria-label={tr("工作区导航")}>
-      <div className="nav-avatar" role="img" aria-label="Nolia">
-        <img className="nav-avatar-logo" src={noliaIconUrl} alt="" />
-      </div>
-      <div className="app-nav-main">
-        {items.map((item) => (
-          <button
-            key={item.id}
-            type="button"
-            className={`nav-item${sidebarView === item.id ? " is-active" : ""}`}
-            title={item.title}
-            aria-label={item.title}
-            onClick={() => onChange(item.id)}
-          >
-            {sidebarPanelIcon(item)}
-            <span>{item.title}</span>
-            {sidebarView === item.id ? <Dot className="nav-active-dot" size={18} aria-hidden="true" /> : null}
-          </button>
-        ))}
-        <button type="button" className="nav-item" title={tr("目录")} aria-label={tr("目录")} onClick={onOpenOutline}>
-          <List size={18} />
-          <span>{tr("目录")}</span>
-        </button>
-      </div>
-      <div className="app-nav-bottom">
-        <button type="button" className="nav-icon-button" title={tr("命令面板")} aria-label={tr("命令面板")} onClick={onOpenCommandPalette}>
-          <Menu size={18} />
-        </button>
-        <button type="button" className={`nav-icon-button${aiOpen ? " is-active" : ""}`} title={tr("Nolia AI")} aria-label={tr("Nolia AI")} onClick={onToggleAi}>
-          <Sparkles size={18} />
-        </button>
-        <button type="button" className={`nav-icon-button${settingsOpen ? " is-active" : ""}`} title={tr("设置")} aria-label={tr("设置")} onClick={onToggleSettings}>
-          <Settings2 size={18} />
-        </button>
-      </div>
-    </nav>
-  );
-}
-
-function EditorTopBar({
-  document,
-  resource,
-  mode,
-  leftPanelCollapsed,
-  canToggleLeft,
-  isImmersive,
-  isFavorite,
-  showShellActions,
-  aiOpen,
-  onToggleLeft,
-  onOpenCommandPalette,
-  onToggleAi,
-  onToggleSettings,
-  onOpenOutline,
-  onOpenHistory,
-  onModeChange,
-  onToggleFavorite,
-  onOpenFindReplace,
-  onRefresh
-}: {
-  document?: OpenDocumentTab;
-  resource?: ActiveResource;
-  mode: OpenDocumentTab["mode"];
-  leftPanelCollapsed: boolean;
-  canToggleLeft: boolean;
-  isImmersive: boolean;
-  isFavorite: boolean;
-  showShellActions: boolean;
-  aiOpen: boolean;
-  onToggleLeft: () => void;
-  onOpenCommandPalette: () => void;
-  onToggleAi: () => void;
-  onToggleSettings: () => void;
-  onOpenOutline: () => void;
-  onOpenHistory: () => void;
-  onModeChange: (mode: OpenDocumentTab["mode"]) => void;
-  onToggleFavorite: () => void;
-  onOpenFindReplace: () => void;
-  onRefresh: () => void;
-}) {
-  const { tr } = useRendererI18n();
-  if (isImmersive && document) {
-    const fileName = fileNameFor(document.pathRel);
-    return (
-      <div className="editor-topbar immersive-topbar">
-        <div className="immersive-title" aria-label={tr("当前文件")} title={fileName}>
-          <strong>{fileName}</strong>
-        </div>
-      </div>
-    );
-  }
-  return (
-    <div className="editor-topbar">
-      <div className="editor-topbar-left">
-        {canToggleLeft ? (
-          <button type="button" className="icon-button compact" title={leftPanelCollapsed ? tr("展开左侧栏") : tr("收起左侧栏")} onClick={onToggleLeft}>
-            {leftPanelCollapsed ? <PanelLeftOpen size={15} /> : <PanelLeftClose size={15} />}
-          </button>
-        ) : null}
-      </div>
-      <div className="editor-topbar-right">
-        {showShellActions ? (
-          <div className="editor-shell-actions" aria-label="Nolia">
-            <button type="button" className="icon-button compact" title={tr("命令面板")} aria-label={tr("命令面板")} onClick={onOpenCommandPalette}>
-              <Menu size={15} />
-            </button>
-            <button type="button" className={`icon-button compact${aiOpen ? " is-active" : ""}`} title={tr("Nolia AI")} aria-label={tr("Nolia AI")} onClick={onToggleAi}>
-              <Sparkles size={15} />
-            </button>
-            <button type="button" className="icon-button compact" title={tr("设置")} aria-label={tr("设置")} onClick={onToggleSettings}>
-              <Settings2 size={15} />
-            </button>
-          </div>
-        ) : null}
-        {document ? (
-          <>
-            {document.sourceKind !== "external" ? (
-            <button
-              type="button"
-              className={`icon-button compact favorite-toggle${isFavorite ? " is-active" : ""}`}
-              title={isFavorite ? tr("取消收藏") : tr("收藏文档")}
-              aria-label={isFavorite ? tr("取消收藏") : tr("收藏文档")}
-              onClick={onToggleFavorite}
-            >
-              <Star size={15} fill={isFavorite ? "currentColor" : "none"} />
-            </button>
-            ) : null}
-            <button type="button" className="icon-button compact" title={tr("查找和替换")} aria-label={tr("查找和替换")} onClick={onOpenFindReplace}>
-              <Search size={15} />
-            </button>
-            {document.sourceKind !== "external" ? (
-              <button type="button" className="icon-button compact" title={tr("重新读取")} aria-label={tr("重新读取")} onClick={onRefresh}>
-                <RefreshCw size={15} />
-              </button>
-            ) : null}
-            <div className="editor-topbar-outline-slot">
-              <button type="button" className="outline-toggle-button" title={tr("目录")} aria-label={tr("目录")} onClick={onOpenOutline}>
-                <List size={15} />
-                <span>{tr("目录")}</span>
-              </button>
-              {document.sourceKind !== "external" ? (
-                <button type="button" className="outline-toggle-button" title={tr("历史版本")} aria-label={tr("历史版本")} onClick={onOpenHistory}>
-                  <Clock3 size={15} />
-                  <span>{tr("历史")}</span>
-                </button>
-              ) : null}
-            </div>
-            <div className="segmented-control" aria-label={tr("编辑模式")}>
-              {(["wysiwyg", "source", "split"] as const).map((item) => (
-                <button key={item} type="button" className={mode === item ? "is-active" : ""} onClick={() => onModeChange(item)}>
-                  {item === "wysiwyg" ? tr("编辑") : item === "source" ? tr("MD") : tr("分屏")}
-                </button>
-              ))}
-            </div>
-          </>
-        ) : resource ? (
-          <span className="resource-kind-pill">{resourceEditorKindLabel(resource, tr)}</span>
-        ) : null}
-      </div>
-    </div>
-  );
-}
-
 type EditorScrollSnapshot = {
   pathRel: string;
   ratio: number;
@@ -5711,6 +6149,8 @@ const EditorPane = forwardRef<EditorPaneHandle, {
   html: string;
   platform?: NodeJS.Platform;
   workspaceId?: string;
+  wikiLinkTargets: WikiLinkCompletionTarget[];
+  onCreateWikiLinkTarget: (title: string) => void;
   pluginFileViewers: Map<string, RegisteredPluginRenderer<PluginFileViewerContext>>;
   pluginFileEditors: Map<string, RegisteredPluginRenderer<PluginFileEditorContext>>;
   toolbarVisible: boolean;
@@ -5736,6 +6176,8 @@ const EditorPane = forwardRef<EditorPaneHandle, {
     html,
     platform,
     workspaceId,
+    wikiLinkTargets,
+    onCreateWikiLinkTarget,
     pluginFileViewers,
     pluginFileEditors,
     toolbarVisible,
@@ -6043,18 +6485,19 @@ const EditorPane = forwardRef<EditorPaneHandle, {
     };
   }, [document?.mode, document?.pathRel, html]);
   const insertSourceImage = async () => {
-    if (!workspaceId || !document) {
+    if (!document) {
       return;
     }
-    const selected = await window.nolia.attachment.pickImage({ workspaceId });
-    if (!selected.path) {
+    const selected = document.sourceKind === "external"
+      ? await window.nolia.externalFile?.pickAttachment?.()
+      : workspaceId ? await window.nolia.attachment.pickImage({ workspaceId }) : undefined;
+    if (!selected?.path) {
       return;
     }
-    const attachment = await window.nolia.attachment.import({
-      workspaceId,
-      documentPathRel: document.pathRel,
-      source: { path: selected.path }
-    });
+    const attachment = document.sourceKind === "external"
+      ? await window.nolia.externalFile?.importAttachment?.({ documentPath: document.filePath ?? document.pathRel, sourcePath: selected.path, baseHash: document.baseHash })
+      : workspaceId ? await window.nolia.attachment.import({ workspaceId, documentPathRel: document.pathRel, source: { path: selected.path } }) : undefined;
+    if (!attachment) return;
     insertSourceSnippet({ before: attachment.markdown, block: true });
   };
   const [sourceLinkDraft, setSourceLinkDraft] = useState<LinkDraft | undefined>();
@@ -6380,6 +6823,8 @@ const EditorPane = forwardRef<EditorPaneHandle, {
               onSelectionLengthChange={onSelectionLengthChange}
               onOpenFindReplace={openFindReplace}
               showLineNumbers={lineNumbersVisible}
+              wikiLinkTargets={wikiLinkTargets}
+              onCreateWikiLinkTarget={onCreateWikiLinkTarget}
             />
           </Suspense>
         </div>
@@ -6429,6 +6874,8 @@ const EditorPane = forwardRef<EditorPaneHandle, {
                   onSelectionLengthChange={onSelectionLengthChange}
                   onOpenFindReplace={openFindReplace}
                   showLineNumbers={lineNumbersVisible}
+                  wikiLinkTargets={wikiLinkTargets}
+                  onCreateWikiLinkTarget={onCreateWikiLinkTarget}
                 />
               </Suspense>
             </div>
@@ -6444,7 +6891,7 @@ const EditorPane = forwardRef<EditorPaneHandle, {
           />
           <div ref={splitPreviewRef} className="split-preview">
             <Suspense fallback={<EditorLoadingState label={tr("加载中。")} />}>
-              <MarkdownPreview html={html} onMermaidClick={focusSplitMermaidSource} onCodeLanguageChange={updateSplitCodeLanguage} />
+              <MarkdownPreview html={html} onMermaidEdit={focusSplitMermaidSource} onCodeLanguageChange={updateSplitCodeLanguage} />
             </Suspense>
           </div>
         </div>
@@ -7335,9 +7782,12 @@ function restoreEditorScroll(scroller: HTMLElement, snapshot: EditorScrollSnapsh
   scroller.scrollTop = top || Math.min(maxScrollTop, snapshot.top);
 }
 
-function insertSnippetIntoSourceEditor(ref: SourceEditorViewRef, snippet: MarkdownSnippet) {
+function insertSnippetIntoSourceEditor(ref: SourceEditorViewRef, snippet: MarkdownSnippet, attempt = 0) {
   const view = ref.current?.view;
   if (!view) {
+    if (attempt < 120 && typeof window !== "undefined") {
+      window.setTimeout(() => insertSnippetIntoSourceEditor(ref, snippet, attempt + 1), 16);
+    }
     return;
   }
   const range = view.state.selection.main;
@@ -7500,6 +7950,7 @@ function NotesWorkspaceView({
   const [expanded, setExpanded] = useState<Set<string>>(new Set([""]));
   const [draggingTarget, setDraggingTarget] = useState<RenameTarget | undefined>();
   const [dropTargetPath, setDropTargetPath] = useState<string | undefined>();
+  const [treeScrollElement, setTreeScrollElement] = useState<HTMLDivElement | null>(null);
   const markdownNotes = useMemo(() => collectMarkdownNotes(nodes), [nodes]);
   const openableItemsCount = useMemo(() => countOpenableTreeItems(nodes), [nodes]);
   const visibleNodes = useMemo(() => {
@@ -7573,10 +8024,11 @@ function NotesWorkspaceView({
               </button>
             </span>
           </header>
-          <div className="tree-scroll">
+          <div className="tree-scroll" ref={setTreeScrollElement}>
             {visibleNodes.length === 0 ? <div className="empty-state">{tr("没有匹配的文件或资源。")}</div> : null}
             <TreeNodes
               nodes={visibleNodes}
+              scrollElement={treeScrollElement}
               selection={selection}
               expanded={expanded}
               forceExpanded={Boolean(searchQuery.trim())}
@@ -7603,6 +8055,7 @@ function NotesWorkspaceView({
 
 function TreeNodes({
   nodes,
+  scrollElement,
   selection,
   expanded,
   onToggle,
@@ -7618,10 +8071,10 @@ function TreeNodes({
   onDragStart,
   onDragEnd,
   onDropTargetChange,
-  forceExpanded = false,
-  depth = 0
+  forceExpanded = false
 }: {
   nodes: FileTreeNode[];
+  scrollElement: HTMLDivElement | null;
   selection?: TreeSelection;
   expanded: Set<string>;
   forceExpanded?: boolean;
@@ -7638,12 +8091,22 @@ function TreeNodes({
   onDragStart: (target: RenameTarget) => void;
   onDragEnd: () => void;
   onDropTargetChange: (pathRel?: string) => void;
-  depth?: number;
 }) {
   const { tr } = useRendererI18n();
+  void onRename;
+  void onDelete;
+  const rows = useMemo(() => flattenVisibleTree(nodes, expanded, forceExpanded), [nodes, expanded, forceExpanded]);
+  // eslint-disable-next-line react-hooks/incompatible-library -- The virtualizer owns its measured row callbacks.
+  const virtualizer = useVirtualizer({
+    count: rows.length,
+    getScrollElement: () => scrollElement,
+    estimateSize: () => 28,
+    overscan: 12
+  });
   return (
-    <div className="tree-list">
-      {nodes.map((node) => {
+    <div className="tree-list is-virtual" role="tree" aria-label={tr("全部文件")} style={{ height: virtualizer.getTotalSize() }}>
+      {virtualizer.getVirtualItems().map((virtualRow) => {
+        const { node, depth, position, setSize } = rows[virtualRow.index];
         const targetKind: ItemKind = node.kind === "directory" ? "directory" : node.kind === "markdown" ? "file" : "resource";
         const isActive = selection?.pathRel === node.pathRel && selection.kind === targetKind;
         const isExpanded = forceExpanded || expanded.has(node.pathRel);
@@ -7656,7 +8119,17 @@ function TreeNodes({
           dropTargetPath === node.pathRel && canDrop ? "is-drop-target" : ""
         ].filter(Boolean).join(" ");
         return (
-          <div key={node.pathRel} className="tree-node" style={{ paddingLeft: depth * 12 }}>
+          <div
+            key={node.pathRel}
+            className="tree-node virtual-tree-node"
+            role="treeitem"
+            aria-level={depth + 1}
+            aria-posinset={position}
+            aria-setsize={setSize}
+            aria-selected={isActive}
+            aria-expanded={node.kind === "directory" ? isExpanded : undefined}
+            style={{ height: virtualRow.size, transform: `translateY(${virtualRow.start}px)`, paddingLeft: depth * 14 }}
+          >
             <div
               className={rowClasses}
               draggable
@@ -7731,33 +8204,25 @@ function TreeNodes({
                 </button>
               ) : null}
             </div>
-            {node.kind === "directory" && isExpanded && node.children?.length ? (
-              <TreeNodes
-                nodes={node.children}
-                selection={selection}
-                expanded={expanded}
-                forceExpanded={forceExpanded}
-                onToggle={onToggle}
-                onOpen={onOpen}
-                onOpenCreateMenu={onOpenCreateMenu}
-                onSelectFolder={onSelectFolder}
-                onRename={onRename}
-                onDelete={onDelete}
-                onMoveToFolder={onMoveToFolder}
-                onContextMenu={onContextMenu}
-                draggingTarget={draggingTarget}
-                dropTargetPath={dropTargetPath}
-                onDragStart={onDragStart}
-                onDragEnd={onDragEnd}
-                onDropTargetChange={onDropTargetChange}
-                depth={depth + 1}
-              />
-            ) : null}
           </div>
         );
       })}
     </div>
   );
+}
+
+function flattenVisibleTree(nodes: FileTreeNode[], expanded: Set<string>, forceExpanded: boolean): Array<{ node: FileTreeNode; depth: number; position: number; setSize: number }> {
+  const rows: Array<{ node: FileTreeNode; depth: number; position: number; setSize: number }> = [];
+  const visit = (siblings: FileTreeNode[], depth: number) => {
+    siblings.forEach((node, index) => {
+      rows.push({ node, depth, position: index + 1, setSize: siblings.length });
+      if (node.kind === "directory" && node.children?.length && (forceExpanded || expanded.has(node.pathRel))) {
+        visit(node.children, depth + 1);
+      }
+    });
+  };
+  visit(nodes, 0);
+  return rows;
 }
 
 function PlusIcon() {
@@ -8407,10 +8872,11 @@ function PluginSettingsItem({
   onRequestAcceptPluginPermissions: (manifest: ExtensionManifest) => void;
 }) {
   const { tr } = useRendererI18n();
-  const enabled = isExtensionEnabled(manifest, settings);
+  const incompatible = !manifest.builtIn && manifest.apiVersion !== 3;
+  const enabled = !incompatible && isExtensionEnabled(manifest, settings);
   const permissionsAccepted = isExtensionPermissionAccepted(manifest, settings);
-  const canToggle = !manifest.required && (manifest.builtIn || Boolean(descriptor?.manifest));
-  const disabledReason = descriptor?.disabledReason ?? settings.plugins[manifest.id]?.disabledReason;
+  const canToggle = !manifest.required && !incompatible && (manifest.builtIn || Boolean(descriptor?.manifest));
+  const disabledReason = incompatible ? "API v2 插件不能在此版本运行，请迁移到 Plugin API v3。" : descriptor?.disabledReason ?? settings.plugins[manifest.id]?.disabledReason;
   return (
     <div className="plugin-settings-item">
       <div>
@@ -8439,6 +8905,7 @@ function PluginSettingsItem({
           <span>{manifest.required ? tr("必需") : enabled ? tr("已启用") : tr("已停用")}</span>
         </label>
       </div>
+      {enabled && descriptor?.frameUrl ? <details className="plugin-frame-details"><summary>打开插件界面</summary><PluginFrameHost pluginId={manifest.id} title={manifest.name} /></details> : null}
     </div>
   );
 }
@@ -8534,7 +9001,7 @@ function documentListKindLabel(pathRel: string, kind: "file" | "resource", tr = 
   }
 }
 
-function DocumentDetails({
+export function DocumentDetails({
   doc,
   backlinks
 }: {
@@ -8673,7 +9140,7 @@ function outlineItemStyle(depth: number): CSSProperties {
   return { "--outline-depth": Math.max(0, Math.min(5, depth - 1)) } as CSSProperties;
 }
 
-function ErrorPanel({ statusMessage }: { statusMessage: string }) {
+export function ErrorPanel({ statusMessage }: { statusMessage: string }) {
   return <div className="panel-empty">{statusMessage}</div>;
 }
 

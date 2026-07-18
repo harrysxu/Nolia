@@ -2,6 +2,7 @@ import type { Page } from "@playwright/test";
 import { DEFAULT_SETTINGS } from "../../../src/shared/constants";
 import type { PluginDescriptor } from "../../../src/shared/extensions";
 import type { AiApiMode, AiEmbeddingSettings, AiProviderId, AiProviderProfilePublic, AiProviderTestRequest, AiRunEvent, AiSettingsPublic } from "../../../src/shared/ai";
+import type { DocumentDraft, SavedSearch, TagSummary, WorkspaceProbeResult, WorkspaceSessionSnapshot } from "../../../src/shared/contracts";
 import type { AppSettings, BacklinksResponse, FileTreeNode, ParsedDocument, RecentWorkspace, SearchResultItem, WorkspaceIndexedEvent, WorkspaceInfo } from "../../../src/shared/types";
 
 const MOCK_PNG_BYTES = [137, 80, 78, 71, 13, 10, 26, 10, 0, 0, 0, 13, 73, 72, 68, 82, 0, 0, 0, 1, 0, 0, 0, 1, 8, 6, 0, 0, 0, 31, 21, 196, 137, 0, 0, 0, 13, 73, 68, 65, 84, 8, 29, 99, 248, 255, 255, 255, 127, 0, 9, 251, 3, 254, 85, 140, 87, 0, 0, 0, 0, 73, 69, 78, 68, 174, 66, 96, 130];
@@ -40,6 +41,8 @@ export interface MockWorkspaceOptions {
   plugins?: PluginDescriptor[];
   failCreatePaths?: string[];
   createdAt?: number;
+  session?: WorkspaceSessionSnapshot | null;
+  workspaceProbe?: WorkspaceProbeResult;
 }
 
 export async function installMockNolia(page: Page, options: MockWorkspaceOptions = {}) {
@@ -62,6 +65,7 @@ export async function installMockNolia(page: Page, options: MockWorkspaceOptions
         settingsHistory: Array<{ key: string; value: unknown }>;
         pluginEnabledHistory: Array<{ pluginId: string; enabled: boolean }>;
         acceptedPlugins: string[];
+        pluginRpcRequests: unknown[];
         clipboardWrites: Array<{ text?: string; html?: string }>;
         historySnapshots: Array<{ id: number; pathRel: string; reason: string; content: string }>;
         rejectedApprovals: Array<{ taskId: string; approvalId: string; reason?: string }>;
@@ -252,6 +256,20 @@ export async function installMockNolia(page: Page, options: MockWorkspaceOptions
     let snapshotCounter = 0;
     const snapshots: Array<{ id: number; pathRel: string; snapshotPath: string; sha256: string; reason: string; size: number; createdAt: number; content: string }> = [];
     let recentWorkspaces = [...(rawOptions.recentWorkspaces ?? [])];
+    const firstMarkdownPath = [...files.keys()].find((pathRel) => /\.md(?:own|arkdown)?$/i.test(pathRel));
+    let workspaceSession: WorkspaceSessionSnapshot | undefined = rawOptions.session === null
+      ? undefined
+      : rawOptions.session ?? (firstMarkdownPath ? {
+          workspaceId: workspace.workspaceId,
+          activePathRel: firstMarkdownPath,
+          documents: [{ pathRel: firstMarkdownPath, mode: mutableSettings.editorMode, lastActiveAt: now }],
+          recentlyClosed: [],
+          sidebarView: "files",
+          inspectorView: "outline",
+          updatedAt: now
+        } : undefined);
+    const documentDrafts = new Map<string, DocumentDraft>();
+    let savedSearches: SavedSearch[] = [];
     const explicitSearchItems = rawOptions.searchItems;
     const backlinks = rawOptions.backlinks ?? { linked: [], unlinked: [] };
     const workspaceIndexedListeners = new Set<(event: WorkspaceIndexedEvent) => void>();
@@ -272,6 +290,7 @@ export async function installMockNolia(page: Page, options: MockWorkspaceOptions
       settingsHistory: [],
       pluginEnabledHistory: [],
       acceptedPlugins: [],
+      pluginRpcRequests: [],
       clipboardWrites: [],
       historySnapshots: [],
       rejectedApprovals: [],
@@ -309,18 +328,27 @@ export async function installMockNolia(page: Page, options: MockWorkspaceOptions
       return parentPathFor(pathRel).startsWith("assets") || pathRel.startsWith("assets/") ? "asset" : "other";
     };
     const parseDocument = (pathRel: string, content: string): ParsedDocument => {
+      const frontmatterMatch = content.match(/^---\n([\s\S]*?)\n---\n?/);
+      const frontmatter = Object.fromEntries((frontmatterMatch?.[1] ?? "").split("\n").flatMap((line) => {
+        const match = line.match(/^([^:#][^:]*):\s*(.*)$/);
+        if (!match) return [];
+        const raw = match[2].trim();
+        const value: unknown = raw === "true" ? true : raw === "false" ? false : /^-?\d+(?:\.\d+)?$/.test(raw) ? Number(raw) : raw.replace(/^['"]|['"]$/g, "");
+        return [[match[1].trim(), value] as const];
+      }));
+      const body = frontmatterMatch ? content.slice(frontmatterMatch[0].length) : content;
       const title = content.match(/^#\s+(.+)$/m)?.[1] ?? fileNameFor(pathRel).replace(/\.md(?:own|arkdown)?$/i, "");
-      const headings = [...content.matchAll(/^(#{1,6})\s+(.+)$/gm)].map((match, index) => ({
+      const headings = [...body.matchAll(/^(#{1,6})\s+(.+)$/gm)].map((match, index) => ({
         id: match[2].toLowerCase().replace(/[^\p{L}\p{N}]+/gu, "-").replace(/^-|-$/g, "") || `heading-${index + 1}`,
         text: match[2],
         depth: match[1].length,
         line: content.slice(0, match.index).split(/\r?\n/).length
       }));
       return {
-        frontmatter: {},
+        frontmatter,
         title,
-        body: content,
-        plainText: content.replace(/[#*_`>\-[\]()]/g, " "),
+        body,
+        plainText: body.replace(/[#*_`>\-[\]()]/g, " "),
         headings,
         tags: [...content.matchAll(/(^|\s)#([\p{L}\p{N}_/-]+)/gu)].map((match) => match[2]),
         links: [],
@@ -375,13 +403,18 @@ export async function installMockNolia(page: Page, options: MockWorkspaceOptions
       sortTree(root);
       return root;
     };
-    const searchWorkspace = (query: string): SearchResultItem[] => {
+    const searchWorkspace = (query: string, tag?: string): SearchResultItem[] => {
       if (explicitSearchItems && !query.trim()) {
         return explicitSearchItems;
       }
       const normalizedQuery = query.trim().toLowerCase();
+      const normalizedTag = tag?.toLowerCase();
       return [...files.entries()]
-        .filter(([pathRel, content]) => kindFor(pathRel) === "markdown" && (!normalizedQuery || `${pathRel}\n${content}`.toLowerCase().includes(normalizedQuery)))
+        .filter(([pathRel, content]) => {
+          if (kindFor(pathRel) !== "markdown" || (normalizedQuery && !`${pathRel}\n${content}`.toLowerCase().includes(normalizedQuery))) return false;
+          if (!normalizedTag) return true;
+          return listTagsForContent(content).some((item) => item.toLowerCase() === normalizedTag);
+        })
         .map(([pathRel, content], index) => ({
           pathRel,
           title: parseDocument(pathRel, content).title,
@@ -389,6 +422,10 @@ export async function installMockNolia(page: Page, options: MockWorkspaceOptions
           snippets: [content.split(/\r?\n/).find((line) => (normalizedQuery ? line.toLowerCase().includes(normalizedQuery) : line.trim())) ?? pathRel]
         }));
     };
+    const listTagsForContent = (content: string): string[] => [
+      ...[...content.matchAll(/(^|\s)#([\p{L}\p{N}_/-]+)/gu)].map((match) => match[2]),
+      ...[...content.matchAll(/^tags:\s*\[([^\]]*)\]/gmu)].flatMap((match) => match[1].split(",").map((tag) => tag.trim()).filter(Boolean))
+    ];
     const hasPatchFallback = (value: unknown): boolean => Boolean(value && typeof value === "object" && (value as { patchFallback?: unknown }).patchFallback);
     const allowsDocumentPatch = (value: unknown): boolean => Boolean(value && typeof value === "object" && ((value as { allowDocumentPatch?: unknown }).allowDocumentPatch || (value as { patchFallback?: unknown }).patchFallback));
     const allowsWorkspaceOperations = (value: unknown): boolean => Boolean(value && typeof value === "object" && (value as { allowWorkspaceOperations?: unknown }).allowWorkspaceOperations);
@@ -422,6 +459,29 @@ export async function installMockNolia(page: Page, options: MockWorkspaceOptions
       size: snapshot.size,
       createdAt: snapshot.createdAt
     });
+    const listWorkspaceTags = (): TagSummary[] => {
+      const counts = new Map<string, number>();
+      for (const content of files.values()) {
+        const tags = new Set([
+          ...[...content.matchAll(/(^|\s)#([\p{L}\p{N}_/-]+)/gu)].map((match) => match[2]),
+          ...[...content.matchAll(/^tags:\s*\[([^\]]*)\]/gmu)].flatMap((match) => match[1].split(",").map((tag) => tag.trim()).filter(Boolean))
+        ]);
+        for (const tag of tags) counts.set(tag.toLowerCase(), (counts.get(tag.toLowerCase()) ?? 0) + 1);
+      }
+      return [...counts.entries()].map(([name, count]) => ({ name, displayName: name, count })).sort((left, right) => left.name.localeCompare(right.name));
+    };
+    const previewTagRename = (sourceTag: string, targetTag: string) => {
+      const pattern = new RegExp(`(^|[\\s,[{])#?${sourceTag}(?=$|[\\s,\\]}])`, "gmu");
+      const changes = [...files.entries()].flatMap(([pathRel, before]) => {
+        let replacements = 0;
+        const after = before.replace(pattern, (_match, prefix: string) => {
+          replacements += 1;
+          return `${prefix}${prefix.includes("[") || prefix.includes(",") ? "" : "#"}${targetTag}`;
+        });
+        return replacements ? [{ pathRel, before, after, replacements, baseHash: `mock:${before}` }] : [];
+      });
+      return { sourceTag, targetTag, changes, replacements: changes.reduce((sum, change) => sum + change.replacements, 0) };
+    };
 
     window.nolia = {
       workspace: {
@@ -450,7 +510,29 @@ export async function installMockNolia(page: Page, options: MockWorkspaceOptions
           recentWorkspaces = recentWorkspaces.filter((item) => item.workspaceId !== workspaceId);
           return recentWorkspaces;
         },
-        listTags: async () => [],
+        listTags: async () => listWorkspaceTags(),
+        listLinkTargets: async () => [...files.entries()].filter(([pathRel]) => kindFor(pathRel) === "markdown").map(([pathRel, content]) => ({ pathRel, title: parseDocument(pathRel, content).title })),
+        previewTagRename: async ({ sourceTag, targetTag }) => previewTagRename(sourceTag, targetTag),
+        applyTagRename: async ({ sourceTag, targetTag, expectedBaseHashes }) => {
+          const preview = previewTagRename(sourceTag, targetTag);
+          for (const change of preview.changes) {
+            if (expectedBaseHashes[change.pathRel] !== change.baseHash) throw new Error(`Tag rename conflict: ${change.pathRel}`);
+          }
+          for (const change of preview.changes) {
+            files.set(change.pathRel, change.after);
+            testWindow.__noliaMock.files[change.pathRel] = change.after;
+          }
+          return { affectedPaths: preview.changes.map((change) => change.pathRel), replacements: preview.replacements };
+        },
+        probe: async ({ path } = {}) => rawOptions.workspaceProbe ?? ({
+          path: path ?? workspace.rootPath,
+          name: workspace.name,
+          status: "initialized" as const,
+          readable: true,
+          writable: workspace.permissions.writable,
+          markdownCount: [...files.keys()].filter((pathRel) => /\.md(?:own|arkdown)?$/i.test(pathRel)).length,
+          hasNoliaDirectory: true
+        }),
         switch: async () => {
           workspaceOpen = true;
           window.localStorage.removeItem(workspaceClosedStorageKey);
@@ -459,7 +541,22 @@ export async function installMockNolia(page: Page, options: MockWorkspaceOptions
         close: async () => {
           workspaceOpen = false;
           window.localStorage.setItem(workspaceClosedStorageKey, "1");
-        }
+        },
+        readSession: async () => workspaceSession,
+        writeSession: async ({ session }) => {
+          workspaceSession = session;
+          return { ok: true };
+        },
+        health: async () => ({
+          workspaceId: workspace.workspaceId,
+          readable: true,
+          writable: workspace.permissions.writable,
+          watcher: { status: "ready" as const },
+          index: { status: "ready", progress: 1 },
+          database: { schemaVersion: 4, status: "ready" as const },
+          history: { bytes: 0 },
+          issues: []
+        })
       },
       file: {
         listTree: async () => ({ nodes: listNodes() }),
@@ -545,9 +642,63 @@ export async function installMockNolia(page: Page, options: MockWorkspaceOptions
           return { ok: true };
         }
       },
-      document: { parse: async ({ pathRel, content }) => parseDocument(pathRel, content) },
-      search: { query: async ({ query }) => ({ items: searchWorkspace(query), indexVersion: 1, isPartial: false }) },
-      graph: { getBacklinks: async () => backlinks },
+      document: {
+        parse: async ({ pathRel, content }) => parseDocument(pathRel, content),
+        mutateProperty: async ({ pathRel, mutation, revision }) => {
+          const current = files.get(pathRel) ?? "";
+          const parsed = parseDocument(pathRel, current);
+          const properties = { ...parsed.frontmatter } as Record<string, unknown>;
+          if (mutation.type === "set") properties[mutation.key] = mutation.value;
+          if (mutation.type === "delete") delete properties[mutation.key];
+          if (mutation.type === "rename") {
+            properties[mutation.nextKey] = properties[mutation.key];
+            delete properties[mutation.key];
+          }
+          const body = current.replace(/^---\n[\s\S]*?\n---\n?/, "");
+          const yaml = Object.entries(properties).map(([key, value]) => `${key}: ${Array.isArray(value) ? `[${value.join(", ")}]` : String(value)}`).join("\n");
+          const content = `---\n${yaml}\n---\n${body}`;
+          files.set(pathRel, content);
+          syncFiles();
+          return { content, sha256: `${pathRel}:property:${content.length}`, parsed: parseDocument(pathRel, content), revision: revision + 1 };
+        },
+        readDraft: async ({ pathRel }) => documentDrafts.get(pathRel),
+        writeDraft: async ({ pathRel, content, baseHash, revision }) => {
+          documentDrafts.set(pathRel, { pathRel, content, baseHash, revision, updatedAt: Date.now() });
+          return { ok: true };
+        },
+        deleteDraft: async ({ pathRel }) => {
+          documentDrafts.delete(pathRel);
+          return { ok: true };
+        }
+      },
+      search: {
+        query: async ({ query, filters }) => ({ items: searchWorkspace(query, filters?.tag), indexVersion: 1, isPartial: false }),
+        unified: async ({ query }) => ({
+          items: searchWorkspace(query.text, query.tags?.[0]).map((item) => ({ ...item, source: "exact" as const, matchedFields: ["title", "body", "path", "tags"] })),
+          mode: query.mode,
+          semanticAvailable: query.mode === "exact",
+          fallbackReason: query.mode === "hybrid" ? "语义索引不可用，已降级为精确搜索。" : undefined,
+          indexVersion: 1
+        }),
+        listSaved: async () => savedSearches,
+        save: async ({ search }) => {
+          savedSearches = [search, ...savedSearches.filter((item) => item.id !== search.id)];
+          return savedSearches;
+        },
+        deleteSaved: async ({ searchId }) => {
+          savedSearches = savedSearches.filter((item) => item.id !== searchId);
+          return savedSearches;
+        }
+      },
+      graph: {
+        getBacklinks: async () => backlinks,
+        getLocal: async ({ pathRel, depth = 1 }) => ({
+          nodes: [{ id: pathRel, pathRel, title: fileNameFor(pathRel).replace(/\.md$/i, ""), depth: 0, current: true }],
+          edges: [],
+          depth,
+          truncated: false
+        })
+      },
       attachment: {
         import: async () => ({ assetPathRel: "assets/mock.png", markdown: "![mock.png](assets/mock.png)", mimeType: "image/png", size: MOCK_PNG_BYTES.length }),
         pickImage: async () => ({ path: "/tmp/mock.png" })
@@ -614,6 +765,22 @@ export async function installMockNolia(page: Page, options: MockWorkspaceOptions
             descriptor.pluginId === pluginId ? { ...descriptor, diagnostics: [...descriptor.diagnostics, { level: "error" as const, message }] } : descriptor
           );
           return pluginDescriptors;
+        },
+        openSession: async ({ pluginId }) => {
+          const descriptor = pluginDescriptors.find((item) => item.pluginId === pluginId);
+          return {
+            sessionId: "00000000-0000-4000-8000-000000000001",
+            pluginId,
+            frameUrl: descriptor?.frameUrl ?? "data:text/html,<title>Nolia plugin</title>",
+            grantedCapabilities: descriptor?.manifest?.permissions ?? [],
+            expiresAt: Date.now() + 60_000,
+            workspaceId: workspace.workspaceId
+          };
+        },
+        closeSession: async () => ({ ok: true }),
+        request: async (request) => {
+          testWindow.__noliaMock.pluginRpcRequests.push(request);
+          return { version: 3 as const, requestId: request.requestId, ok: true as const, result: { accepted: true } };
         }
       },
       extensions: { syncMenus: async () => ({ ok: true }) },

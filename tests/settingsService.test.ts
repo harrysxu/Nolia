@@ -28,7 +28,7 @@ describe("settings and plugin services", () => {
       await service.init();
 
       expect(service.getSettings()).toMatchObject({
-        language: "system",
+        language: "zh-CN",
         theme: "dark",
         editorMode: "split",
         plugins: {}
@@ -68,6 +68,63 @@ describe("settings and plugin services", () => {
         await reloaded.init();
         expect(reloaded.getSettings().language).toBe(language);
       }
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("normalizes configurable workspace paths and date patterns", async () => {
+    const root = await makeTempDir();
+    try {
+      const service = new SettingsService(root);
+      await service.init();
+
+      await service.setSetting("inboxDirectory", " Capture / Inbox ");
+      await service.setSetting("templatesDirectory", "../outside");
+      await service.setSetting("dailyNoteDirectory", "C:\\private\\daily");
+      await service.setSetting("quickCaptureFilePattern", "YYYY/MM");
+      await service.setSetting("dailyNoteFilePattern", "YYYY-MM-DD-journal");
+
+      expect(service.getSettings()).toMatchObject({
+        inboxDirectory: "Capture/Inbox",
+        templatesDirectory: "Templates",
+        dailyNoteDirectory: "Daily",
+        quickCaptureFilePattern: "YYYY-MM",
+        dailyNoteFilePattern: "YYYY-MM-DD-journal"
+      });
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("repairs unsafe configurable paths while loading legacy settings", async () => {
+    const root = await makeTempDir();
+    try {
+      await writeFile(
+        path.join(root, "global-state.json"),
+        JSON.stringify({
+          settings: {
+            inboxDirectory: "/tmp/capture",
+            quickCaptureFilePattern: "capture-*",
+            dailyNoteDirectory: "Notes/CON",
+            dailyNoteFilePattern: "DD-MM-YYYY",
+            templatesDirectory: "Notes/../Templates"
+          },
+          recentWorkspaces: []
+        }),
+        "utf8"
+      );
+
+      const service = new SettingsService(root);
+      await service.init();
+
+      expect(service.getSettings()).toMatchObject({
+        inboxDirectory: "Inbox",
+        quickCaptureFilePattern: "YYYY-MM",
+        dailyNoteDirectory: "Daily",
+        dailyNoteFilePattern: "DD-MM-YYYY",
+        templatesDirectory: "Templates"
+      });
     } finally {
       await rm(root, { recursive: true, force: true });
     }
@@ -229,7 +286,8 @@ describe("settings and plugin services", () => {
           id: "local.demo",
           name: "Local Demo",
           version: "1.0.0",
-          renderer: "index.js",
+          apiVersion: 3,
+          entrypoints: { ui: "index.html" },
           activationEvents: ["onStartup"],
           permissions: ["ui:contribute"],
           contributes: {
@@ -238,7 +296,7 @@ describe("settings and plugin services", () => {
         }),
         "utf8"
       );
-      await writeFile(path.join(root, "plugins", "local.demo", "index.js"), "export function activate() {}", "utf8");
+      await writeFile(path.join(root, "plugins", "local.demo", "index.html"), "<!doctype html><script src='index.js'></script>", "utf8");
 
       await mkdir(path.join(root, "plugins", "bad.plugin"), { recursive: true });
       await writeFile(path.join(root, "plugins", "bad.plugin", "plugin.json"), "{ bad json", "utf8");
@@ -295,7 +353,7 @@ describe("settings and plugin services", () => {
           id: "scope.bad",
           name: "Scope Bad",
           version: "1.0.0",
-          apiVersion: 2,
+          apiVersion: 3,
           activationEvents: ["onStartup"],
           contributes: {
             commands: [{ id: "other.command", title: "Other" }]
@@ -335,8 +393,8 @@ describe("settings and plugin services", () => {
           id: "local.demo",
           name: "Local Demo",
           version: "1.0.0",
-          apiVersion: 2,
-          renderer: "index.js",
+          apiVersion: 3,
+          entrypoints: { ui: "index.html" },
           activationEvents: ["onStartup"],
           permissions: ["ui:contribute"],
           contributes: {
@@ -345,7 +403,7 @@ describe("settings and plugin services", () => {
         }),
         "utf8"
       );
-      await writeFile(path.join(root, "plugins", "local.demo", "index.js"), "export function activate() {}", "utf8");
+      await writeFile(path.join(root, "plugins", "local.demo", "index.html"), "<!doctype html><script src='index.js'></script>", "utf8");
 
       const settings = new SettingsService(root);
       await settings.init();

@@ -51,6 +51,7 @@ import { Highlight } from "./Highlight";
 import { MarkdownInline } from "./MarkdownInline";
 import { MarkdownPreviewBlock } from "./MarkdownPreviewBlock";
 import { EditableImage } from "./EditableImage";
+import { DiagramViewer, type DiagramViewerContent } from "./DiagramViewer";
 import { getCodeBlockLanguageSelectOptions } from "./codeBlockLanguageSelect";
 import { exactMatchIndex, findPlainTextMatches, nextMatchIndex, type FindReplaceOptions, type FindReplaceResult, type TextMatch } from "./findReplace";
 import { isModifiedOpenClick } from "./markdownNodeInteraction";
@@ -505,6 +506,7 @@ export const WysiwygEditor = forwardRef<WysiwygEditorHandle, WysiwygEditorProps>
   const [tableMenuPosition, setTableMenuPosition] = useState<FloatingMenuState | undefined>();
   const [tableSourceEditor, setTableSourceEditor] = useState<TableSourceEditorState | undefined>();
   const [codeLanguageControl, setCodeLanguageControl] = useState<CodeLanguageControlState | undefined>();
+  const [diagramViewer, setDiagramViewer] = useState<DiagramViewerContent | undefined>();
   const lastEmittedHtml = useRef<string | undefined>(undefined);
   const lastCodeSelection = useRef<{ position: number; updatedAt: number } | undefined>(undefined);
   const editorRef = useRef<Editor | null>(null);
@@ -576,7 +578,9 @@ export const WysiwygEditor = forwardRef<WysiwygEditorHandle, WysiwygEditorProps>
         onOpenMarkdownTarget: emitOpenMarkdownTarget
       }),
       MarkdownPreviewBlock.configure({
-        sourceLabel: tr("Markdown 块源码")
+        sourceLabel: tr("Markdown 块源码"),
+        viewLabel: tr("查看图表"),
+        onOpenDiagram: setDiagramViewer
       }),
       NoliaCodeBlock.configure({
         lowlight: codeBlockLowlight,
@@ -1385,6 +1389,7 @@ export const WysiwygEditor = forwardRef<WysiwygEditorHandle, WysiwygEditorProps>
       ) : null}
       {codeLanguageControl ? <CodeLanguageSelectControl state={codeLanguageControl} onChange={applyCodeBlockLanguage} /> : null}
       <EditorContent editor={editor} className="wysiwyg-editor" />
+      {diagramViewer ? <DiagramViewer content={diagramViewer} onClose={() => setDiagramViewer(undefined)} /> : null}
     </div>
   );
 });

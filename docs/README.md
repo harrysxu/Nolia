@@ -14,6 +14,12 @@ Nolia 是一款跨平台本地优先 Markdown 知识工作台，基于 Electron�
 
 - [AI Runtime](ai-assistant-runtime/README.md)：Provider、Agent Runtime、权限、安全、语义索引、错误诊断和发布前 AI 测试。
 
+## 产品规划
+
+- [产品与技术升级方案](product/PRODUCT_UPGRADE_PLAN.md)：产品定位、现状分析、一次性交付范围和验收指标。
+- [一次性升级技术设计](architecture/TECHNICAL_UPGRADE_DESIGN.md)：目标架构、领域模型、IPC、数据、安全、迁移、性能和测试设计。
+- [一次性升级 UI/UX 规格](design/UI_UX_UPGRADE_SPEC.md)：信息架构、页面、交互、视觉系统、响应式、无障碍和视觉验收。
+
 ## 法律与声明
 
 - [隐私声明](legal/PRIVACY.md)

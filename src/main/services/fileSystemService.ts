@@ -11,8 +11,11 @@ import type {
   FileReadResponse,
   FileStatInfo,
   FileTreeNode,
-  FileWriteResponse
+  FileWriteResponse,
+  RenameReferencePreview
 } from "../../shared/types";
+import { renameMarkdownTagReferences } from "../../shared/markdown";
+import type { TagRenameApplyRequest, TagRenameApplyResponse, TagRenamePreview, TagRenamePreviewRequest } from "../../shared/contracts";
 import type {
   ExternalFileReadRequest,
   ExternalFileWriteAtomicRequest,
@@ -23,6 +26,7 @@ import type {
   FileListTreeRequest,
   FileReadRequest,
   FileRenameRequest,
+  FileRenamePreviewRequest,
   FileResourceActionRequest,
   FileTrashRequest,
   FileWriteBinaryAtomicRequest,
@@ -131,6 +135,7 @@ export class FileSystemService {
 
   async writeAtomic(request: FileWriteAtomicRequest): Promise<FileWriteResponse> {
     const runtime = this.workspaces.requireWorkspace(request.workspaceId);
+    assertWorkspaceWritable(runtime.info.permissions.writable);
     const normalized = normalizeWorkspaceUserPath(request.pathRel);
     const absolutePath = resolveWorkspacePath(runtime.info.rootPath, normalized);
     await mkdir(path.dirname(absolutePath), { recursive: true });
@@ -178,6 +183,7 @@ export class FileSystemService {
 
   async writeBinaryAtomic(request: FileWriteBinaryAtomicRequest): Promise<FileWriteResponse> {
     const runtime = this.workspaces.requireWorkspace(request.workspaceId);
+    assertWorkspaceWritable(runtime.info.permissions.writable);
     const normalized = normalizeWorkspaceUserPath(request.pathRel);
     const absolutePath = resolveWorkspacePath(runtime.info.rootPath, normalized);
     await mkdir(path.dirname(absolutePath), { recursive: true });
@@ -266,6 +272,7 @@ export class FileSystemService {
 
   async create(request: FileCreateRequest): Promise<{ ok: boolean; affectedPaths: string[] }> {
     const runtime = this.workspaces.requireWorkspace(request.workspaceId);
+    assertWorkspaceWritable(runtime.info.permissions.writable);
     const normalized = normalizeWorkspaceUserPath(request.pathRel);
     const absolutePath = resolveWorkspacePath(runtime.info.rootPath, normalized);
     if (request.kind === "directory") {
@@ -278,25 +285,118 @@ export class FileSystemService {
     return { ok: true, affectedPaths: [normalized] };
   }
 
+  async previewRename(request: FileRenamePreviewRequest): Promise<RenameReferencePreview> {
+    const runtime = this.workspaces.requireWorkspace(request.workspaceId);
+    const source = normalizeWorkspaceUserPath(request.sourcePathRel);
+    const target = normalizeWorkspaceUserPath(request.targetPathRel);
+    const changes = isMarkdownPath(source) && isMarkdownPath(target)
+      ? await collectReferenceChanges(runtime.info.rootPath, source, target)
+      : [];
+    return { sourcePathRel: source, targetPathRel: target, changes: changes.map((change) => ({ pathRel: change.pathRel, before: change.before, after: change.after, replacements: change.replacements })) };
+  }
+
+  async previewTagRename(request: TagRenamePreviewRequest): Promise<TagRenamePreview> {
+    const runtime = this.workspaces.requireWorkspace(request.workspaceId);
+    await runtime.indexTask;
+    const changes = await collectTagRenameChanges(runtime.info.rootPath, runtime.db.listPathsForTag(request.sourceTag), request.sourceTag, request.targetTag);
+    return {
+      sourceTag: request.sourceTag,
+      targetTag: request.targetTag,
+      changes,
+      replacements: changes.reduce((sum, change) => sum + change.replacements, 0)
+    };
+  }
+
+  async applyTagRename(request: TagRenameApplyRequest): Promise<TagRenameApplyResponse> {
+    const runtime = this.workspaces.requireWorkspace(request.workspaceId);
+    await runtime.indexTask;
+    assertWorkspaceWritable(runtime.info.permissions.writable);
+    const changes = await collectTagRenameChanges(runtime.info.rootPath, runtime.db.listPathsForTag(request.sourceTag), request.sourceTag, request.targetTag);
+    for (const change of changes) {
+      if (request.expectedBaseHashes[change.pathRel] !== change.baseHash) {
+        throw new Error(`Tag rename conflict: ${change.pathRel}`);
+      }
+    }
+    const expectedPaths = Object.keys(request.expectedBaseHashes).sort();
+    const actualPaths = changes.map((change) => change.pathRel).sort();
+    if (expectedPaths.length !== actualPaths.length || expectedPaths.some((pathRel, index) => pathRel !== actualPaths[index])) {
+      throw new Error("Tag rename conflict: affected files changed after preview");
+    }
+
+    const applied: typeof changes = [];
+    try {
+      for (const change of changes) {
+        const absolutePath = resolveWorkspacePath(runtime.info.rootPath, change.pathRel);
+        const current = await readFile(absolutePath, "utf8");
+        if (sha256Text(current) !== change.baseHash) throw new Error(`Tag rename conflict: ${change.pathRel}`);
+        await this.history.createSnapshot(runtime.info.rootPath, runtime.db, change.pathRel, "manual", current);
+        await writeTextAtomic(absolutePath, change.after, "tag-rename");
+        applied.push(change);
+      }
+      for (const change of changes) await this.indexer.indexPathRel(runtime.info.rootPath, change.pathRel, runtime.db);
+      await runtime.db.save();
+    } catch (error) {
+      for (const change of [...applied].reverse()) {
+        await writeTextAtomic(resolveWorkspacePath(runtime.info.rootPath, change.pathRel), change.before, "tag-rollback").catch(() => undefined);
+      }
+      for (const change of applied) await this.indexer.indexPathRel(runtime.info.rootPath, change.pathRel, runtime.db).catch(() => undefined);
+      await runtime.db.save().catch(() => undefined);
+      throw error;
+    }
+    return {
+      affectedPaths: changes.map((change) => change.pathRel),
+      replacements: changes.reduce((sum, change) => sum + change.replacements, 0)
+    };
+  }
+
   async rename(request: FileRenameRequest): Promise<{ ok: boolean; affectedPaths: string[]; referenceUpdate?: { updated: number } }> {
     const runtime = this.workspaces.requireWorkspace(request.workspaceId);
+    assertWorkspaceWritable(runtime.info.permissions.writable);
     const source = normalizeWorkspaceUserPath(request.sourcePathRel);
     const target = normalizeWorkspaceUserPath(request.targetPathRel);
     const sourcePath = resolveWorkspacePath(runtime.info.rootPath, source);
     const targetPath = resolveWorkspacePath(runtime.info.rootPath, target);
+    const referenceChanges = request.updateReferences && isMarkdownPath(source) && isMarkdownPath(target)
+      ? await collectReferenceChanges(runtime.info.rootPath, source, target)
+      : [];
     await mkdir(path.dirname(targetPath), { recursive: true });
-    await rename(sourcePath, targetPath);
-    runtime.db.removeFile(source);
-    await this.indexer.indexPathRel(runtime.info.rootPath, target, runtime.db);
+    let renamed = false;
+    const applied: typeof referenceChanges = [];
+    try {
+      await rename(sourcePath, targetPath);
+      renamed = true;
+      for (const change of referenceChanges) {
+        const absolutePath = resolveWorkspacePath(runtime.info.rootPath, change.pathRel);
+        const current = await readFile(absolutePath, "utf8");
+        if (sha256Text(current) !== change.baseHash) {
+          throw new Error(`Reference update conflict: ${change.pathRel}`);
+        }
+        await this.history.createSnapshot(runtime.info.rootPath, runtime.db, change.pathRel, "manual", current);
+        const tmpPath = `${absolutePath}.${process.pid}.${Date.now()}.rename.tmp`;
+        await writeFile(tmpPath, change.after, "utf8");
+        await rename(tmpPath, absolutePath);
+        applied.push(change);
+      }
+      runtime.db.removeFile(source);
+      await this.indexer.indexPathRel(runtime.info.rootPath, target, runtime.db);
+      for (const change of referenceChanges) await this.indexer.indexPathRel(runtime.info.rootPath, change.pathRel, runtime.db);
+    } catch (error) {
+      for (const change of [...applied].reverse()) {
+        await writeFile(resolveWorkspacePath(runtime.info.rootPath, change.pathRel), change.before, "utf8").catch(() => undefined);
+      }
+      if (renamed) await rename(targetPath, sourcePath).catch(() => undefined);
+      throw error;
+    }
     return {
       ok: true,
-      affectedPaths: [source, target],
-      referenceUpdate: { updated: 0 }
+      affectedPaths: [source, target, ...referenceChanges.map((change) => change.pathRel)],
+      referenceUpdate: { updated: referenceChanges.reduce((sum, change) => sum + change.replacements, 0) }
     };
   }
 
   async trash(request: FileTrashRequest): Promise<{ ok: boolean; affectedPaths: string[] }> {
     const runtime = this.workspaces.requireWorkspace(request.workspaceId);
+    assertWorkspaceWritable(runtime.info.permissions.writable);
     const normalized = normalizeWorkspaceUserPath(request.pathRel);
     const absolutePath = resolveWorkspacePath(runtime.info.rootPath, normalized);
     try {
@@ -352,6 +452,79 @@ export class FileSystemService {
     }
     return false;
   }
+}
+
+interface ReferenceChangeInternal {
+  pathRel: string;
+  before: string;
+  after: string;
+  replacements: number;
+  baseHash: string;
+}
+
+async function collectReferenceChanges(rootPath: string, sourcePathRel: string, targetPathRel: string): Promise<ReferenceChangeInternal[]> {
+  const tree = await readTree(rootPath, rootPath, false);
+  const markdownFiles = flattenTreeNodes(tree).filter((node) => node.kind === "markdown" && node.pathRel !== sourcePathRel);
+  const changes: ReferenceChangeInternal[] = [];
+  for (const node of markdownFiles) {
+    const absolutePath = resolveWorkspacePath(rootPath, node.pathRel);
+    const before = await readFile(absolutePath, "utf8");
+    const result = updateMarkdownReferences(before, node.pathRel, sourcePathRel, targetPathRel);
+    if (result.replacements) {
+      changes.push({ pathRel: node.pathRel, before, after: result.content, replacements: result.replacements, baseHash: sha256Text(before) });
+    }
+  }
+  return changes;
+}
+
+function flattenTreeNodes(nodes: FileTreeNode[]): FileTreeNode[] {
+  return nodes.flatMap((node) => [node, ...(node.children ? flattenTreeNodes(node.children) : [])]);
+}
+
+export function updateMarkdownReferences(content: string, documentPathRel: string, sourcePathRel: string, targetPathRel: string): { content: string; replacements: number } {
+  let replacements = 0;
+  const sourceStem = sourcePathRel.replace(/\.(?:md|markdown)$/i, "");
+  const targetStem = targetPathRel.replace(/\.(?:md|markdown)$/i, "");
+  const sourceName = path.posix.basename(sourceStem);
+  const targetName = path.posix.basename(targetStem);
+  let updated = content.replace(/\[\[([^\]|#]+)(#[^\]|]+)?(\|[^\]]+)?\]\]/g, (full, rawTarget: string, heading = "", alias = "") => {
+    const normalized = rawTarget.trim().replace(/^\.\//, "");
+    if (![sourcePathRel, sourceStem, sourceName].some((candidate) => candidate.toLowerCase() === normalized.toLowerCase())) return full;
+    replacements += 1;
+    const nextTarget = normalized.includes("/") ? targetStem : targetName;
+    return `[[${nextTarget}${heading}${alias}]]`;
+  });
+  const documentDir = path.posix.dirname(documentPathRel);
+  updated = updated.replace(/\]\((<?)([^)\s>]+)(>?)\)/g, (full, open: string, rawHref: string, close: string) => {
+    if (/^[a-z][a-z\d+.-]*:/i.test(rawHref) || rawHref.startsWith("#")) return full;
+    const [rawPath, fragment] = rawHref.split(/(?=[?#])/, 2);
+    let decoded = rawPath;
+    try { decoded = decodeURIComponent(rawPath); } catch { /* keep raw path */ }
+    const resolved = path.posix.normalize(path.posix.join(documentDir === "." ? "" : documentDir, decoded));
+    if (resolved.toLowerCase() !== sourcePathRel.toLowerCase()) return full;
+    let relative = path.posix.relative(documentDir === "." ? "" : documentDir, targetPathRel);
+    if (!relative) relative = path.posix.basename(targetPathRel);
+    replacements += 1;
+    return `](${open}${encodeURI(relative)}${fragment ?? ""}${close})`;
+  });
+  return { content: updated, replacements };
+}
+
+async function collectTagRenameChanges(rootPath: string, paths: string[], sourceTag: string, targetTag: string): Promise<TagRenamePreview["changes"]> {
+  const changes: TagRenamePreview["changes"] = [];
+  for (const pathRel of paths) {
+    const before = await readFile(resolveWorkspacePath(rootPath, pathRel), "utf8");
+    const renamed = renameMarkdownTagReferences(before, sourceTag, targetTag);
+    if (!renamed.replacements || renamed.content === before) continue;
+    changes.push({ pathRel, baseHash: sha256Text(before), before, after: renamed.content, replacements: renamed.replacements });
+  }
+  return changes;
+}
+
+async function writeTextAtomic(absolutePath: string, content: string, operation: string): Promise<void> {
+  const tmpPath = `${absolutePath}.${process.pid}.${Date.now()}.${operation}.tmp`;
+  await writeFile(tmpPath, content, "utf8");
+  await rename(tmpPath, absolutePath);
 }
 
 async function readTree(rootPath: string, absolutePath: string, showHidden: boolean): Promise<FileTreeNode[]> {
@@ -415,6 +588,14 @@ function bufferToArrayBuffer(buffer: Buffer): ArrayBuffer {
   const copy = new Uint8Array(buffer.byteLength);
   copy.set(buffer);
   return copy.buffer;
+}
+
+function assertWorkspaceWritable(writable: boolean): void {
+  if (!writable) {
+    const error = new Error("Workspace is read-only");
+    error.name = "WorkspaceReadOnlyError";
+    throw error;
+  }
 }
 
 function binaryDataToBuffer(data: ArrayBuffer | ArrayBufferView): Buffer {

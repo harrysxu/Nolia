@@ -12,11 +12,11 @@ test("outline panel is visible and jumps to a heading", async ({ page }, testInf
 
   await page.goto("/");
   await expect(page.locator(".statusbar")).toContainText("outline.md");
-  const navOutlineButton = page.locator(".app-nav").getByRole("button", { name: "目录" });
-  await expect(navOutlineButton).toBeVisible();
-  await navOutlineButton.click();
+  const inspectorOutlineTab = page.getByRole("tablist", { name: "文档检查器" }).getByRole("tab", { name: "目录" });
+  await expect(inspectorOutlineTab).toBeVisible();
+  await inspectorOutlineTab.click();
   await expect(page.locator(".right-panel")).toBeVisible();
-  await expect(page.locator(".right-panel").getByText("目录")).toBeVisible();
+  await expect(page.locator(".right-panel-header").getByText("目录", { exact: true })).toBeVisible();
   await expect(page.locator(".right-panel").getByRole("button", { name: "Overview" })).toBeVisible();
   await expect(page.locator(".right-panel").getByRole("button", { name: "Deep Section" })).toBeVisible();
   await expect(page.locator(".right-panel").getByRole("button", { name: "Nested Section" })).toBeVisible();

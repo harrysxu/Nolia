@@ -84,8 +84,10 @@ export function acceleratorForCommand(command: string | undefined, platform: Nod
       return acceleratorForModifier(",", platform);
     case "file.new":
       return acceleratorForModifier("N", platform);
-    case "workspace.open":
+    case "file.open":
       return acceleratorForModifier("O", platform);
+    case "workspace.open":
+      return acceleratorForModifier("Shift+O", platform);
     case "document.save":
       return acceleratorForModifier("S", platform);
     case "document.export":

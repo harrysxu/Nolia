@@ -38,5 +38,31 @@ module.exports = [
         ...globals.browser
       }
     }
+  },
+  {
+    files: ["src/renderer/features/**/*.{ts,tsx}"],
+    rules: {
+      "no-restricted-imports": [
+        "error",
+        {
+          paths: [
+            {
+              name: "../../App",
+              message: "Feature modules must not depend on the renderer shell. Pass shell capabilities through typed props or feature services."
+            },
+            {
+              name: "../../App.tsx",
+              message: "Feature modules must not depend on the renderer shell. Pass shell capabilities through typed props or feature services."
+            }
+          ],
+          patterns: [
+            {
+              group: ["**/AppShell", "**/AppShell.*"],
+              message: "Feature modules must not depend on the renderer shell. Pass shell capabilities through typed props or feature services."
+            }
+          ]
+        }
+      ]
+    }
   }
 ];

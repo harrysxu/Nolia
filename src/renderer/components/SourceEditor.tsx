@@ -3,6 +3,7 @@ import CodeMirror, { type ReactCodeMirrorRef } from "@uiw/react-codemirror";
 import { insertNewlineContinueMarkup, markdown, markdownKeymap } from "@codemirror/lang-markdown";
 import { keymap, EditorView, type ViewUpdate } from "@codemirror/view";
 import { exactMatchIndex, findPlainTextMatches, nextMatchIndex, type FindReplaceOptions, type FindReplaceResult } from "./findReplace";
+import { wikiLinkCompletionExtension, type WikiLinkCompletionTarget } from "../features/documents/wikiLinkCompletion";
 
 interface SourceEditorProps {
   value: string;
@@ -11,6 +12,8 @@ interface SourceEditorProps {
   onOpenFindReplace?: () => void;
   readOnly?: boolean;
   showLineNumbers?: boolean;
+  wikiLinkTargets?: WikiLinkCompletionTarget[];
+  onCreateWikiLinkTarget?: (title: string) => void;
 }
 
 export interface SourceEditorAiSnapshot {
@@ -30,17 +33,24 @@ export interface SourceEditorHandle {
   replaceAll: (query: string, replacement: string, options?: FindReplaceOptions) => FindReplaceResult;
 }
 
-export const SourceEditor = forwardRef<SourceEditorHandle, SourceEditorProps>(function SourceEditor({ value, onChange, onSelectionLengthChange, onOpenFindReplace, readOnly, showLineNumbers = true }, ref) {
+export const SourceEditor = forwardRef<SourceEditorHandle, SourceEditorProps>(function SourceEditor({ value, onChange, onSelectionLengthChange, onOpenFindReplace, readOnly, showLineNumbers = true, wikiLinkTargets = [], onCreateWikiLinkTarget }, ref) {
   const codeMirrorRef = useRef<ReactCodeMirrorRef>(null);
+  const onOpenFindReplaceRef = useRef(onOpenFindReplace);
+  const onSelectionLengthChangeRef = useRef(onSelectionLengthChange);
+  const onCreateWikiLinkTargetRef = useRef(onCreateWikiLinkTarget);
+  onOpenFindReplaceRef.current = onOpenFindReplace;
+  onSelectionLengthChangeRef.current = onSelectionLengthChange;
+  onCreateWikiLinkTargetRef.current = onCreateWikiLinkTarget;
   const extensions = useMemo(
     () => [
       markdown({ addKeymap: false }),
+      wikiLinkCompletionExtension(wikiLinkTargets, readOnly ? undefined : (title) => onCreateWikiLinkTargetRef.current?.(title)),
       keymap.of([
         {
           key: "Mod-f",
           run: () => {
-            onOpenFindReplace?.();
-            return Boolean(onOpenFindReplace);
+            onOpenFindReplaceRef.current?.();
+            return Boolean(onOpenFindReplaceRef.current);
           }
         },
         { key: "Enter", run: insertNewlineContinueMarkup },
@@ -51,10 +61,10 @@ export const SourceEditor = forwardRef<SourceEditorHandle, SourceEditorProps>(fu
         if (!update.selectionSet && !update.docChanged) {
           return;
         }
-        onSelectionLengthChange?.(selectionLength(update));
+        onSelectionLengthChangeRef.current?.(selectionLength(update));
       })
     ],
-    [onOpenFindReplace, onSelectionLengthChange]
+    [readOnly, wikiLinkTargets]
   );
 
   useImperativeHandle(ref, () => ({

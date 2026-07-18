@@ -9,7 +9,7 @@ export const WORKSPACE_DB_FILE = "workspace.sqlite";
 export const MARKDOWN_EXTENSIONS = [".md", ".markdown", ".mdown", ".mkd"];
 
 export const DEFAULT_SETTINGS = {
-  language: "system",
+  language: "zh-CN",
   theme: "system",
   editorMode: "wysiwyg",
   editorWidth: "full",
@@ -17,6 +17,11 @@ export const DEFAULT_SETTINGS = {
   focusMode: false,
   autoSaveDelayMs: 800,
   attachmentStrategy: "workspace_assets",
+  inboxDirectory: "Inbox",
+  quickCaptureFilePattern: "YYYY-MM",
+  dailyNoteDirectory: "Daily",
+  dailyNoteFilePattern: "YYYY-MM-DD",
+  templatesDirectory: "Templates",
   pluginSafeMode: false,
   ai: {
     enabled: false,

@@ -2,6 +2,38 @@
 
 本文记录 Nolia 的用户可见变更。格式参考 Keep a Changelog，但按项目当前节奏保持简洁。
 
+## Unreleased - Nolia 一次性交付目标版本
+
+### Added
+
+- Finder/系统“打开方式”文件作为可与工作区共存的外部标签打开，支持多文件串行队列、路径去重、最近文件和临时文件夹上下文。
+- 外部文件支持恢复草稿、BOM/EOL 保真、只读/缺失状态、磁盘变化监听、冲突比较、另存为、Markdown/HTML/PDF 导出、相对链接和同目录附件。
+- 原生窗口标题、represented filename、dirty 标记与 renderer 文档状态同步；关闭标签、窗口和退出统一经过脏文档确认握手。
+- 工作区初始化确认、只读缓存、主页、健康页、Tab/草稿/会话恢复。
+- Inbox、Daily Note、模板变量、属性、标签筛选与事务重命名、双链标题补全和局部关系图。
+- 精确/混合统一搜索、语义降级提示和保存搜索。
+- 可恢复 AI 任务、多文件部分审批、持久事务、回滚和 hash 校验撤销。
+- Plugin API v3 隔离 iframe、MessagePort RPC、权限 broker、realpath/symlink 防护和受限网络代理。
+- 本地轮转性能 JSONL，不启用外部遥测。
+
+### Changed
+
+- `Command/Ctrl+O` 改为打开文件，`Command/Ctrl+Shift+O` 打开工作区，`Command/Ctrl+W` 关闭标签，窗口关闭使用 `Command/Ctrl+Shift+W`。
+- 文件关联扩展为 `.md`、`.markdown`、`.mdown` 和 `.mkd`；外部文件不再自动进入沉浸模式。
+- 一级导航固定为文件、发现和 AI；文档检查器统一目录、属性、关系和历史。
+- 1180px 以下检查器改为可关闭抽屉，最小目标窗口为 780 x 520。
+- Markdown 解析/渲染迁移到 Comlink worker；文件树使用虚拟列表和序列 patch。
+- v2 插件仅用于发现和迁移诊断，不能启用或执行。
+
+### Security
+
+- 设置加载和写入统一校验工作区相对路径，拒绝 traversal、绝对路径和跨平台非法名称。
+- 标签与引用批量修改使用 base hash、历史快照、原子写入和失败回滚。
+
+### Fixed
+
+- 修复 macOS universal 包合并大型 asar 后 preload 读取偏移错误、应用窗口显示压缩源码的问题；通用包保留双架构可执行文件并使用未经重写的应用资源。
+
 ## 1.0.0 - 2026-06-28
 
 升级注意事项见 [Nolia 1.0.0 升级说明](UPGRADE.md)。

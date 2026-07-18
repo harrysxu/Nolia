@@ -62,7 +62,7 @@ export const proposeWorkspacePatchTool: AiTool<Input> = {
       if (operation.type === "createFile") {
         const pathRel = normalizeWorkspacePatchFilePath(operation.pathRel);
         await assertWorkspacePathMissing(context, pathRel);
-        operations.push({ ...operation, pathRel });
+        operations.push({ ...operation, pathRel, baseHash: "new" });
         if (!firstSourceHash) {
           firstSourceHash = sha256Text("");
           firstExistingHash = "new";
@@ -72,7 +72,7 @@ export const proposeWorkspacePatchTool: AiTool<Input> = {
       if (operation.type === "createDirectory") {
         const pathRel = normalizeWorkspaceOperationPath(operation.pathRel);
         await assertWorkspacePathMissing(context, pathRel);
-        operations.push({ type: "createDirectory" as const, pathRel });
+        operations.push({ type: "createDirectory" as const, pathRel, baseHash: "new" });
         if (!firstSourceHash) {
           firstSourceHash = sha256Text("");
           firstExistingHash = "new";
@@ -84,7 +84,7 @@ export const proposeWorkspacePatchTool: AiTool<Input> = {
         const targetPathRel = normalizeWorkspaceOperationPath(operation.targetPathRel);
         await assertWorkspacePathExists(context, sourcePathRel);
         await assertWorkspacePathMissing(context, targetPathRel);
-        operations.push({ type: "movePath" as const, sourcePathRel, targetPathRel });
+        operations.push({ type: "movePath" as const, sourcePathRel, targetPathRel, baseHash: "exists", targetBaseHash: "new" });
         if (!firstSourceHash) {
           firstSourceHash = sha256Text(sourcePathRel);
           firstExistingHash = "move";
@@ -98,8 +98,8 @@ export const proposeWorkspacePatchTool: AiTool<Input> = {
       }
       const beforeText = operation.type === "append" ? current.content : operation.beforeText || current.content;
       const normalizedOperation = operation.type === "append"
-        ? { type: "append" as const, pathRel, afterText: operation.afterText }
-        : { type: "replaceDocument" as const, pathRel, beforeText, afterText: operation.afterText };
+        ? { type: "append" as const, pathRel, afterText: operation.afterText, baseHash: current.sha256 }
+        : { type: "replaceDocument" as const, pathRel, beforeText, afterText: operation.afterText, baseHash: current.sha256 };
       operations.push(normalizedOperation);
       if (!firstSourceHash) {
         firstSourceHash = current.sha256;

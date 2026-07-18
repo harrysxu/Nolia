@@ -261,7 +261,7 @@ export interface AiPatchProposal {
   operations: AiPatchOperation[];
 }
 
-export type AiPatchOperation =
+export type AiPatchOperation = (
   | {
       type: "replaceRange";
       pathRel?: string;
@@ -299,6 +299,11 @@ export type AiPatchOperation =
       type: "movePath";
       sourcePathRel: string;
       targetPathRel: string;
+    }) & {
+      id?: string;
+      dependsOn?: string[];
+      baseHash?: string;
+      targetBaseHash?: string;
     };
 
 export type AiRunEvent =
@@ -361,15 +366,20 @@ export interface AiWriteTransaction {
   proposalId: string;
   workspaceId: string;
   createdAt: number;
+  status: "prepared" | "committed" | "rolled_back" | "partial_failure" | "rollback_failed";
   operations: Array<{
     pathRel: string;
     targetPathRel?: string;
     beforeSnapshotId?: number;
+    beforeContent?: string;
     beforeHash?: string;
     afterHash?: string;
     createdFile?: boolean;
     createdDirectory?: boolean;
     movedPath?: boolean;
+    operationId?: string;
+    status?: "pending" | "applied" | "rolled_back" | "failed";
+    error?: string;
   }>;
   undoneAt?: number;
 }
@@ -407,6 +417,7 @@ export interface AiTaskCancelRequest {
 export interface AiTaskApprovalRequest {
   taskId: string;
   approvalId: string;
+  selectedOperationIds?: string[];
 }
 
 export interface AiTaskRejectRequest extends AiTaskApprovalRequest {

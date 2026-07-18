@@ -1,4 +1,4 @@
-import { rename, readFile, writeFile } from "node:fs/promises";
+import { copyFile, rename, readFile, rm, stat, writeFile } from "node:fs/promises";
 import initSqlJs from "sql.js";
 import type { SqlJsStatic, SqlValue } from "sql.js";
 
@@ -11,7 +11,9 @@ import type {
   SearchResultItem,
   SearchQueryResponse
 } from "../../shared/types";
+import type { DocumentDraft, LocalGraphEdge, LocalGraphNode, LocalGraphResponse, SavedSearch, WorkspaceSessionSnapshot } from "../../shared/contracts";
 import type { AiEmbeddingSettings, AiProviderId, AiSemanticIndexStatus } from "../../shared/ai";
+import type { AiTaskSnapshot } from "../../shared/ai";
 import type { SearchQueryRequest } from "../../shared/ipc";
 import { basenameWithoutExt } from "../utils/filePaths";
 
@@ -59,10 +61,11 @@ export interface SemanticIndexMetadata {
 }
 
 const SEMANTIC_INDEX_KEY = "ai.semanticIndex";
+const CURRENT_SCHEMA_VERSION = 4;
 
 let sqlJsPromise: Promise<SqlJsStatic> | undefined;
 
-export class WorkspaceDb {
+export class WorkspaceRepository {
   private indexVersion = 0;
   private ftsEnabled = true;
   private dirty = false;
@@ -74,12 +77,18 @@ export class WorkspaceDb {
     private readonly db: Db
   ) {}
 
-  static async open(dbPath: string): Promise<WorkspaceDb> {
+  static async open(dbPath: string): Promise<WorkspaceRepository> {
     const SQL = await getSqlJs();
+    const databaseExisted = await fileExists(dbPath);
     let db = await openSqlDatabase(SQL, dbPath);
-    let workspaceDb = new WorkspaceDb(dbPath, db);
+    let workspaceDb = new WorkspaceRepository(dbPath, db);
     try {
       workspaceDb.ensureSchema();
+      const previousVersion = workspaceDb.getSchemaVersion();
+      if (databaseExisted && previousVersion < CURRENT_SCHEMA_VERSION) {
+        await backupBeforeMigration(dbPath, CURRENT_SCHEMA_VERSION);
+      }
+      workspaceDb.runMigrations(previousVersion);
       return workspaceDb;
     } catch (error) {
       db.close();
@@ -90,8 +99,9 @@ export class WorkspaceDb {
 
     await backupCorruptDatabase(dbPath);
     db = new SQL.Database();
-    workspaceDb = new WorkspaceDb(dbPath, db);
+    workspaceDb = new WorkspaceRepository(dbPath, db);
     workspaceDb.ensureSchema();
+    workspaceDb.runMigrations(0);
     await workspaceDb.save();
     return workspaceDb;
   }
@@ -147,7 +157,15 @@ export class WorkspaceDb {
     }
     this.dirty = false;
     const bytes = this.db.export();
-    await writeFile(this.dbPath, Buffer.from(bytes));
+    const temporaryPath = `${this.dbPath}.${process.pid}.${Date.now()}.tmp`;
+    try {
+      await writeFile(temporaryPath, Buffer.from(bytes));
+      await rename(temporaryPath, this.dbPath);
+    } catch (error) {
+      this.dirty = true;
+      await rm(temporaryPath, { force: true }).catch(() => undefined);
+      throw error;
+    }
   }
 
   markAllFilesDeleted(): void {
@@ -244,6 +262,7 @@ export class WorkspaceDb {
         ]
       );
       this.replaceTags(fileId, parsed.tags);
+      this.replacePropertiesAndTasks(fileId, parsed);
       this.replaceWikiLinks(fileId, parsed);
       this.replaceMarkdownLinks(fileId, parsed);
       this.replaceAttachmentRefs(fileId, parsed);
@@ -267,9 +286,8 @@ export class WorkspaceDb {
       this.db.run("DELETE FROM attachment_refs WHERE file_id = ?", [fileId]);
       if (this.ftsEnabled) {
         this.db.run("DELETE FROM document_fts WHERE file_id = ?", [fileId]);
-      } else {
-        this.db.run("DELETE FROM document_search WHERE file_id = ?", [fileId]);
       }
+      this.db.run("DELETE FROM document_search WHERE file_id = ?", [fileId]);
       this.db.run("DELETE FROM semantic_chunks WHERE file_id = ?", [fileId]);
       this.refreshTagCounts();
       this.indexVersion += 1;
@@ -536,8 +554,13 @@ export class WorkspaceDb {
     const limit = request.limit ?? 40;
     const offset = request.offset ?? 0;
     const query = request.query.trim();
+    const pathFilter = request.filters?.path;
+    const tagFilter = request.filters?.tag?.toLowerCase();
     if (!query) {
-      const items = this.listRecentFiles(limit).map((item, index) => ({
+      const source = tagFilter
+        ? this.listDocumentsForTag(tagFilter, limit, offset).map((item) => ({ ...item, openedAt: item.updatedAt }))
+        : this.listRecentFiles(limit);
+      const items = source.filter((item) => !pathFilter || item.pathRel.startsWith(pathFilter)).map((item, index) => ({
         pathRel: item.pathRel,
         title: item.title,
         score: index,
@@ -546,12 +569,10 @@ export class WorkspaceDb {
       return { items, indexVersion: this.indexVersion, isPartial: false };
     }
 
-    const pathFilter = request.filters?.path;
-    const tagFilter = request.filters?.tag?.toLowerCase();
     const ftsQuery = buildFtsQuery(query);
 
     try {
-      if (this.ftsEnabled) {
+      if (this.ftsEnabled && ftsQuery) {
         const rows = this.all(
           `SELECT file_id, path, title, snippet(document_fts, 4, '<mark>', '</mark>', ' ... ', 12) AS snippet,
                   bm25(document_fts) AS rank
@@ -570,7 +591,9 @@ export class WorkspaceDb {
             snippets: [readString(row.snippet)].filter(Boolean)
           }))
           .filter((item) => matchesFilters(item.pathRel, tagFilter, pathFilter, this));
-        return { items, indexVersion: this.indexVersion, isPartial: false };
+        if (items.length) {
+          return { items, indexVersion: this.indexVersion, isPartial: false };
+        }
       }
     } catch {
       this.ftsEnabled = false;
@@ -578,13 +601,14 @@ export class WorkspaceDb {
 
     const like = `%${query.replace(/[%_\\]/g, "\\$&")}%`;
     const rows = this.all(
-      `SELECT f.path_rel AS pathRel, COALESCE(d.title, f.name) AS title, d.plain_text AS plainText
-       FROM documents d
-       JOIN files f ON f.id = d.file_id
-       WHERE f.deleted = 0 AND (d.title LIKE ? ESCAPE '\\' OR d.plain_text LIKE ? ESCAPE '\\' OR f.path_rel LIKE ? ESCAPE '\\')
+      `SELECT s.path AS pathRel, COALESCE(NULLIF(s.title, ''), f.name) AS title, s.body AS searchableBody
+       FROM document_search s
+       JOIN files f ON f.id = s.file_id
+       LEFT JOIN documents d ON d.file_id = s.file_id
+       WHERE f.deleted = 0 AND (s.title LIKE ? ESCAPE '\\' OR s.body LIKE ? ESCAPE '\\' OR s.path LIKE ? ESCAPE '\\' OR s.tags LIKE ? ESCAPE '\\')
        ORDER BY d.updated_at DESC
        LIMIT ? OFFSET ?`,
-      [like, like, like, limit, offset]
+      [like, like, like, like, limit, offset]
     );
 
     const items = rows
@@ -592,7 +616,7 @@ export class WorkspaceDb {
         pathRel: readString(row.pathRel),
         title: readString(row.title),
         score: 0,
-        snippets: [buildSnippet(readString(row.plainText), query)].filter(Boolean)
+        snippets: [buildSnippet(readString(row.searchableBody), query)].filter(Boolean)
       }))
       .filter((item) => matchesFilters(item.pathRel, tagFilter, pathFilter, this));
 
@@ -606,6 +630,42 @@ export class WorkspaceDb {
         displayName: readString(row.displayName),
         count: readNumber(row.count)
       }));
+  }
+
+  listPathsForTag(tag: string): string[] {
+    return this.all(
+      `SELECT f.path_rel AS pathRel
+       FROM document_tags dt
+       JOIN tags t ON t.id = dt.tag_id
+       JOIN files f ON f.id = dt.file_id
+       WHERE f.deleted = 0 AND t.name = ?
+       ORDER BY f.path_rel`,
+      [tag.toLowerCase()]
+    ).map((row) => readString(row.pathRel));
+  }
+
+  listLinkTargets(): Array<{ pathRel: string; title: string }> {
+    return this.all(
+      `SELECT f.path_rel AS pathRel, COALESCE(d.title, f.name) AS title
+       FROM files f
+       LEFT JOIN documents d ON d.file_id = f.id
+       WHERE f.deleted = 0 AND f.kind = 'markdown'
+       ORDER BY lower(COALESCE(d.title, f.name)), lower(f.path_rel)`
+    ).map((row) => ({ pathRel: readString(row.pathRel), title: readString(row.title) }));
+  }
+
+  private listDocumentsForTag(tag: string, limit: number, offset: number): Array<{ pathRel: string; title: string; updatedAt: number }> {
+    return this.all(
+      `SELECT f.path_rel AS pathRel, COALESCE(d.title, f.name) AS title, d.updated_at AS updatedAt
+       FROM document_tags dt
+       JOIN tags t ON t.id = dt.tag_id
+       JOIN files f ON f.id = dt.file_id
+       LEFT JOIN documents d ON d.file_id = f.id
+       WHERE f.deleted = 0 AND t.name = ?
+       ORDER BY d.updated_at DESC
+       LIMIT ? OFFSET ?`,
+      [tag, limit, offset]
+    ).map((row) => ({ pathRel: readString(row.pathRel), title: readString(row.title), updatedAt: readNumber(row.updatedAt) }));
   }
 
   getBacklinks(pathRel: string, includeUnlinkedMentions = false): BacklinksResponse {
@@ -690,6 +750,32 @@ export class WorkspaceDb {
     ).map(snapshotEntryFromRow);
   }
 
+  listSnapshotsForRetention(pathRel?: string): FileHistoryEntry[] {
+    const params: SqlValue[] = [];
+    const pathClause = pathRel ? "WHERE f.path_rel = ?" : "";
+    if (pathRel) {
+      params.push(pathRel);
+    }
+    return this.all(
+      `SELECT s.id, f.path_rel AS pathRel, s.snapshot_path AS snapshotPath, s.sha256, s.reason, s.size, s.created_at AS createdAt
+       FROM snapshots s
+       JOIN files f ON f.id = s.file_id
+       ${pathClause}
+       ORDER BY s.created_at DESC, s.id DESC`,
+      params
+    ).map(snapshotEntryFromRow);
+  }
+
+  deleteSnapshots(snapshotIds: number[]): void {
+    if (!snapshotIds.length) {
+      return;
+    }
+    this.db.run(
+      `DELETE FROM snapshots WHERE id IN (${snapshotIds.map(() => "?").join(",")})`,
+      snapshotIds
+    );
+  }
+
   getSnapshot(snapshotId: number): FileHistoryEntry | undefined {
     const row = this.first(
       `SELECT s.id, f.path_rel AS pathRel, s.snapshot_path AS snapshotPath, s.sha256, s.reason, s.size, s.created_at AS createdAt
@@ -709,6 +795,160 @@ export class WorkspaceDb {
 
   getIndexVersion(): number {
     return this.indexVersion;
+  }
+
+  getSchemaVersion(): number {
+    const row = this.first("SELECT MAX(version) AS version FROM schema_migrations");
+    return readNumber(row?.version);
+  }
+
+  getHistoryBytes(): number {
+    return readNumber(this.first("SELECT COALESCE(SUM(size), 0) AS bytes FROM snapshots")?.bytes);
+  }
+
+  readSession(): WorkspaceSessionSnapshot | undefined {
+    const row = this.first("SELECT state_json AS stateJson FROM workspace_sessions WHERE id = 'current'");
+    if (!row) {
+      return undefined;
+    }
+    try {
+      return JSON.parse(readString(row.stateJson)) as WorkspaceSessionSnapshot;
+    } catch {
+      return undefined;
+    }
+  }
+
+  writeSession(session: WorkspaceSessionSnapshot): void {
+    this.db.run(
+      `INSERT INTO workspace_sessions (id, state_json, updated_at)
+       VALUES ('current', ?, ?)
+       ON CONFLICT(id) DO UPDATE SET state_json = excluded.state_json, updated_at = excluded.updated_at`,
+      [JSON.stringify(session), Date.now()]
+    );
+    this.scheduleSave(250);
+  }
+
+  listSavedSearches(): SavedSearch[] {
+    return this.all("SELECT value_json AS valueJson FROM saved_searches ORDER BY updated_at DESC").flatMap((row) => {
+      try {
+        return [JSON.parse(readString(row.valueJson)) as SavedSearch];
+      } catch {
+        return [];
+      }
+    });
+  }
+
+  saveSavedSearch(search: SavedSearch): SavedSearch[] {
+    this.db.run(
+      `INSERT INTO saved_searches (id, name, value_json, created_at, updated_at)
+       VALUES (?, ?, ?, ?, ?)
+       ON CONFLICT(id) DO UPDATE SET name = excluded.name, value_json = excluded.value_json, updated_at = excluded.updated_at`,
+      [search.id, search.name, JSON.stringify(search), search.createdAt, search.updatedAt]
+    );
+    this.scheduleSave(250);
+    return this.listSavedSearches();
+  }
+
+  deleteSavedSearch(searchId: string): SavedSearch[] {
+    this.db.run("DELETE FROM saved_searches WHERE id = ?", [searchId]);
+    this.scheduleSave(250);
+    return this.listSavedSearches();
+  }
+
+  listAiTasks(): AiTaskSnapshot[] {
+    return this.all("SELECT state_json AS stateJson FROM ai_tasks ORDER BY updated_at DESC").flatMap((row) => {
+      try {
+        return [JSON.parse(readString(row.stateJson)) as AiTaskSnapshot];
+      } catch {
+        return [];
+      }
+    });
+  }
+
+  readAiTask(taskId: string): AiTaskSnapshot | undefined {
+    const row = this.first("SELECT state_json AS stateJson FROM ai_tasks WHERE id = ?", [taskId]);
+    if (!row) return undefined;
+    try {
+      return JSON.parse(readString(row.stateJson)) as AiTaskSnapshot;
+    } catch {
+      return undefined;
+    }
+  }
+
+  saveAiTask(task: AiTaskSnapshot): void {
+    this.db.run(
+      `INSERT INTO ai_tasks (id, status, state_json, updated_at)
+       VALUES (?, ?, ?, ?)
+       ON CONFLICT(id) DO UPDATE SET status = excluded.status, state_json = excluded.state_json, updated_at = excluded.updated_at`,
+      [task.id, task.status, JSON.stringify(task), task.updatedAt]
+    );
+    this.dirty = true;
+  }
+
+  readDraft(pathRel: string): DocumentDraft | undefined {
+    const row = this.first("SELECT path_rel AS pathRel, content, base_hash AS baseHash, revision, updated_at AS updatedAt FROM document_drafts WHERE path_rel = ?", [pathRel]);
+    return row ? { pathRel: readString(row.pathRel), content: readString(row.content), baseHash: readString(row.baseHash), revision: readNumber(row.revision), updatedAt: readNumber(row.updatedAt) } : undefined;
+  }
+
+  writeDraft(draft: DocumentDraft): void {
+    this.db.run(
+      `INSERT INTO document_drafts (path_rel, content, base_hash, revision, updated_at)
+       VALUES (?, ?, ?, ?, ?)
+       ON CONFLICT(path_rel) DO UPDATE SET content = excluded.content, base_hash = excluded.base_hash, revision = excluded.revision, updated_at = excluded.updated_at`,
+      [draft.pathRel, draft.content, draft.baseHash, draft.revision, draft.updatedAt]
+    );
+    this.scheduleSave(200);
+  }
+
+  deleteDraft(pathRel: string): void {
+    this.db.run("DELETE FROM document_drafts WHERE path_rel = ?", [pathRel]);
+    this.scheduleSave(200);
+  }
+
+  getLocalGraph(pathRel: string, depth: 1 | 2, limit = 60): LocalGraphResponse {
+    const centerId = this.getFileId(pathRel);
+    if (!centerId) {
+      return { nodes: [], edges: [], depth, truncated: false };
+    }
+    const nodes = new Map<number, LocalGraphNode>();
+    const edges = new Map<string, LocalGraphEdge>();
+    const queue: Array<{ fileId: number; level: number }> = [{ fileId: centerId, level: 0 }];
+    const seen = new Set<number>();
+    let truncated = false;
+
+    while (queue.length) {
+      const current = queue.shift();
+      if (!current || seen.has(current.fileId)) {
+        continue;
+      }
+      seen.add(current.fileId);
+      const node = this.graphNode(current.fileId, current.level, current.fileId === centerId);
+      if (node) {
+        nodes.set(current.fileId, node);
+      }
+      if (current.level >= depth) {
+        continue;
+      }
+      for (const relation of this.graphNeighbors(current.fileId)) {
+        if (!nodes.has(relation.fileId) && nodes.size >= limit) {
+          truncated = true;
+          continue;
+        }
+        const nextNode = this.graphNode(relation.fileId, current.level + 1, false);
+        if (nextNode) {
+          nodes.set(relation.fileId, nextNode);
+        }
+        const source = String(relation.incoming ? relation.fileId : current.fileId);
+        const target = String(relation.incoming ? current.fileId : relation.fileId);
+        const edgeId = `${source}:${target}:${relation.relation}`;
+        edges.set(edgeId, { id: edgeId, source, target, relation: relation.relation });
+        if (!seen.has(relation.fileId)) {
+          queue.push({ fileId: relation.fileId, level: current.level + 1 });
+        }
+      }
+    }
+
+    return { nodes: [...nodes.values()], edges: [...edges.values()], depth, truncated };
   }
 
   private ensureSchema(): void {
@@ -843,6 +1083,11 @@ export class WorkspaceDb {
         body TEXT
       );
 
+      CREATE TABLE IF NOT EXISTS schema_migrations (
+        version INTEGER PRIMARY KEY,
+        applied_at INTEGER NOT NULL
+      );
+
       CREATE INDEX IF NOT EXISTS idx_files_kind ON files(kind);
       CREATE INDEX IF NOT EXISTS idx_files_mtime ON files(mtime_ms DESC);
       CREATE INDEX IF NOT EXISTS idx_files_deleted ON files(deleted);
@@ -873,6 +1118,111 @@ export class WorkspaceDb {
     }
   }
 
+  private runMigrations(previousVersion: number): void {
+    if (previousVersion >= CURRENT_SCHEMA_VERSION) {
+      return;
+    }
+    this.transaction(() => {
+      if (previousVersion < 1) {
+        this.db.run("INSERT OR IGNORE INTO schema_migrations (version, applied_at) VALUES (1, ?)", [Date.now()]);
+      }
+      if (previousVersion < 2) {
+        this.db.run(`
+          CREATE TABLE IF NOT EXISTS workspace_sessions (
+            id TEXT PRIMARY KEY,
+            state_json TEXT NOT NULL,
+            updated_at INTEGER NOT NULL
+          );
+          CREATE TABLE IF NOT EXISTS saved_searches (
+            id TEXT PRIMARY KEY,
+            name TEXT NOT NULL,
+            value_json TEXT NOT NULL,
+            created_at INTEGER NOT NULL,
+            updated_at INTEGER NOT NULL
+          );
+          CREATE TABLE IF NOT EXISTS document_properties (
+            file_id INTEGER NOT NULL,
+            key TEXT NOT NULL,
+            value_type TEXT NOT NULL,
+            value_text TEXT,
+            value_number REAL,
+            value_boolean INTEGER,
+            PRIMARY KEY(file_id, key)
+          );
+          CREATE TABLE IF NOT EXISTS document_tasks (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            file_id INTEGER NOT NULL,
+            line INTEGER NOT NULL,
+            text TEXT NOT NULL,
+            completed INTEGER NOT NULL DEFAULT 0
+          );
+          CREATE TABLE IF NOT EXISTS ai_tasks (
+            id TEXT PRIMARY KEY,
+            status TEXT NOT NULL,
+            state_json TEXT NOT NULL,
+            updated_at INTEGER NOT NULL
+          );
+          CREATE INDEX IF NOT EXISTS idx_ai_tasks_status_updated ON ai_tasks(status, updated_at DESC);
+          CREATE INDEX IF NOT EXISTS idx_document_properties_key_text ON document_properties(key, value_text);
+          CREATE INDEX IF NOT EXISTS idx_document_tasks_file ON document_tasks(file_id);
+        `);
+        this.db.run("INSERT OR REPLACE INTO schema_migrations (version, applied_at) VALUES (2, ?)", [Date.now()]);
+      }
+      if (previousVersion < 3) {
+        this.db.run(`
+          CREATE TABLE IF NOT EXISTS ai_tasks (
+            id TEXT PRIMARY KEY,
+            status TEXT NOT NULL,
+            state_json TEXT NOT NULL,
+            updated_at INTEGER NOT NULL
+          );
+          CREATE INDEX IF NOT EXISTS idx_ai_tasks_status_updated ON ai_tasks(status, updated_at DESC);
+        `);
+        this.db.run("INSERT OR REPLACE INTO schema_migrations (version, applied_at) VALUES (3, ?)", [Date.now()]);
+      }
+      if (previousVersion < 4) {
+        this.db.run(`
+          CREATE TABLE IF NOT EXISTS document_drafts (
+            path_rel TEXT PRIMARY KEY,
+            content TEXT NOT NULL,
+            base_hash TEXT NOT NULL,
+            revision INTEGER NOT NULL,
+            updated_at INTEGER NOT NULL
+          );
+        `);
+        this.db.run("INSERT OR REPLACE INTO schema_migrations (version, applied_at) VALUES (4, ?)", [Date.now()]);
+      }
+    });
+    this.dirty = true;
+  }
+
+  private graphNode(fileId: number, depth: number, current: boolean): LocalGraphNode | undefined {
+    const row = this.first(
+      `SELECT f.path_rel AS pathRel, COALESCE(d.title, f.name) AS title
+       FROM files f LEFT JOIN documents d ON d.file_id = f.id
+       WHERE f.id = ? AND f.deleted = 0`,
+      [fileId]
+    );
+    if (!row) {
+      return undefined;
+    }
+    return { id: String(fileId), pathRel: readString(row.pathRel), title: readString(row.title), depth, current };
+  }
+
+  private graphNeighbors(fileId: number): Array<{ fileId: number; incoming: boolean; relation: "outgoing" | "incoming" }> {
+    const outgoing = this.all(
+      `SELECT resolved_file_id AS fileId FROM wikilinks WHERE from_file_id = ? AND resolved_file_id IS NOT NULL
+       UNION SELECT resolved_file_id AS fileId FROM markdown_links WHERE from_file_id = ? AND resolved_file_id IS NOT NULL`,
+      [fileId, fileId]
+    ).map((row) => ({ fileId: readNumber(row.fileId), incoming: false, relation: "outgoing" as const }));
+    const incoming = this.all(
+      `SELECT from_file_id AS fileId FROM wikilinks WHERE resolved_file_id = ?
+       UNION SELECT from_file_id AS fileId FROM markdown_links WHERE resolved_file_id = ?`,
+      [fileId, fileId]
+    ).map((row) => ({ fileId: readNumber(row.fileId), incoming: true, relation: "incoming" as const }));
+    return [...outgoing, ...incoming].filter((item) => item.fileId > 0 && item.fileId !== fileId);
+  }
+
   private replaceTags(fileId: number, tags: string[]): void {
     this.db.run("DELETE FROM document_tags WHERE file_id = ?", [fileId]);
     for (const tag of tags) {
@@ -892,6 +1242,26 @@ export class WorkspaceDb {
       }
     }
     this.refreshTagCounts();
+  }
+
+  private replacePropertiesAndTasks(fileId: number, parsed: ParsedDocument): void {
+    this.db.run("DELETE FROM document_properties WHERE file_id = ?", [fileId]);
+    for (const [key, value] of Object.entries(parsed.frontmatter)) {
+      const valueType = Array.isArray(value) ? "list" : value === null ? "null" : typeof value;
+      const valueText = Array.isArray(value) ? value.map(String).join(" ") : value == null ? null : String(value);
+      this.db.run(
+        `INSERT INTO document_properties (file_id, key, value_type, value_text, value_number, value_boolean)
+         VALUES (?, ?, ?, ?, ?, ?)`,
+        [fileId, key, valueType, valueText, typeof value === "number" ? value : null, typeof value === "boolean" ? Number(value) : null]
+      );
+    }
+    this.db.run("DELETE FROM document_tasks WHERE file_id = ?", [fileId]);
+    parsed.body.split(/\r?\n/).forEach((line, index) => {
+      const match = line.match(/^\s*[-*+]\s+\[([ xX])\]\s+(.+)$/);
+      if (match) {
+        this.db.run("INSERT INTO document_tasks (file_id, line, text, completed) VALUES (?, ?, ?, ?)", [fileId, index + 1, match[2].trim(), match[1].toLowerCase() === "x" ? 1 : 0]);
+      }
+    });
   }
 
   private replaceWikiLinks(fileId: number, parsed: ParsedDocument): void {
@@ -930,6 +1300,14 @@ export class WorkspaceDb {
 
   private replaceFts(fileId: number, pathRel: string, parsed: ParsedDocument): void {
     const tags = parsed.tags.join(" ");
+    const properties = Object.entries(parsed.frontmatter).map(([key, value]) => `${key} ${Array.isArray(value) ? value.join(" ") : String(value ?? "")}`).join(" ");
+    const searchableBody = `${parsed.plainText}\n${properties}`.trim();
+    this.db.run(
+      `INSERT INTO document_search (file_id, path, title, tags, body)
+       VALUES (?, ?, ?, ?, ?)
+       ON CONFLICT(file_id) DO UPDATE SET path = excluded.path, title = excluded.title, tags = excluded.tags, body = excluded.body`,
+      [fileId, pathRel, parsed.title, tags, searchableBody]
+    );
     if (this.ftsEnabled) {
       this.db.run("DELETE FROM document_fts WHERE file_id = ?", [fileId]);
       this.db.run("INSERT INTO document_fts (file_id, path, title, tags, body) VALUES (?, ?, ?, ?, ?)", [
@@ -937,16 +1315,9 @@ export class WorkspaceDb {
         pathRel,
         parsed.title,
         tags,
-        parsed.plainText
+        searchableBody
       ]);
-      return;
     }
-    this.db.run(
-      `INSERT INTO document_search (file_id, path, title, tags, body)
-       VALUES (?, ?, ?, ?, ?)
-       ON CONFLICT(file_id) DO UPDATE SET path = excluded.path, title = excluded.title, tags = excluded.tags, body = excluded.body`,
-      [fileId, pathRel, parsed.title, tags, parsed.plainText]
-    );
   }
 
   private refreshTagCounts(): void {
@@ -1057,6 +1428,9 @@ export class WorkspaceDb {
   }
 }
 
+// Compatibility export while services are migrated to the repository name.
+export { WorkspaceRepository as WorkspaceDb };
+
 async function getSqlJs(): Promise<SqlJsStatic> {
   if (!sqlJsPromise) {
     const bytes = await readFile(require.resolve("sql.js/dist/sql-wasm.wasm"));
@@ -1064,6 +1438,20 @@ async function getSqlJs(): Promise<SqlJsStatic> {
     sqlJsPromise = initSqlJs({ wasmBinary });
   }
   return sqlJsPromise;
+}
+
+async function fileExists(filePath: string): Promise<boolean> {
+  try {
+    await stat(filePath);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+async function backupBeforeMigration(dbPath: string, targetVersion: number): Promise<void> {
+  const backupPath = `${dbPath}.pre-v${targetVersion}-${Date.now()}.bak`;
+  await copyFile(dbPath, backupPath);
 }
 
 async function openSqlDatabase(SQL: SqlJsStatic, dbPath: string): Promise<Db> {
@@ -1156,11 +1544,8 @@ function uniqueLower(values: string[]): string[] {
 }
 
 function buildFtsQuery(query: string): string {
-  return query
-    .trim()
-    .split(/\s+/)
-    .filter(Boolean)
-    .map((term) => `"${term.replace(/"/g, '""')}"`)
+  return (query.normalize("NFKC").match(/[\p{L}\p{N}_]+/gu) ?? [])
+    .map((term) => `"${term.replace(/"/g, '""')}"*`)
     .join(" AND ");
 }
 
@@ -1222,7 +1607,7 @@ function statusMessageFor(state: AiSemanticIndexStatus["state"], staleFiles: num
   return undefined;
 }
 
-function matchesFilters(pathRel: string, tagFilter: string | undefined, pathFilter: string | undefined, db: WorkspaceDb): boolean {
+function matchesFilters(pathRel: string, tagFilter: string | undefined, pathFilter: string | undefined, db: WorkspaceRepository): boolean {
   if (pathFilter && !pathRel.toLowerCase().includes(pathFilter.toLowerCase())) {
     return false;
   }

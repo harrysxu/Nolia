@@ -1,5 +1,21 @@
 import { z } from "zod";
 
+export {
+  LocalGraphRequestSchema,
+  SavedSearchDeleteRequestSchema,
+  SavedSearchListRequestSchema,
+  SavedSearchSaveRequestSchema,
+  WorkspaceProbeRequestSchema,
+  WorkspaceSessionReadRequestSchema,
+  WorkspaceSessionWriteRequestSchema
+} from "./contracts";
+export type {
+  LocalGraphResponse,
+  SavedSearch,
+  WorkspaceProbeResult,
+  WorkspaceSessionSnapshot
+} from "./contracts";
+
 export { IpcChannels, type IpcChannel } from "./channels";
 import type {
   AiModelsListRequest,
@@ -21,6 +37,7 @@ import type {
   AiSettingsSetRequest
 } from "./ai";
 import { MAX_CONVERSATION_HISTORY_MESSAGES, MAX_CONVERSATION_HISTORY_TURNS } from "./ai";
+import type { ExternalDocumentSaveRequest, WindowDocumentState } from "./externalDocuments";
 
 export const EmptySchema = z.object({}).strict();
 
@@ -105,6 +122,7 @@ export const FileRenameRequestSchema = z.object({
   targetPathRel: z.string().min(1),
   updateReferences: z.boolean().optional()
 });
+export const FileRenamePreviewRequestSchema = FileRenameRequestSchema.pick({ workspaceId: true, sourcePathRel: true, targetPathRel: true });
 
 export const FileTrashRequestSchema = z.object({
   workspaceId: z.string().min(1),
@@ -124,6 +142,51 @@ export const ExternalFileWriteAtomicRequestSchema = z.object({
   filePath: z.string().min(1),
   content: z.string(),
   baseHash: z.string().min(1)
+});
+
+export const ExternalFilePickRequestSchema = z.object({}).strict();
+
+export const ExternalDocumentSaveRequestSchema: z.ZodType<ExternalDocumentSaveRequest> = z.object({
+  filePath: z.string().min(1),
+  content: z.string(),
+  baseHash: z.string().min(1),
+  revision: z.number().int().nonnegative(),
+  mode: z.enum(["normal", "saveAs", "force"]).optional(),
+  targetPath: z.string().min(1).optional(),
+  bom: z.boolean().optional(),
+  eol: z.enum(["lf", "crlf"]).optional()
+});
+
+export const ExternalDocumentDraftReadRequestSchema = z.object({ filePath: z.string().min(1) });
+export const ExternalDocumentDraftWriteRequestSchema = z.object({
+  filePath: z.string().min(1),
+  content: z.string(),
+  baseHash: z.string().min(1),
+  revision: z.number().int().nonnegative()
+});
+export const ExternalDocumentDraftDeleteRequestSchema = ExternalDocumentDraftReadRequestSchema;
+export const ExternalRecentRemoveRequestSchema = z.object({ filePath: z.string().min(1) });
+export const ExternalFolderOpenRequestSchema = z.object({ filePath: z.string().min(1) });
+export const ExternalFolderCloseRequestSchema = z.object({ sessionId: z.string().min(1) });
+export const ExternalLinkResolveRequestSchema = z.object({
+  filePath: z.string().min(1),
+  href: z.string().min(1),
+  folderSessionId: z.string().min(1).optional()
+});
+export const ExternalAttachmentImportRequestSchema = z.object({
+  documentPath: z.string().min(1),
+  sourcePath: z.string().min(1),
+  baseHash: z.string().min(1)
+});
+export const ExternalExportRequestSchema = z.object({
+  filePath: z.string().min(1),
+  format: z.enum(["pdf", "html", "markdown"]),
+  themeId: z.string().optional()
+});
+export const WindowDocumentStateSetRequestSchema: z.ZodType<WindowDocumentState> = z.object({
+  title: z.string().min(1),
+  representedFilename: z.string().min(1).optional(),
+  dirty: z.boolean()
 });
 
 export const DocumentParseRequestSchema = z.object({
@@ -412,7 +475,8 @@ export const AiTaskCancelRequestSchema = z.object({
 
 export const AiTaskApprovalRequestSchema = z.object({
   taskId: z.string().min(1),
-  approvalId: z.string().min(1)
+  approvalId: z.string().min(1),
+  selectedOperationIds: z.array(z.string().min(1)).optional()
 });
 
 export const AiTaskRejectRequestSchema = AiTaskApprovalRequestSchema.extend({
@@ -437,6 +501,7 @@ export type FileHistoryReadRequest = z.infer<typeof FileHistoryReadRequestSchema
 export type FileHistoryCreateRequest = z.infer<typeof FileHistoryCreateRequestSchema>;
 export type FileCreateRequest = z.infer<typeof FileCreateRequestSchema>;
 export type FileRenameRequest = z.infer<typeof FileRenameRequestSchema>;
+export type FileRenamePreviewRequest = z.infer<typeof FileRenamePreviewRequestSchema>;
 export type FileTrashRequest = z.infer<typeof FileTrashRequestSchema>;
 export type FileResourceActionRequest = z.infer<typeof FileResourceActionRequestSchema>;
 export type ExternalFileReadRequest = z.infer<typeof ExternalFileReadRequestSchema>;

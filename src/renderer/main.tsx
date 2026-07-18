@@ -5,6 +5,10 @@ import "highlight.js/styles/github.css";
 
 import { App } from "./App";
 import "./styles/global.css";
+import "./styles/workspace.css";
+import "./styles/discovery.css";
+import "./styles/plugins.css";
+import "./styles/inspector.css";
 
 ReactDOM.createRoot(document.getElementById("root") as HTMLElement).render(
   <React.StrictMode>

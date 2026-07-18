@@ -102,11 +102,8 @@ test("built-in JSON and TXT editors expose the right tools and autosave safely",
   await expect(page.locator("[aria-label='自动识别文本类型：TSX']")).toBeVisible();
   await expect(page.getByTestId("builtin-text-editor").locator(".cm-content")).toContainText("Suffix editor");
 
-  await page.getByRole("navigation", { name: "工作区导航" }).getByRole("button", { name: "最近", exact: true }).click();
-  await expect(page.getByRole("button", { name: "component.tsx", exact: true })).toBeVisible();
-  await expect(page.getByRole("button", { name: "notes.txt", exact: true })).toBeVisible();
-  await page.getByRole("tab", { name: "最近编辑" }).click();
-  await expect(page.getByRole("button", { name: "notes.txt", exact: true })).toBeVisible();
+  await page.getByRole("navigation", { name: "工作区导航" }).getByRole("button", { name: "发现", exact: true }).click();
+  await expect(page.locator(".discover-recent-list")).toContainText("notes.txt");
 });
 
 test("resource previews cover image, PDF, audio, video, archive, and unknown files", async ({ page }) => {
@@ -184,7 +181,7 @@ function platformRevealButtonLabel(): string {
 
 async function openAssetsFolder(page: Page) {
   await expect(page.getByRole("navigation", { name: "工作区导航" })).toBeVisible();
-  await page.getByRole("navigation", { name: "工作区导航" }).getByRole("button", { name: "笔记", exact: true }).click();
+  await page.getByRole("navigation", { name: "工作区导航" }).getByRole("button", { name: "文件", exact: true }).click();
   await page.getByPlaceholder("搜索文件或资源").fill("");
   const assetsFolder = page.getByRole("button", { name: /assets/ }).first();
   await expect(assetsFolder).toBeVisible();

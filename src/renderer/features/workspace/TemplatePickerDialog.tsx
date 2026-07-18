@@ -1,0 +1,10 @@
+import { FileText, X } from "lucide-react";
+import { useState } from "react";
+
+export function TemplatePickerDialog({ open, templates, onClose, onCreate }: { open: boolean; templates: string[]; onClose: () => void; onCreate: (templatePath: string, title: string) => void }) {
+  const [selected, setSelected] = useState(templates[0] ?? "");
+  const [title, setTitle] = useState("");
+  if (!open) return null;
+  const active = templates.includes(selected) ? selected : templates[0] ?? "";
+  return <div className="modal-layer" role="dialog" aria-modal="true" aria-labelledby="template-picker-title"><button type="button" className="modal-backdrop" aria-label="取消" onClick={onClose} /><div className="modal-surface template-picker-dialog"><header><strong id="template-picker-title">从模板新建</strong><button type="button" className="icon-button" aria-label="关闭" onClick={onClose}><X size={15} /></button></header>{templates.length ? <><div className="template-picker-body"><div className="template-list" role="listbox" aria-label="模板">{templates.map((template) => <button type="button" role="option" aria-selected={active === template} className={active === template ? "is-selected" : ""} key={template} onClick={() => setSelected(template)}><FileText size={15} /><span>{template.replace(/^Templates\//, "")}</span></button>)}</div><div className="template-preview"><strong>{active}</strong><p>创建时会替换 date、time、title 和 workspace 变量。</p></div></div><label className="modal-field"><span>新笔记标题</span><input autoFocus value={title} onChange={(event) => setTitle(event.target.value)} /></label><div className="modal-actions"><button type="button" className="secondary-button" onClick={onClose}>取消</button><button type="button" className="primary-button" disabled={!active || !title.trim()} onClick={() => onCreate(active, title.trim())}>创建笔记</button></div></> : <div className="template-empty"><p>Templates 目录中还没有模板。</p><button type="button" className="secondary-button" onClick={onClose}>关闭</button></div>}</div></div>;
+}

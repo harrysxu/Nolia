@@ -18,9 +18,12 @@ npm run lint
 npm test
 npm run e2e
 npm run build
+git diff --check
 ```
 
-要求类型检查、lint、单元测试、E2E 和生产构建全部通过。若只改局部 UI，可先运行相关 E2E，再在发布前跑全量。
+要求类型检查、lint、单元测试、E2E、生产构建和 diff 检查全部通过。不得以聚焦测试代替最终全量门禁。
+
+性能预算必须用正式 benchmark 数据记录：1 万文件树 <2s、watcher patch <500ms、10 万字输入阻塞 <16ms、FTS <150ms、局部图 <300ms、AI 十文件事务 <2s。本地 `metrics/performance.jsonl` 只用于诊断，不能替代受控基准。
 
 ## 3. macOS 打包
 
@@ -50,6 +53,8 @@ npm run package:unsigned
 ```
 
 如果 universal signing 阶段卡住，按 [Universal 构建异常处理](MACOS_SIGNING_NOTARIZATION.md#universal-构建异常处理) 处理。
+
+`build.mac.mergeASARs` 必须保持为 `false`。Nolia 的大型 asar 在架构合并后曾出现 preload 读取偏移错误；发布验收必须从全新路径冷启动 universal `.app`，并确认日志中没有 `Unable to load preload script` 或 preload `SyntaxError`。
 
 ## 4. Windows 打包
 
@@ -173,6 +178,10 @@ New-Item -ItemType Directory -Path "$env:TEMP\nolia-release-test"
 - [ ] 文本编辑器按后缀识别语言，不误显示 Markdown 工具栏。
 - [ ] 图片、PDF、音频、视频、压缩包、未知文件预览正常。
 - [ ] 搜索可命中中文和英文。
+- [ ] 标签筛选、保存搜索、标签重命名预览和冲突拒绝正常。
+- [ ] `[[` 可按标题/路径补全，并能创建不存在的笔记。
+- [ ] AI 待审批任务可在重启后恢复，部分审批、回滚和撤销冲突正常。
+- [ ] API v3 插件隔离 frame、权限确认、网络 redirect 拒绝和崩溃隔离正常；v2 不能运行。
 - [ ] 最近、收藏、反向链接页面可打开。
 - [ ] 设置页主题、字体、宽度、专注模式和插件管理正常。
 
@@ -190,8 +199,10 @@ New-Item -ItemType Directory -Path "$env:TEMP\nolia-release-test"
 窗口尺寸：
 
 - [ ] 1320 x 860
+- [ ] 1440 x 900
 - [ ] 1100 x 760
 - [ ] 900 x 700
+- [ ] 780 x 520
 
 主题：
 
@@ -203,6 +214,7 @@ New-Item -ItemType Directory -Path "$env:TEMP\nolia-release-test"
 重点检查：
 
 - [ ] 活动栏、侧边栏、编辑区、右侧面板和状态栏不重叠。
+- [ ] 1180px 以下检查器以抽屉打开，遮罩和 `Escape` 可关闭。
 - [ ] 设置弹窗尺寸稳定。
 - [ ] 搜索面板、CodeMirror 搜索面板和资源工具栏可读。
 - [ ] Markdown 工具栏按钮有 tooltip 或 `aria-label`。

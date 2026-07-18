@@ -1,6 +1,6 @@
 import type { AppSettings } from "./types";
 
-export const EXTENSION_API_VERSION = 2;
+export const EXTENSION_API_VERSION = 3;
 
 export type ExtensionPermission =
   | "workspace:read"
@@ -210,6 +210,9 @@ export interface ExtensionManifest {
   activationEvents: ExtensionActivationEvent[];
   permissions?: ExtensionPermission[];
   renderer?: string;
+  entrypoints?: {
+    ui?: string;
+  };
   contributes: ExtensionContributions;
 }
 
@@ -226,6 +229,8 @@ export interface PluginDescriptor {
   manifest?: ExtensionManifest;
   pluginPath: string;
   rendererUrl?: string;
+  frameUrl?: string;
+  declaredApiVersion?: number;
   enabled: boolean;
   permissionsAcceptedAt?: number;
   acceptedPermissionHash?: string;

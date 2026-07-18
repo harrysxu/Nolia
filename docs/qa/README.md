@@ -2,6 +2,8 @@
 
 本文是 Nolia 发布前测试的唯一维护入口，合并了原全量回归矩阵和桌面验收清单。最终放行仍以 [发布检查清单](../release/RELEASE_CHECKLIST.md) 为准。
 
+逐条可执行的编号用例、边界数据、AI 模型矩阵、安全对抗场景和发布阻断规则见 [Nolia 详细测试用例库](DETAILED_TEST_CASES.md)。
+
 ## 测试对象
 
 - 自动化对象：当前源码、main/preload/renderer 构建产物和 Playwright 开发模式窗口。
