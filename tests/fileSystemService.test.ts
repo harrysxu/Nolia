@@ -116,6 +116,7 @@ describe("file system binary operations", () => {
         maxWorkspaceSnapshotBytes: 1024 * 1024
       });
       const files = new FileSystemService(workspaces, history);
+      workspaces.requireWorkspace(workspace!.workspaceId).db.removeFile("note.md");
       await files.createHistorySnapshot({ workspaceId: workspace!.workspaceId, pathRel: "note.md", reason: "manual", content: "manual" });
       await files.createHistorySnapshot({ workspaceId: workspace!.workspaceId, pathRel: "note.md", reason: "autosave", content: "autosave-1" });
       await files.createHistorySnapshot({ workspaceId: workspace!.workspaceId, pathRel: "note.md", reason: "autosave", content: "autosave-2" });

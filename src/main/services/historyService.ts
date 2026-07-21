@@ -5,7 +5,7 @@ import path from "node:path";
 import { WORKSPACE_META_DIR, WORKSPACE_DIRECTORIES } from "../../shared/constants";
 import type { FileHistoryEntry, FileHistoryReadResponse } from "../../shared/types";
 import { WorkspaceDb } from "./workspaceDb";
-import { normalizePathRel, resolveWorkspacePath } from "../utils/filePaths";
+import { fileKindForPath, normalizePathRel, resolveWorkspacePath } from "../utils/filePaths";
 import { sha256Buffer } from "../utils/hash";
 
 export interface HistoryRetentionPolicy {
@@ -49,6 +49,24 @@ export class HistoryService {
     }
 
     const sha256 = sha256Buffer(bytes);
+    if (!db.getFileId(normalized)) {
+      let sourceStat;
+      try {
+        sourceStat = await stat(sourcePath);
+      } catch {
+        return undefined;
+      }
+      db.upsertFile({
+        pathRel: normalized,
+        name: path.basename(normalized),
+        ext: path.extname(normalized).toLowerCase(),
+        kind: fileKindForPath(sourcePath, false),
+        size: sourceStat.size,
+        mtimeMs: sourceStat.mtimeMs,
+        ctimeMs: sourceStat.ctimeMs,
+        sha256
+      });
+    }
     const latest = db.listSnapshots(normalized, 1)[0];
     if (latest?.sha256 === sha256) {
       return undefined;

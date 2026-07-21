@@ -243,7 +243,8 @@ test("completes wikilinks by title and creates missing notes without leaving the
   await page.keyboard.insertText("[[Roa");
   const completion = page.locator(".cm-tooltip-autocomplete li", { hasText: "Product Roadmap" });
   await expect(completion).toBeVisible();
-  await completion.click();
+  await expect(completion).toHaveAttribute("aria-selected", "true");
+  await page.keyboard.press("Enter");
   await expect.poll(() => page.evaluate(() => (window as typeof window & { __noliaMock: { savedText: Record<string, string> } }).__noliaMock.savedText["current.md"])).toContain("[[Roadmap]]");
 
   await editor.click();
@@ -251,7 +252,8 @@ test("completes wikilinks by title and creates missing notes without leaving the
   await page.keyboard.insertText("\n[[Brand New");
   const createCompletion = page.locator(".cm-tooltip-autocomplete li", { hasText: "创建“Brand New”" });
   await expect(createCompletion).toBeVisible();
-  await createCompletion.click();
+  await expect(createCompletion).toHaveAttribute("aria-selected", "true");
+  await page.keyboard.press("Enter");
   await expect.poll(() => page.evaluate(() => (window as typeof window & { __noliaMock: { createdPaths: string[] } }).__noliaMock.createdPaths)).toContain("Brand-New.md");
   await expect(page.locator(".source-editor .cm-content")).toBeVisible();
 });

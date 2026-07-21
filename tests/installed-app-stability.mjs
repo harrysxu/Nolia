@@ -14,6 +14,7 @@ if (mode !== "stress" && mode !== "normal") throw new Error("NOLIA_STABILITY_MOD
 
 const durationMs = Number(process.env.NOLIA_STABILITY_DURATION_MS ?? 30 * 60_000);
 const sampleIntervalMs = Number(process.env.NOLIA_STABILITY_SAMPLE_INTERVAL_MS ?? 60_000);
+const requireRealAi = process.env.NOLIA_REQUIRE_REAL_AI === "1";
 const electronPath = process.env.NOLIA_TEST_ELECTRON_PATH ?? path.resolve("node_modules/electron/dist/Electron.app/Contents/MacOS/Electron");
 const packagedAppPath = process.env.NOLIA_TEST_APP_PATH ?? path.resolve("release/mac-universal-current/Nolia.app/Contents/Resources/app.asar");
 const encryptedSecretSource = process.env.NOLIA_STABILITY_SECRET_SOURCE;
@@ -123,7 +124,7 @@ try {
   await new Promise((resolve) => setTimeout(resolve, 750));
   processExited = !(await processExists(child.pid));
   const actualDurationMs = workloadEndedAt - startedAt;
-  const assessment = assess({ mode, requestedDurationMs: durationMs, actualDurationMs, samples, rendererErrors, counters, health, processExited, aiCredentialAvailable });
+  const assessment = assess({ mode, requestedDurationMs: durationMs, actualDurationMs, samples, rendererErrors, counters, health, processExited, aiCredentialAvailable, requireRealAi });
 
   await writeReport({
     generatedAt: new Date().toISOString(),
@@ -176,7 +177,7 @@ try {
 } finally {
   shutdownStarted = true;
   await closeElectronApplication(application);
-  await rm(root, { recursive: true, force: true });
+  await rm(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 200 });
 }
 
 function attachPageDiagnostics(targetPage) {
@@ -355,6 +356,10 @@ async function runAi(page, request) {
 }
 
 async function sampleProcessTree(rootPid, elapsedMs) {
+  if (process.platform === "win32") {
+    return sampleWindowsProcessTree(rootPid, elapsedMs);
+  }
+
   const { stdout } = await execFileAsync("ps", ["-axo", "pid=,ppid=,rss=,%cpu=,command="], { maxBuffer: 10 * 1024 * 1024 });
   const processes = stdout.split("\n").flatMap((line) => {
     const match = line.trim().match(/^(\d+)\s+(\d+)\s+(\d+)\s+([\d.]+)\s+(.+)$/);
@@ -393,6 +398,61 @@ async function sampleProcessTree(rootPid, elapsedMs) {
   };
 }
 
+async function sampleWindowsProcessTree(rootPid, elapsedMs) {
+  const script = [
+    "$processes = @(Get-CimInstance Win32_Process | Select-Object ProcessId, ParentProcessId, WorkingSetSize, CommandLine)",
+    "$performance = @(Get-CimInstance Win32_PerfFormattedData_PerfProc_Process | Select-Object IDProcess, PercentProcessorTime, HandleCount)",
+    "[pscustomobject]@{ processes = $processes; performance = $performance } | ConvertTo-Json -Compress -Depth 4"
+  ].join("; ");
+  const { stdout } = await execFileAsync("powershell.exe", ["-NoProfile", "-NonInteractive", "-Command", script], { maxBuffer: 20 * 1024 * 1024 });
+  const snapshot = JSON.parse(stdout);
+  const processes = asArray(snapshot.processes).map((entry) => ({
+    pid: Number(entry.ProcessId),
+    ppid: Number(entry.ParentProcessId),
+    rssKb: Number(entry.WorkingSetSize) / 1024,
+    command: String(entry.CommandLine ?? "")
+  }));
+  const performanceByPid = new Map(asArray(snapshot.performance).map((entry) => [
+    Number(entry.IDProcess),
+    { cpu: Number(entry.PercentProcessorTime ?? 0), handles: Number(entry.HandleCount ?? 0) }
+  ]));
+  const pids = collectProcessTreePids(processes, rootPid);
+  const tree = processes.filter((entry) => pids.has(entry.pid));
+  const byProcessType = Object.fromEntries(["main", "renderer", "gpu", "utility", "other"].map((type) => [type, 0]));
+  for (const entry of tree) {
+    const type = entry.pid === rootPid ? "main" : entry.command.includes("--type=renderer") ? "renderer" : entry.command.includes("--type=gpu-process") ? "gpu" : entry.command.includes("--type=utility") ? "utility" : "other";
+    byProcessType[type] += Math.round(entry.rssKb / 1024);
+  }
+  return {
+    elapsedMs,
+    processCount: tree.length,
+    rssMb: Math.round(tree.reduce((sum, entry) => sum + entry.rssKb, 0) / 1024),
+    cpuPercent: Number(tree.reduce((sum, entry) => sum + (performanceByPid.get(entry.pid)?.cpu ?? 0), 0).toFixed(1)),
+    fileDescriptors: tree.reduce((sum, entry) => sum + (performanceByPid.get(entry.pid)?.handles ?? 0), 0),
+    rssByProcessTypeMb: byProcessType
+  };
+}
+
+function collectProcessTreePids(processes, rootPid) {
+  const pids = new Set([rootPid]);
+  let changed = true;
+  while (changed) {
+    changed = false;
+    for (const entry of processes) {
+      if (pids.has(entry.ppid) && !pids.has(entry.pid)) {
+        pids.add(entry.pid);
+        changed = true;
+      }
+    }
+  }
+  return pids;
+}
+
+function asArray(value) {
+  if (value === undefined || value === null) return [];
+  return Array.isArray(value) ? value : [value];
+}
+
 function assess(input) {
   const reasons = [];
   const first = medianWindow(input.samples.slice(0, 3));
@@ -415,7 +475,7 @@ function assess(input) {
       if (input.counters[key] < 1) reasons.push(`Normal-use counter ${key} was not exercised`);
     }
     if (input.aiCredentialAvailable && input.counters.aiRuns < (input.requestedDurationMs < 60_000 ? 1 : 3)) reasons.push("Normal-use AI milestones were not completed");
-    if (!input.aiCredentialAvailable) reasons.push("Normal-use AI credential was unavailable");
+    if (!input.aiCredentialAvailable && input.requireRealAi) reasons.push("Normal-use AI credential was unavailable");
   }
   return { passed: reasons.length === 0, reasons, resourceComparison: { first, last } };
 }

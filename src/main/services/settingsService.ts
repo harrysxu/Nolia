@@ -1,9 +1,10 @@
-import { readFile, writeFile, mkdir, access, rename, rm } from "node:fs/promises";
+import { readFile, writeFile, mkdir, access, rm } from "node:fs/promises";
 import path from "node:path";
 
 import { DEFAULT_SETTINGS, WORKSPACE_CONFIG_FILE, WORKSPACE_META_DIR } from "../../shared/constants";
 import { normalizeAiSettings as normalizeSharedAiSettings } from "../../shared/ai";
 import type { AppSettings, RecentExternalFile, RecentWorkspace } from "../../shared/types";
+import { replaceFileWithRetry } from "../utils/atomicFile";
 
 interface WindowState {
   bounds?: {
@@ -190,7 +191,7 @@ export class SettingsService {
     const temporaryPath = `${this.statePath}.${process.pid}.${Date.now()}.tmp`;
     try {
       await writeFile(temporaryPath, `${JSON.stringify(this.state, null, 2)}\n`, "utf8");
-      await rename(temporaryPath, this.statePath);
+      await replaceFileWithRetry(temporaryPath, this.statePath);
     } catch (error) {
       await rm(temporaryPath, { force: true }).catch(() => undefined);
       throw error;

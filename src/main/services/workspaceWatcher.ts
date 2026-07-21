@@ -29,7 +29,7 @@ export class WorkspaceWatcher {
     }
     this.stopped = false;
     try {
-      this.watcher = watch(this.rootPath, { recursive: true, persistent: true }, (eventType, fileName) => {
+      this.watcher = watch(this.rootPath, { recursive: true, persistent: true }, (_eventType, fileName) => {
         if (!fileName) {
           return;
         }
@@ -37,7 +37,7 @@ export class WorkspaceWatcher {
         if (this.shouldIgnore(filePath)) {
           return;
         }
-        this.queueRefresh(filePath, eventType === "change" ? "change" : "create");
+        this.queueRefresh(filePath);
       });
     } catch (error) {
       this.onError(error);
@@ -58,12 +58,13 @@ export class WorkspaceWatcher {
     await Promise.allSettled([...this.activeTasks]);
   }
 
-  private queueRefresh(filePath: string, operation: "create" | "change"): void {
+  private queueRefresh(filePath: string): void {
     this.queue(filePath, async (pathRel) => {
       try {
+        const existedBeforeIndex = Boolean(this.db.getFileId(pathRel));
         const entryStat = await stat(filePath);
         await this.indexer.indexPathRel(this.rootPath, pathRel, this.db);
-        this.onIndexed(pathRel, operation, {
+        this.onIndexed(pathRel, existedBeforeIndex ? "change" : "create", {
           pathRel,
           name: path.basename(filePath),
           kind: fileKindForPath(filePath, entryStat.isDirectory()),

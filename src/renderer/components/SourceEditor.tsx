@@ -1,9 +1,11 @@
 import { forwardRef, useImperativeHandle, useMemo, useRef } from "react";
 import CodeMirror, { type ReactCodeMirrorRef } from "@uiw/react-codemirror";
+import { acceptCompletion } from "@codemirror/autocomplete";
 import { insertNewlineContinueMarkup, markdown, markdownKeymap } from "@codemirror/lang-markdown";
+import { Prec } from "@codemirror/state";
 import { keymap, EditorView, type ViewUpdate } from "@codemirror/view";
 import { exactMatchIndex, findPlainTextMatches, nextMatchIndex, type FindReplaceOptions, type FindReplaceResult } from "./findReplace";
-import { wikiLinkCompletionExtension, type WikiLinkCompletionTarget } from "../features/documents/wikiLinkCompletion";
+import { acceptWikiLinkCompletionFallback, wikiLinkCompletionExtension, type WikiLinkCompletionTarget } from "../features/documents/wikiLinkCompletion";
 
 interface SourceEditorProps {
   value: string;
@@ -45,6 +47,14 @@ export const SourceEditor = forwardRef<SourceEditorHandle, SourceEditorProps>(fu
     () => [
       markdown({ addKeymap: false }),
       wikiLinkCompletionExtension(wikiLinkTargets, readOnly ? undefined : (title) => onCreateWikiLinkTargetRef.current?.(title)),
+      Prec.highest(keymap.of([{
+        key: "Enter",
+        run: (view) => acceptCompletion(view) || acceptWikiLinkCompletionFallback(
+          view,
+          wikiLinkTargets,
+          readOnly ? undefined : (title) => onCreateWikiLinkTargetRef.current?.(title)
+        ) || insertNewlineContinueMarkup(view)
+      }])),
       keymap.of([
         {
           key: "Mod-f",
@@ -53,7 +63,6 @@ export const SourceEditor = forwardRef<SourceEditorHandle, SourceEditorProps>(fu
             return Boolean(onOpenFindReplaceRef.current);
           }
         },
-        { key: "Enter", run: insertNewlineContinueMarkup },
         ...markdownKeymap
       ]),
       EditorView.lineWrapping,

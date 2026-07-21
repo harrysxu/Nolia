@@ -42,6 +42,7 @@ import {
   toWorkspaceRelative
 } from "../utils/filePaths";
 import { sha256Buffer, sha256Text } from "../utils/hash";
+import { replaceFileWithRetry } from "../utils/atomicFile";
 import { HistoryService } from "./historyService";
 import { WorkspaceIndexService } from "./workspaceIndexService";
 import { WorkspaceService } from "./workspaceService";
@@ -169,7 +170,7 @@ export class FileSystemService {
 
     const tmpPath = `${absolutePath}.${process.pid}.${Date.now()}.tmp`;
     await writeFile(tmpPath, request.content, "utf8");
-    await rename(tmpPath, absolutePath);
+    await replaceFileWithRetry(tmpPath, absolutePath);
 
     const savedStat = await stat(absolutePath);
     const sha256 = sha256Text(request.content);
@@ -218,7 +219,7 @@ export class FileSystemService {
     const bytes = binaryDataToBuffer(request.data);
     const tmpPath = `${absolutePath}.${process.pid}.${Date.now()}.tmp`;
     await writeFile(tmpPath, bytes);
-    await rename(tmpPath, absolutePath);
+    await replaceFileWithRetry(tmpPath, absolutePath);
 
     const savedStat = await stat(absolutePath);
     const sha256 = sha256Buffer(bytes);
@@ -258,7 +259,7 @@ export class FileSystemService {
     await mkdir(path.dirname(absolutePath), { recursive: true });
     const tmpPath = `${absolutePath}.${process.pid}.${Date.now()}.tmp`;
     await writeFile(tmpPath, request.content, "utf8");
-    await rename(tmpPath, absolutePath);
+    await replaceFileWithRetry(tmpPath, absolutePath);
 
     const savedStat = await stat(absolutePath);
     const sha256 = sha256Text(request.content);
@@ -374,7 +375,7 @@ export class FileSystemService {
         await this.history.createSnapshot(runtime.info.rootPath, runtime.db, change.pathRel, "manual", current);
         const tmpPath = `${absolutePath}.${process.pid}.${Date.now()}.rename.tmp`;
         await writeFile(tmpPath, change.after, "utf8");
-        await rename(tmpPath, absolutePath);
+        await replaceFileWithRetry(tmpPath, absolutePath);
         applied.push(change);
       }
       runtime.db.removeFile(source);
@@ -524,33 +525,47 @@ async function collectTagRenameChanges(rootPath: string, paths: string[], source
 async function writeTextAtomic(absolutePath: string, content: string, operation: string): Promise<void> {
   const tmpPath = `${absolutePath}.${process.pid}.${Date.now()}.${operation}.tmp`;
   await writeFile(tmpPath, content, "utf8");
-  await rename(tmpPath, absolutePath);
+  await replaceFileWithRetry(tmpPath, absolutePath);
 }
 
 async function readTree(rootPath: string, absolutePath: string, showHidden: boolean): Promise<FileTreeNode[]> {
   const entries = await readdir(absolutePath, { withFileTypes: true });
-  const nodes: FileTreeNode[] = [];
-  for (const entry of entries) {
-    if (!showHidden && entry.name.startsWith(".")) {
-      continue;
-    }
+  const visibleEntries = entries.filter((entry) => {
+    if (!showHidden && entry.name.startsWith(".")) return false;
     const entryPath = path.join(absolutePath, entry.name);
     const pathRel = toWorkspaceRelative(rootPath, entryPath);
-    if (isAlwaysIgnoredWorkspacePath(pathRel)) {
-      continue;
-    }
+    return !isAlwaysIgnoredWorkspacePath(pathRel);
+  });
+  const fileNodes = await Promise.all(visibleEntries.filter((entry) => !entry.isDirectory()).map(async (entry) => {
+    const entryPath = path.join(absolutePath, entry.name);
+    const pathRel = toWorkspaceRelative(rootPath, entryPath);
     const entryStat = await stat(entryPath);
-    const kind = fileKindForPath(entryPath, entry.isDirectory());
-    nodes.push({
+    return {
       pathRel,
       name: entry.name,
-      kind,
+      kind: fileKindForPath(entryPath, false),
+      size: entryStat.size,
+      mtimeMs: entryStat.mtimeMs
+    } satisfies FileTreeNode;
+  }));
+  const directoryNodes: FileTreeNode[] = [];
+  for (const entry of visibleEntries.filter((item) => item.isDirectory())) {
+    const entryPath = path.join(absolutePath, entry.name);
+    const pathRel = toWorkspaceRelative(rootPath, entryPath);
+    const [entryStat, children] = await Promise.all([
+      stat(entryPath),
+      readTree(rootPath, entryPath, showHidden)
+    ]);
+    directoryNodes.push({
+      pathRel,
+      name: entry.name,
+      kind: "directory",
       size: entryStat.size,
       mtimeMs: entryStat.mtimeMs,
-      children: entry.isDirectory() ? await readTree(rootPath, entryPath, showHidden) : undefined
+      children
     });
   }
-  return nodes;
+  return [...directoryNodes, ...fileNodes];
 }
 
 function sortNodes(nodes: FileTreeNode[], sortBy: "name" | "mtime" | "type"): FileTreeNode[] {

@@ -5,6 +5,7 @@ import { describe, expect, it } from "vitest";
 interface PackageBuildConfig {
   build?: {
     mac?: { mergeASARs?: boolean };
+    nsis?: { useZip?: boolean; differentialPackage?: boolean };
     fileAssociations?: Array<{ ext?: string }>;
   };
 }
@@ -16,6 +17,10 @@ describe("packaging configuration", () => {
     ) as PackageBuildConfig;
 
     expect(packageJson.build?.mac?.mergeASARs).toBe(false);
+    expect(packageJson.build?.nsis).toMatchObject({
+      useZip: true,
+      differentialPackage: false
+    });
     expect(packageJson.build?.fileAssociations?.map((item) => item.ext)).toEqual([
       "md",
       "markdown",

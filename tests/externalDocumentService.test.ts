@@ -111,13 +111,13 @@ describe("external document service", () => {
     await writeFile(path.join(root, "notes", "child.md"), "# Child\n", "utf8");
     await writeFile(path.join(root, "ignored.txt"), "ignored", "utf8");
     await writeFile(path.join(outside, "secret.md"), "# Secret\n", "utf8");
-    await symlink(path.join(outside, "secret.md"), path.join(root, "escape.md"));
+    await symlink(outside, path.join(root, "escape"), process.platform === "win32" ? "junction" : "dir");
 
     const session = await service.openFolder(filePath);
     expect(JSON.stringify(session.nodes)).toContain("child.md");
     expect(JSON.stringify(session.nodes)).not.toContain("ignored.txt");
-    expect(JSON.stringify(session.nodes)).not.toContain("escape.md");
-    await expect(service.resolveLink(filePath, "escape.md", session.id)).rejects.toThrow("escapes the authorized folder");
+    expect(JSON.stringify(session.nodes)).not.toContain("escape");
+    await expect(service.resolveLink(filePath, "escape/secret.md", session.id)).rejects.toThrow("escapes the authorized folder");
     service.close();
   });
 });

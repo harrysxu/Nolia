@@ -15,6 +15,7 @@ import type { DocumentDraft, LocalGraphEdge, LocalGraphNode, LocalGraphResponse,
 import type { AiEmbeddingSettings, AiProviderId, AiSemanticIndexStatus } from "../../shared/ai";
 import type { AiTaskSnapshot } from "../../shared/ai";
 import type { SearchQueryRequest } from "../../shared/ipc";
+import { replaceFileWithRetry } from "../utils/atomicFile";
 import { basenameWithoutExt } from "../utils/filePaths";
 
 type Db = InstanceType<SqlJsStatic["Database"]>;
@@ -160,7 +161,7 @@ export class WorkspaceRepository {
     const temporaryPath = `${this.dbPath}.${process.pid}.${Date.now()}.tmp`;
     try {
       await writeFile(temporaryPath, Buffer.from(bytes));
-      await rename(temporaryPath, this.dbPath);
+      await replaceFileWithRetry(temporaryPath, this.dbPath);
     } catch (error) {
       this.dirty = true;
       await rm(temporaryPath, { force: true }).catch(() => undefined);
@@ -744,7 +745,7 @@ export class WorkspaceRepository {
        FROM snapshots s
        JOIN files f ON f.id = s.file_id
        WHERE s.file_id = ?
-       ORDER BY s.created_at DESC
+       ORDER BY s.created_at DESC, s.id DESC
        LIMIT ?`,
       [fileId, limit]
     ).map(snapshotEntryFromRow);

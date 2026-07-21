@@ -1,6 +1,6 @@
 import { createHash, randomUUID } from "node:crypto";
 import { constants } from "node:fs";
-import { access, copyFile, lstat, mkdir, readFile, readdir, realpath, rename, stat, writeFile } from "node:fs/promises";
+import { access, copyFile, lstat, mkdir, readFile, readdir, realpath, stat, writeFile } from "node:fs/promises";
 import { watch, type FSWatcher } from "node:fs";
 import path from "node:path";
 import { BrowserWindow, dialog, type OpenDialogOptions, type SaveDialogOptions } from "electron";
@@ -18,6 +18,7 @@ import type {
 } from "../../shared/externalDocuments";
 import type { FileTreeNode } from "../../shared/types";
 import { MARKDOWN_EXTENSIONS } from "../../shared/constants";
+import { replaceFileWithRetry } from "../utils/atomicFile";
 import { sha256Buffer } from "../utils/hash";
 import { SettingsService } from "./settingsService";
 
@@ -138,7 +139,7 @@ export class ExternalDocumentService {
       const contentBytes = Buffer.from(`${request.bom ? "\ufeff" : ""}${normalizedContent}`, "utf8");
       const tmpPath = `${targetPath}.${process.pid}.${Date.now()}.tmp`;
       await writeFile(tmpPath, contentBytes);
-      await rename(tmpPath, targetPath);
+      await replaceFileWithRetry(tmpPath, targetPath);
       const savedStat = await stat(targetPath);
       const sha256 = sha256Buffer(contentBytes);
       await this.deleteDraft(sourcePath);

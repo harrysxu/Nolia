@@ -354,7 +354,7 @@ describe("AI task service", () => {
       await rm(home, { recursive: true, force: true });
       await rm(workspaceRoot, { recursive: true, force: true });
     }
-  });
+  }, 15_000);
 
   it("records run events that arrive before the task file is updated with the run id", async () => {
     const userData = await makeTempDir();

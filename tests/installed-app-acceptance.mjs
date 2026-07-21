@@ -6,7 +6,7 @@ import { _electron as electron } from "playwright";
 import { closeElectronApplication } from "./helpers/closeElectronApplication.mjs";
 
 const apiKey = process.env.SILICONFLOW_API_KEY;
-if (!apiKey) {
+if (!apiKey && process.env.NOLIA_REQUIRE_REAL_AI === "1") {
   throw new Error("SILICONFLOW_API_KEY is required");
 }
 const primaryChatModel = process.env.NOLIA_TEST_PRIMARY_CHAT_MODEL ?? "deepseek-ai/DeepSeek-V3.2";
@@ -15,6 +15,7 @@ const embeddingModel = process.env.NOLIA_TEST_EMBEDDING_MODEL ?? "Qwen/Qwen3-Emb
 
 const electronPath = process.env.NOLIA_TEST_ELECTRON_PATH ?? path.resolve("node_modules/electron/dist/Electron.app/Contents/MacOS/Electron");
 const packagedAppPath = process.env.NOLIA_TEST_APP_PATH ?? path.resolve("release/mac-universal/Nolia.app/Contents/Resources/app.asar");
+const launchArgs = process.env.NOLIA_TEST_PACKAGED_EXE === "1" ? [] : [packagedAppPath];
 const root = await mkdtemp(path.join(os.tmpdir(), "nolia-installed-acceptance-"));
 const userData = path.join(root, "user-data");
 const workspaceRoot = path.join(root, "workspace");
@@ -29,7 +30,7 @@ try {
   await prepareFixture();
   application = await electron.launch({
     executablePath: electronPath,
-    args: [packagedAppPath],
+    args: launchArgs,
     env: {
       ...process.env,
       SILICONFLOW_API_KEY: "",
@@ -341,6 +342,7 @@ try {
     assert.equal(health?.watcher.status, "ready");
   });
 
+  if (apiKey) {
   const provider = { id: "siliconflow-acceptance", name: "SiliconFlow", providerId: "openai-compatible", model: primaryChatModel, baseUrl: "https://api.siliconflow.cn/v1", apiMode: "chat-completions", disabled: false };
   await check("SiliconFlow model listing, secret storage and connectivity", async () => {
     const result = await page.evaluate(async ({ provider, apiKey }) => {
@@ -542,10 +544,12 @@ try {
     assert.equal(search?.semanticAvailable, true);
     assert.ok(search?.items.length);
   });
+  }
 
   await mkdir(path.dirname(reportPath), { recursive: true });
   await writeFile(reportPath, `${JSON.stringify({
     passed: checks.length,
+    realAi: { executed: Boolean(apiKey), required: process.env.NOLIA_REQUIRE_REAL_AI === "1" },
     models: { primaryChatModel, fallbackChatModel, embeddingModel },
     checks,
     performanceMetrics: installedPerformanceMetrics
@@ -563,7 +567,7 @@ try {
   console.log(`Report: ${reportPath}`);
 } finally {
   await closeElectronApplication(application);
-  await rm(root, { recursive: true, force: true });
+  await rm(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 200 });
 }
 
 async function prepareFixture() {

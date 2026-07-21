@@ -3,8 +3,9 @@ import { defineConfig } from "@playwright/test";
 export default defineConfig({
   testDir: "tests/e2e",
   timeout: 60_000,
+  workers: process.platform === "win32" && process.arch === "arm64" ? 1 : undefined,
   expect: {
-    timeout: 5_000
+    timeout: process.platform === "win32" ? 30_000 : 5_000
   },
   use: {
     baseURL: "http://localhost:4273",
