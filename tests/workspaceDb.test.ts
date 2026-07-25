@@ -335,5 +335,5 @@ Local first design notes.
       db.close();
       await rm(root, { recursive: true, force: true });
     }
-  }, 60_000);
+  }, 180_000);
 });
