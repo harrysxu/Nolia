@@ -171,6 +171,9 @@ async function setupEditorWorkspace(page: Page) {
 async function openNote(page: Page, pathRel: string) {
   await page.getByRole("button", { name: pathRel, exact: true }).click();
   await expect(page.locator(".statusbar")).toContainText(pathRel);
+  const sourceContent = page.locator(".source-editor .cm-content");
+  await expect(sourceContent).toBeVisible();
+  await expect(sourceContent).not.toBeEmpty();
 }
 
 async function openFindReplace(page: Page) {

@@ -1235,8 +1235,7 @@ test("renders many Mermaid diagrams in a large document without overlap", async 
   await diagrams.first().click();
   const sequenceViewer = page.getByRole("dialog", { name: "图表预览" });
   await expect(sequenceViewer).toBeHidden();
-  await diagrams.first().focus();
-  await page.keyboard.press("Enter");
+  await diagrams.first().click({ modifiers: ["ControlOrMeta"] });
   await expect(sequenceViewer).toBeVisible();
   const sequenceDownloadPromise = page.waitForEvent("download");
   await sequenceViewer.getByRole("button", { name: "下载 PNG 图片" }).click();
