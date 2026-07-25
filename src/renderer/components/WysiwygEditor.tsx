@@ -579,7 +579,7 @@ export const WysiwygEditor = forwardRef<WysiwygEditorHandle, WysiwygEditorProps>
       }),
       MarkdownPreviewBlock.configure({
         sourceLabel: tr("Markdown 块源码"),
-        viewLabel: tr("查看图表"),
+        viewLabel: tr("编辑图表源码"),
         onOpenDiagram: setDiagramViewer
       }),
       NoliaCodeBlock.configure({

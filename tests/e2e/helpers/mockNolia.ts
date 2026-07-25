@@ -1,7 +1,7 @@
 import type { Page } from "@playwright/test";
 import { DEFAULT_SETTINGS } from "../../../src/shared/constants";
 import type { PluginDescriptor } from "../../../src/shared/extensions";
-import type { AiApiMode, AiEmbeddingSettings, AiProviderId, AiProviderProfilePublic, AiProviderTestRequest, AiRunEvent, AiSettingsPublic } from "../../../src/shared/ai";
+import type { AiApiMode, AiEmbeddingSettings, AiProviderId, AiProviderProfilePublic, AiProviderTestRequest, AiRunEvent, AiSettingsPublic, AiTaskSnapshot } from "../../../src/shared/ai";
 import type { DocumentDraft, SavedSearch, TagSummary, WorkspaceProbeResult, WorkspaceSessionSnapshot } from "../../../src/shared/contracts";
 import type { AppSettings, BacklinksResponse, FileTreeNode, ParsedDocument, RecentWorkspace, SearchResultItem, WorkspaceIndexedEvent, WorkspaceInfo } from "../../../src/shared/types";
 
@@ -43,6 +43,8 @@ export interface MockWorkspaceOptions {
   createdAt?: number;
   session?: WorkspaceSessionSnapshot | null;
   workspaceProbe?: WorkspaceProbeResult;
+  aiTasks?: AiTaskSnapshot[];
+  aiTaskReadDelays?: Record<string, number>;
 }
 
 export async function installMockNolia(page: Page, options: MockWorkspaceOptions = {}) {
@@ -71,7 +73,7 @@ export async function installMockNolia(page: Page, options: MockWorkspaceOptions
         rejectedApprovals: Array<{ taskId: string; approvalId: string; reason?: string }>;
         aiProviderTests: AiProviderTestRequest[];
         semanticIndexRequests: Array<{ settings?: Partial<AiEmbeddingSettings>; apiKey?: string }>;
-        aiRuns: Array<{ runId: string; taskId?: string; via?: "task" | "run"; instruction: string; entryPoint?: string; actionId?: string; clientContext?: unknown; conversation?: unknown; options?: unknown }>;
+        aiRuns: Array<{ runId: string; taskId?: string; via?: "task" | "run"; instruction: string; userMessage?: string; parentTaskId?: string; entryPoint?: string; actionId?: string; clientContext?: unknown; conversation?: unknown; options?: unknown }>;
       };
     };
 
@@ -880,7 +882,7 @@ export async function installMockNolia(page: Page, options: MockWorkspaceOptions
             }
           };
         },
-        startTask: async ({ instruction, clientContext, entryPoint, actionId, conversation, options, title }) => {
+        startTask: async ({ instruction, userMessage, parentTaskId, clientContext, entryPoint, actionId, conversation, options, title }) => {
           if (instruction.includes("模拟启动无响应")) {
             return await new Promise(() => {
               // Simulates an IPC call that never resolves before a task event is emitted.
@@ -888,7 +890,7 @@ export async function installMockNolia(page: Page, options: MockWorkspaceOptions
           }
           const runId = `mock-ai-${++aiRunCounter}`;
           const taskId = `mock-task-${aiRunCounter}`;
-          testWindow.__noliaMock.aiRuns.push({ runId, taskId, via: "task", instruction, entryPoint, actionId, clientContext, conversation, options });
+          testWindow.__noliaMock.aiRuns.push({ runId, taskId, via: "task", instruction, userMessage, parentTaskId, entryPoint, actionId, clientContext, conversation, options });
           aiRunListeners.forEach((listener) =>
             listener({
               type: "task-updated",
@@ -916,8 +918,14 @@ export async function installMockNolia(page: Page, options: MockWorkspaceOptions
           aiRunListeners.forEach((listener) => listener({ type: "cancelled", runId }));
           return { ok: true };
         },
-        listTasks: async () => [],
-        readTask: async () => undefined,
+        listTasks: async () => (rawOptions.aiTasks ?? []).map(({ id, runId, workspaceId, title, status, createdAt, updatedAt, lastError, pendingApprovalId }) => ({ id, runId, workspaceId, title, status, createdAt, updatedAt, lastError, pendingApprovalId })),
+        readTask: async ({ taskId }) => {
+          const delay = rawOptions.aiTaskReadDelays?.[taskId] ?? 0;
+          if (delay > 0) {
+            await new Promise((resolve) => window.setTimeout(resolve, delay));
+          }
+          return rawOptions.aiTasks?.find((task) => task.id === taskId);
+        },
         resumeTask: async () => undefined,
         cancelTask: async () => ({ ok: true }),
         approveProposal: async ({ taskId, approvalId }) => ({

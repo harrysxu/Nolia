@@ -1180,7 +1180,8 @@ test("immersive mode remains optional while direct system Markdown files coexist
       ["alpha.md", "# Alpha\n\nWorkspace body.\n"]
     ]);
     const externalFiles = new Map<string, string>([
-      ["/tmp/direct-note.md", "# Direct\n\nOpened from the system file manager.\n"]
+      ["/tmp/direct-note.md", "# Direct\n\nOpened from the system file manager.\n"],
+      ["/tmp/second-note.md", "# Second\n\nOpened from the temporary folder.\n"]
     ]);
     const testWindow = window as Window & {
       __emitAppCommand?: (command: string) => void;
@@ -1250,6 +1251,19 @@ test("immersive mode remains optional while direct system Markdown files coexist
             encoding: "utf-8" as const
           };
         },
+        openFolder: async () => ({
+          id: "folder-1",
+          rootPath: "/tmp",
+          realRootPath: "/tmp",
+          authorizedAt: Date.now(),
+          sequence: 1,
+          truncated: false,
+          nodes: [
+            { pathRel: "/tmp/direct-note.md", name: "direct-note.md", kind: "markdown", size: 1, mtimeMs: 0 },
+            { pathRel: "/tmp/second-note.md", name: "second-note.md", kind: "markdown", size: 1, mtimeMs: 0 }
+          ]
+        }),
+        closeFolder: async () => ({ ok: true }),
         writeAtomic: async ({ filePath, content }) => {
           externalFiles.set(filePath, content);
           testWindow.__externalSaved = content;
@@ -1327,6 +1341,24 @@ test("immersive mode remains optional while direct system Markdown files coexist
   await expect(page.locator(".editor-document-identity strong")).toHaveText("direct-note.md");
   await expect(page.locator(".editor-toolbar")).toBeVisible();
   await expect(page.locator(".ProseMirror")).toContainText("Direct");
+
+  page.once("dialog", (dialog) => dialog.accept());
+  await page.getByRole("button", { name: "打开所在文件夹" }).click();
+  await expect(page.locator(".external-folder-browser")).toBeVisible();
+  await page.getByRole("treeitem", { name: "second-note.md" }).click();
+  await expect(page.locator(".document-tab-label")).toHaveText(["alpha.md", "direct-note.md", "second-note.md"]);
+  await expect(page.locator(".external-folder-browser")).toBeVisible();
+  await expect(page.locator(".external-folder-browser .is-active")).toContainText("second-note.md");
+
+  await page.getByRole("tab", { name: "打开文档 direct-note.md" }).click();
+  await expect(page.locator(".external-folder-browser")).toBeVisible();
+  await expect(page.locator(".external-folder-browser .is-active")).toContainText("direct-note.md");
+  await page.getByRole("button", { name: "关闭文件夹" }).click();
+  await expect(page.locator(".external-folder-browser")).toHaveCount(0);
+  await page.getByRole("tab", { name: "打开文档 second-note.md" }).click();
+  await expect(page.locator(".external-folder-browser")).toHaveCount(0);
+  await page.getByRole("button", { name: "关闭文档 second-note.md" }).click();
+  await expect(page.locator(".editor-document-identity strong")).toHaveText("direct-note.md");
 
   await page.evaluate(() => (window as Window & { __emitAppCommand?: (command: string) => void }).__emitAppCommand?.("mode.source"));
   await page.locator(".cm-content").click();

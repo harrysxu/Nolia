@@ -456,6 +456,8 @@ export const AiRunCancelRequestSchema = z.object({
 
 export const AiTaskStartRequestSchema = AiRunStartRequestSchema.extend({
   title: z.string().min(1).optional(),
+  userMessage: z.string().min(1).optional(),
+  parentTaskId: z.string().min(1).optional(),
   options: AiRunStartRequestSchema.shape.options.unwrap().extend({
     maxToolRounds: z.number().int().positive().max(30).optional()
   }).strict().optional()

@@ -27,6 +27,7 @@ export function MarkdownPreview({ html, renderDiagrams = true, onMermaidEdit, on
   const { tr } = useRendererI18n();
   const previewRef = useRef<HTMLDivElement>(null);
   const [diagramViewer, setDiagramViewer] = useState<DiagramViewerContent | undefined>();
+  const canEditMermaid = Boolean(onMermaidEdit);
 
   useEffect(() => {
     const root = previewRef.current;
@@ -39,17 +40,17 @@ export function MarkdownPreview({ html, renderDiagrams = true, onMermaidEdit, on
     if (!diagrams.length) {
       return;
     }
-    diagrams.forEach((diagram) => prepareDiagramInteraction(diagram, tr("查看图表")));
+    diagrams.forEach((diagram) => prepareDiagramInteraction(diagram, tr(canEditMermaid ? "编辑图表源码" : "查看图表")));
     let canceled = false;
     void renderMermaidDiagrams(diagrams, () => canceled).then(() => {
       if (!canceled) {
-        diagrams.forEach((diagram) => prepareDiagramInteraction(diagram, tr("查看图表")));
+        diagrams.forEach((diagram) => prepareDiagramInteraction(diagram, tr(canEditMermaid ? "编辑图表源码" : "查看图表")));
       }
     });
     return () => {
       canceled = true;
     };
-  }, [html, renderDiagrams, tr]);
+  }, [canEditMermaid, html, renderDiagrams, tr]);
 
   useEffect(() => {
     setDiagramViewer(undefined);
@@ -76,8 +77,15 @@ export function MarkdownPreview({ html, renderDiagrams = true, onMermaidEdit, on
       return;
     }
     event.preventDefault();
-    diagram.focus({ preventScroll: true });
-    return;
+    event.stopPropagation();
+    const location = diagramLocation(root, diagram);
+    if (event.metaKey || event.ctrlKey) {
+      openDiagramViewer(diagram, location);
+    } else if (onMermaidEdit) {
+      onMermaidEdit(location);
+    } else {
+      diagram.focus({ preventScroll: true });
+    }
   };
 
   const handleKeyDown = (event: KeyboardEvent<HTMLDivElement>) => {
@@ -89,11 +97,13 @@ export function MarkdownPreview({ html, renderDiagrams = true, onMermaidEdit, on
     if (!diagram || !root?.contains(diagram)) {
       return;
     }
-    const diagrams = Array.from(root.querySelectorAll<HTMLElement>(".mermaid"));
-    const location = {
-      index: diagrams.indexOf(diagram),
-      markdown: diagram.dataset.markdown
-    };
+    const location = diagramLocation(root, diagram);
+    if (event.key === "Enter" && (event.metaKey || event.ctrlKey)) {
+      event.preventDefault();
+      event.stopPropagation();
+      openDiagramViewer(diagram, location);
+      return;
+    }
     if (event.key === "F2" || (event.key.toLowerCase() === "e" && !event.metaKey && !event.ctrlKey && !event.altKey)) {
       if (!onMermaidEdit) {
         return;
@@ -107,7 +117,12 @@ export function MarkdownPreview({ html, renderDiagrams = true, onMermaidEdit, on
       return;
     }
     event.preventDefault();
-    openDiagramViewer(diagram, location);
+    event.stopPropagation();
+    if (onMermaidEdit) {
+      onMermaidEdit(location);
+    } else {
+      openDiagramViewer(diagram, location);
+    }
   };
 
   const openDiagramViewer = (diagram: HTMLElement, location: MarkdownPreviewDiagramClick) => {
@@ -135,8 +150,16 @@ function prepareDiagramInteraction(diagram: HTMLElement, label: string) {
   diagram.tabIndex = 0;
   diagram.setAttribute("role", "button");
   diagram.setAttribute("aria-label", label);
-  diagram.setAttribute("aria-keyshortcuts", "Enter Space F2 E");
+  diagram.setAttribute("aria-keyshortcuts", "Enter Space F2 E Control+Enter Meta+Enter");
   diagram.title = label;
+}
+
+function diagramLocation(root: HTMLElement, diagram: HTMLElement): MarkdownPreviewDiagramClick {
+  const diagrams = Array.from(root.querySelectorAll<HTMLElement>(".mermaid"));
+  return {
+    index: diagrams.indexOf(diagram),
+    markdown: diagram.dataset.markdown
+  };
 }
 
 function attachCodeLanguageControls(

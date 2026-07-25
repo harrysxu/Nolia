@@ -340,6 +340,20 @@ export interface AiTaskSummary {
   pendingApprovalId?: string;
 }
 
+export interface AiTaskConversationMessage {
+  id: string;
+  runId: string;
+  role: "user" | "assistant";
+  content: string;
+  createdAt: number;
+}
+
+export interface AiTaskModelRef {
+  providerId: AiProviderId;
+  providerProfileId: AiProviderProfileId;
+  model: string;
+}
+
 export interface AiTaskStep {
   id: string;
   index: number;
@@ -385,7 +399,12 @@ export interface AiWriteTransaction {
 }
 
 export interface AiTaskSnapshot extends AiTaskSummary {
+  historyVersion?: 1 | 2;
   instruction: string;
+  messages?: AiTaskConversationMessage[];
+  usage?: AiUsage;
+  model?: AiTaskModelRef;
+  parentTaskId?: string;
   steps: AiTaskStep[];
   sources: AiSourceRef[];
   approvals: AiToolApproval[];
@@ -395,6 +414,8 @@ export interface AiTaskSnapshot extends AiTaskSummary {
 
 export interface AiTaskStartRequest extends AiRunStartRequest {
   title?: string;
+  userMessage?: string;
+  parentTaskId?: string;
 }
 
 export interface AiTaskStartResponse {

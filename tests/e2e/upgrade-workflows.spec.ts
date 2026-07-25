@@ -1,7 +1,202 @@
 import AxeBuilder from "@axe-core/playwright";
 import { expect, test } from "@playwright/test";
 
+import type { AiTaskSnapshot } from "../../src/shared/ai";
+import type { AppSettings } from "../../src/shared/types";
 import { installMockNolia } from "./helpers/mockNolia";
+
+const enabledAiSettings: AppSettings["ai"] = {
+  enabled: true,
+  defaultProviderId: "openai-compatible",
+  providers: [{ id: "openai-compatible", name: "OpenAI-compatible", providerId: "openai-compatible", model: "gpt-4.1", baseUrl: "https://api.example.test/v1", apiMode: "chat-completions" }],
+  embedding: { enabled: false, providerId: "ollama", model: "", baseUrl: "http://localhost:11434", apiMode: "ollama-native" },
+  conversationHistoryTurns: 3,
+  agentMaxSteps: 12,
+  allowCurrentNoteContent: true,
+  allowWorkspaceSearch: true,
+  allowReadSearchResults: true,
+  allowWorkspaceRead: true,
+  allowWorkspaceOperations: true
+};
+
+function completedTask(id = "task-history", updatedAt = Date.now()): AiTaskSnapshot {
+  return {
+    id,
+    runId: `run-${id}`,
+    workspaceId: "ws_full_selftest",
+    title: `历史任务 ${id}`,
+    status: "completed",
+    createdAt: updatedAt - 1_000,
+    updatedAt,
+    historyVersion: 2,
+    instruction: "内部任务指令",
+    messages: [
+      { id: `${id}:user`, runId: `run-${id}`, role: "user", content: "请总结发布说明", createdAt: updatedAt - 900 },
+      { id: `${id}:assistant`, runId: `run-${id}`, role: "assistant", content: "## 发布摘要\n\n已经完成核心功能。", createdAt: updatedAt - 800 }
+    ],
+    usage: { inputTokens: 10, outputTokens: 12, totalTokens: 22 },
+    model: { providerId: "openai-compatible", providerProfileId: "openai-compatible", model: "gpt-4.1" },
+    steps: [{ id: `${id}:step`, index: 1, kind: "tool", title: "searchNotes", summary: "找到发布说明", createdAt: updatedAt - 700 }],
+    sources: [{ kind: "note", pathRel: "release.md", title: "Release", snippet: "Version 1.0" }],
+    approvals: [{ id: `${id}:approval`, taskId: id, runId: `run-${id}`, toolName: "proposeWorkspacePatch", input: {}, status: "approved", createdAt: updatedAt - 600, proposalId: `${id}:proposal` }],
+    proposals: [{ id: `${id}:proposal`, runId: `run-${id}`, taskId: id, approvalId: `${id}:approval`, createdAt: updatedAt - 500, status: "applied", workspaceId: "ws_full_selftest", pathRel: "release.md", title: "更新发布说明", summary: "追加发布摘要", sourceSnapshotHash: "before", baseHash: "before", operations: [{ id: `${id}:operation`, type: "append", pathRel: "release.md", afterText: "已经完成核心功能。" }] }],
+    writes: [{ id: `${id}:write`, taskId: id, proposalId: `${id}:proposal`, workspaceId: "ws_full_selftest", createdAt: updatedAt - 400, status: "committed", operations: [{ pathRel: "release.md", operationId: `${id}:operation`, status: "applied", beforeHash: "before", afterHash: "after" }] }]
+  };
+}
+
+test("opens the AI task center and returns to the current document", async ({ page }) => {
+  await installMockNolia(page, {
+    files: {
+      "project.md": "# Project\n\nKeep this document open while visiting the AI task center."
+    }
+  });
+  await page.goto("/");
+
+  const navigation = page.getByRole("navigation", { name: "工作区导航" });
+  const aiButton = navigation.getByRole("button", { name: "AI", exact: true });
+  await aiButton.click();
+
+  await expect(aiButton).toHaveClass(/is-active/);
+  await expect(page.getByRole("heading", { name: "AI 任务" })).toBeVisible();
+  await expect(page.getByText("还没有 AI 任务。", { exact: true })).toBeVisible();
+  await expect(page.getByRole("tablist", { name: "打开的文档" })).toHaveCount(0);
+  await expect(page.getByRole("tablist", { name: "文档检查器" })).toHaveCount(0);
+
+  await navigation.getByRole("button", { name: "文件", exact: true }).click();
+  await expect(page.getByRole("tab", { name: "打开文档 project.md" })).toHaveAttribute("aria-selected", "true");
+  await expect(page.getByRole("tablist", { name: "文档检查器" })).toBeVisible();
+});
+
+test("restores the AI task center from the workspace session", async ({ page }) => {
+  const now = Date.now();
+  await installMockNolia(page, {
+    files: {
+      "project.md": "# Project"
+    },
+    session: {
+      workspaceId: "ws_full_selftest",
+      activePathRel: "project.md",
+      documents: [{ pathRel: "project.md", mode: "source", lastActiveAt: now }],
+      recentlyClosed: [],
+      sidebarView: "ai",
+      inspectorView: "outline",
+      updatedAt: now
+    }
+  });
+  await page.goto("/");
+
+  const aiButton = page.getByRole("navigation", { name: "工作区导航" }).getByRole("button", { name: "AI", exact: true });
+  await expect(aiButton).toHaveClass(/is-active/);
+  await expect(page.getByRole("heading", { name: "AI 任务" })).toBeVisible();
+});
+
+test("opens persisted AI task details without showing an empty sidebar", async ({ page }) => {
+  const task = completedTask();
+  await installMockNolia(page, { aiTasks: [task] });
+  await page.goto("/");
+  await page.getByRole("navigation", { name: "工作区导航" }).getByRole("button", { name: "AI", exact: true }).click();
+  await page.getByText(task.title, { exact: true }).click();
+
+  await expect(page.getByRole("heading", { name: task.title })).toBeVisible();
+  await expect(page.getByRole("region", { name: "Nolia AI" })).toHaveCount(0);
+  await expect(page.getByText("请总结发布说明", { exact: true })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "发布摘要" })).toBeVisible();
+
+  await page.getByRole("tab", { name: "执行记录" }).click();
+  await expect(page.getByText("searchNotes", { exact: true })).toBeVisible();
+  await expect(page.getByText("Release", { exact: true })).toBeVisible();
+  await expect(page.getByText("Token 使用：22", { exact: true })).toBeVisible();
+
+  await page.getByRole("tab", { name: "变更" }).click();
+  await expect(page.getByText("更新发布说明", { exact: true })).toBeVisible();
+  await expect(page.getByText("已提交", { exact: true })).toBeVisible();
+
+  await page.setViewportSize({ width: 780, height: 520 });
+  const accessibility = await new AxeBuilder({ page }).include(".ai-task-detail").analyze();
+  expect(accessibility.violations).toEqual([]);
+
+  await page.getByRole("button", { name: "返回 AI 任务" }).click();
+  await expect(page.getByRole("heading", { name: "AI 任务" })).toBeVisible();
+});
+
+test("ignores stale task reads when switching between current task details", async ({ page }) => {
+  const now = Date.now();
+  const slow = completedTask("slow", now + 1);
+  const fast = completedTask("fast", now);
+  await installMockNolia(page, { aiTasks: [slow, fast], aiTaskReadDelays: { slow: 100 } });
+  await page.goto("/");
+  await page.getByRole("navigation", { name: "工作区导航" }).getByRole("button", { name: "AI", exact: true }).click();
+  await page.getByText(slow.title, { exact: true }).click();
+  await page.getByRole("button", { name: "返回 AI 任务" }).click();
+  await page.getByText(fast.title, { exact: true }).click();
+
+  await expect(page.getByRole("heading", { name: fast.title })).toBeVisible();
+  await page.waitForTimeout(150);
+  await expect(page.getByRole("heading", { name: fast.title })).toBeVisible();
+  await expect(page.getByRole("heading", { name: slow.title })).toHaveCount(0);
+});
+
+test("continues history in a linked task and resets it for a new conversation", async ({ page }) => {
+  const task = completedTask();
+  await installMockNolia(page, { aiTasks: [task], settings: { ai: enabledAiSettings } });
+  await page.goto("/");
+  await page.getByRole("navigation", { name: "工作区导航" }).getByRole("button", { name: "AI", exact: true }).click();
+  await page.getByText(task.title, { exact: true }).click();
+  await page.getByRole("button", { name: "继续对话" }).click();
+
+  const sidebar = page.getByRole("region", { name: "Nolia AI" });
+  await expect(sidebar).toContainText("已经完成核心功能");
+  await sidebar.getByPlaceholder("询问 Nolia AI...").fill("还有哪些风险？");
+  await sidebar.getByRole("button", { name: "发送" }).click();
+  await expect.poll(() => page.evaluate(() => (window as typeof window & { __noliaMock: { aiRuns: Array<{ parentTaskId?: string; userMessage?: string }> } }).__noliaMock.aiRuns.at(-1))).toMatchObject({ parentTaskId: task.id, userMessage: "还有哪些风险？" });
+  await expect(sidebar).toContainText("Mock response: 还有哪些风险？");
+
+  await sidebar.getByRole("button", { name: "关闭 AI" }).click();
+  await page.getByRole("button", { name: "返回 AI 任务" }).click();
+  await page.getByRole("button", { name: "新对话", exact: true }).first().click();
+  await expect(page.getByRole("region", { name: "Nolia AI" })).not.toContainText("已经完成核心功能");
+});
+
+test("shows failed task diagnostics and opens pending approvals from task details", async ({ page }) => {
+  const now = Date.now();
+  const failed: AiTaskSnapshot = { ...completedTask("failed", now), title: "失败任务", status: "failed", lastError: "模型服务连接超时" };
+  const pendingBase = completedTask("pending", now + 1);
+  const pending: AiTaskSnapshot = {
+    ...pendingBase,
+    title: "待审批任务",
+    status: "waiting_approval",
+    pendingApprovalId: "pending:approval",
+    approvals: pendingBase.approvals.map((approval) => ({ ...approval, status: "pending" })),
+    proposals: pendingBase.proposals.map((proposal) => ({ ...proposal, status: "pending" }))
+  };
+  await installMockNolia(page, { aiTasks: [pending, failed] });
+  await page.goto("/");
+  await page.getByRole("navigation", { name: "工作区导航" }).getByRole("button", { name: "AI", exact: true }).click();
+
+  await page.getByText(failed.title, { exact: true }).click();
+  await page.getByRole("tab", { name: "执行记录" }).click();
+  await expect(page.getByText("模型服务连接超时", { exact: true })).toBeVisible();
+  await page.getByRole("button", { name: "返回 AI 任务" }).click();
+
+  await page.getByText(pending.title, { exact: true }).click();
+  await page.getByRole("button", { name: "查看审批" }).click();
+  await expect(page.getByRole("heading", { name: "审查 AI 修改" })).toBeVisible();
+  await page.getByRole("button", { name: "返回任务" }).click();
+  await expect(page.getByRole("heading", { name: pending.title })).toBeVisible();
+});
+
+test("renders AI task history navigation in English", async ({ page }) => {
+  const task = completedTask("english");
+  await installMockNolia(page, { aiTasks: [task], settings: { language: "en-US" } });
+  await page.goto("/");
+  await page.getByRole("navigation", { name: "Workspace navigation" }).getByRole("button", { name: "AI", exact: true }).click();
+  await expect(page.getByRole("heading", { name: "AI Tasks" })).toBeVisible();
+  await page.getByText(task.title, { exact: true }).click();
+  await expect(page.getByRole("tab", { name: "Conversation" })).toBeVisible();
+  await expect(page.getByRole("tab", { name: "Activity" })).toBeVisible();
+  await expect(page.getByRole("tab", { name: "Changes" })).toBeVisible();
+  await expect(page.getByRole("button", { name: "Back to AI tasks" })).toBeVisible();
+});
 
 test("initializes a writable Markdown folder only after confirmation", async ({ page }) => {
   await installMockNolia(page, {

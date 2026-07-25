@@ -1,10 +1,11 @@
-import { mkdir, mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, readdir, rm, stat, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { describe, expect, it } from "vitest";
 
-import type { AiRunEvent, AiTaskStartRequest } from "../src/shared/ai";
+import type { AiRunEvent, AiTaskSnapshot, AiTaskStartRequest } from "../src/shared/ai";
 import { AiTaskService } from "../src/main/ai/aiTaskService";
+import { WORKSPACE_DIRECTORIES, WORKSPACE_META_DIR } from "../src/shared/constants";
 import { DiagnosticsService } from "../src/main/services/diagnosticsService";
 import { FileSystemService } from "../src/main/services/fileSystemService";
 import { HistoryService } from "../src/main/services/historyService";
@@ -12,6 +13,173 @@ import { SettingsService } from "../src/main/services/settingsService";
 import { WorkspaceService } from "../src/main/services/workspaceService";
 
 describe("AI task service", () => {
+  it("persists visible conversation, usage, model, and parent task metadata", async () => {
+    const userData = await makeTempDir();
+    const home = await makeTempDir();
+    const workspaceRoot = await makeTempDir();
+    let workspaces: WorkspaceService | undefined;
+    try {
+      const settings = new SettingsService(userData);
+      await settings.init();
+      const diagnostics = new DiagnosticsService(home);
+      await diagnostics.init();
+      workspaces = new WorkspaceService(settings, diagnostics);
+      const workspace = await workspaces.createWorkspace({ path: workspaceRoot });
+      const files = new FileSystemService(workspaces, new HistoryService());
+      const tasks = new AiTaskService({
+        getSettings: () => ({
+          activeProvider: { id: "silicon-flow", providerId: "openai-compatible", model: "deepseek-ai/DeepSeek-V3.2" }
+        }),
+        startRun: () => ({ runId: "run-history" }),
+        cancelRun: () => ({ ok: true })
+      } as never, { workspaces, files, settings, diagnostics }, () => undefined);
+
+      const started = await tasks.start({
+        ...taskRequest(workspace!.workspaceId),
+        instruction: "Internal normalized instruction",
+        userMessage: "请总结当前笔记",
+        parentTaskId: "task-parent",
+        conversation: [{ role: "user", content: "上一轮问题" }, { role: "assistant", content: "上一轮回答" }]
+      });
+      await tasks.recordEvent({ type: "text-delta", runId: started.runId, text: "这是" });
+      await tasks.recordEvent({ type: "text-delta", runId: started.runId, text: "完整回答。" });
+      await tasks.recordEvent({ type: "usage", runId: started.runId, usage: { inputTokens: 12, outputTokens: 8, totalTokens: 20 } });
+      await tasks.recordEvent({ type: "done", runId: started.runId });
+
+      const stored = await tasks.read({ taskId: started.taskId });
+      expect(stored).toMatchObject({
+        historyVersion: 2,
+        parentTaskId: "task-parent",
+        status: "completed",
+        usage: { inputTokens: 12, outputTokens: 8, totalTokens: 20 },
+        model: { providerId: "openai-compatible", providerProfileId: "silicon-flow", model: "deepseek-ai/DeepSeek-V3.2" }
+      });
+      expect(stored?.messages?.map((message) => [message.role, message.content])).toEqual([
+        ["user", "上一轮问题"],
+        ["assistant", "上一轮回答"],
+        ["user", "请总结当前笔记"],
+        ["assistant", "这是完整回答。"]
+      ]);
+      expect(stored?.messages?.some((message) => message.content === "Internal normalized instruction")).toBe(false);
+    } finally {
+      await workspaces?.closeActiveWorkspace();
+      await rm(userData, { recursive: true, force: true });
+      await rm(home, { recursive: true, force: true });
+      await rm(workspaceRoot, { recursive: true, force: true });
+    }
+  });
+
+  it("starts with only v2 task history and archives legacy records", async () => {
+    const userData = await makeTempDir();
+    const home = await makeTempDir();
+    const workspaceRoot = await makeTempDir();
+    let workspaces: WorkspaceService | undefined;
+    try {
+      const settings = new SettingsService(userData);
+      await settings.init();
+      const diagnostics = new DiagnosticsService(home);
+      await diagnostics.init();
+      workspaces = new WorkspaceService(settings, diagnostics);
+      const workspace = await workspaces.createWorkspace({ path: workspaceRoot });
+      const files = new FileSystemService(workspaces, new HistoryService());
+      const runtimeServices = { workspaces, files, settings, diagnostics };
+      const tasks = new AiTaskService({ startRun: () => ({ runId: "unused" }) } as never, runtimeServices, () => undefined);
+      const currentTask: AiTaskSnapshot = {
+        id: "current-task",
+        runId: "run-current",
+        workspaceId: workspace!.workspaceId,
+        title: "新任务",
+        status: "completed",
+        createdAt: 100,
+        updatedAt: 200,
+        historyVersion: 2,
+        instruction: "当前请求",
+        messages: [{ id: "current-user", runId: "run-current", role: "user", content: "当前请求", createdAt: 100 }],
+        steps: [],
+        sources: [],
+        approvals: [],
+        proposals: [],
+        writes: []
+      };
+      const legacyDbTask = { ...currentTask, id: "legacy-db-task", runId: "run-legacy-db", historyVersion: 1, messages: undefined } as AiTaskSnapshot;
+      const active = workspaces.getActiveWorkspace()!;
+      active.db.saveAiTask(currentTask);
+      active.db.saveAiTask(legacyDbTask);
+      await active.db.save();
+
+      const legacyDir = path.join(workspaceRoot, WORKSPACE_META_DIR, WORKSPACE_DIRECTORIES.aiTasks);
+      await mkdir(legacyDir, { recursive: true });
+      await writeFile(path.join(legacyDir, "legacy-json-task.json"), JSON.stringify({ ...legacyDbTask, id: "legacy-json-task" }));
+
+      const listed = await tasks.list();
+      expect(listed.map((task) => task.id)).toEqual(["current-task"]);
+      expect(await tasks.read({ taskId: "legacy-db-task" })).toBeUndefined();
+      expect(await tasks.read({ taskId: "legacy-json-task" })).toBeUndefined();
+      expect(await pathExists(path.join(legacyDir, "legacy-json-task.json"))).toBe(false);
+      const backupRoot = path.join(workspaceRoot, WORKSPACE_META_DIR, "backup");
+      const backups = await readdir(backupRoot);
+      expect(backups.some((entry) => entry.startsWith("ai-tasks-legacy-"))).toBe(true);
+    } finally {
+      await workspaces?.closeActiveWorkspace();
+      await rm(userData, { recursive: true, force: true });
+      await rm(home, { recursive: true, force: true });
+      await rm(workspaceRoot, { recursive: true, force: true });
+    }
+  });
+
+  it("keeps current task history readable when legacy archive creation fails", async () => {
+    const userData = await makeTempDir();
+    const home = await makeTempDir();
+    const workspaceRoot = await makeTempDir();
+    let workspaces: WorkspaceService | undefined;
+    try {
+      const settings = new SettingsService(userData);
+      await settings.init();
+      const diagnostics = new DiagnosticsService(home);
+      await diagnostics.init();
+      workspaces = new WorkspaceService(settings, diagnostics);
+      const workspace = await workspaces.createWorkspace({ path: workspaceRoot });
+      const files = new FileSystemService(workspaces, new HistoryService());
+      const tasks = new AiTaskService({ startRun: () => ({ runId: "unused" }) } as never, { workspaces, files, settings, diagnostics }, () => undefined);
+      const currentTask: AiTaskSnapshot = {
+        id: "current-task",
+        runId: "run-current",
+        workspaceId: workspace!.workspaceId,
+        title: "新任务",
+        status: "completed",
+        createdAt: 100,
+        updatedAt: 200,
+        historyVersion: 2,
+        instruction: "当前请求",
+        messages: [{ id: "current-user", runId: "run-current", role: "user", content: "当前请求", createdAt: 100 }],
+        steps: [],
+        sources: [],
+        approvals: [],
+        proposals: [],
+        writes: []
+      };
+      const active = workspaces.getActiveWorkspace()!;
+      active.db.saveAiTask(currentTask);
+      await active.db.save();
+
+      const legacyDir = path.join(workspaceRoot, WORKSPACE_META_DIR, WORKSPACE_DIRECTORIES.aiTasks);
+      await mkdir(legacyDir, { recursive: true });
+      await writeFile(path.join(legacyDir, "legacy-json-task.json"), JSON.stringify({ id: "legacy-json-task" }));
+      const backupPath = path.join(workspaceRoot, WORKSPACE_META_DIR, "backup");
+      await mkdir(backupPath, { recursive: true });
+      await rm(backupPath, { recursive: true, force: true });
+      await writeFile(backupPath, "backup path is a file");
+
+      await expect(tasks.list()).resolves.toMatchObject([{ id: "current-task" }]);
+      await expect(pathExists(path.join(legacyDir, "legacy-json-task.json"))).resolves.toBe(true);
+    } finally {
+      await workspaces?.closeActiveWorkspace();
+      await rm(userData, { recursive: true, force: true });
+      await rm(home, { recursive: true, force: true });
+      await rm(workspaceRoot, { recursive: true, force: true });
+    }
+  });
+
   it("persists proposal approvals, writes files, and can undo the write transaction", async () => {
     const userData = await makeTempDir();
     const home = await makeTempDir();

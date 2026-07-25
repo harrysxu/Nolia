@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { readdir, readFile } from "node:fs/promises";
+import { mkdir, readdir, rename } from "node:fs/promises";
 import path from "node:path";
 
 import { WORKSPACE_DIRECTORIES, WORKSPACE_META_DIR } from "../../shared/constants";
@@ -7,6 +7,7 @@ import type {
   AiPatchOperation,
   AiPatchProposal,
   AiRunEvent,
+  AiTaskConversationMessage,
   AiTaskApprovalRequest,
   AiTaskCancelRequest,
   AiTaskReadRequest,
@@ -32,6 +33,7 @@ export class AiTaskService {
   private readonly activeTasks = new Map<string, AiTaskSnapshot>();
   private readonly pendingEventsByRun = new Map<string, AiRunEvent[]>();
   private readonly pendingEventCleanupTimers = new Map<string, ReturnType<typeof setTimeout>>();
+  private readonly preparedTaskHistoryWorkspaces = new Set<string>();
 
   constructor(
     private readonly ai: AiService,
@@ -44,6 +46,7 @@ export class AiTaskService {
     this.activeTasks.set(task.id, task);
     const response = this.ai.startRun(request);
     task.runId = response.runId;
+    task.messages = task.messages?.map((message) => message.runId === "pending" ? { ...message, runId: response.runId } : message);
     task.updatedAt = Date.now();
     this.activeRuns.set(task.id, response.runId);
     this.activeTaskIdsByRun.set(response.runId, task.id);
@@ -218,7 +221,16 @@ export class AiTaskService {
       this.bufferPendingRunEvent(event);
       return;
     }
-    if (event.type === "text-delta" || event.type === "usage") {
+    if (event.type === "text-delta") {
+      task.messages = appendConversationDelta(task.messages ?? [], event.runId, event.text);
+      task.updatedAt = Date.now();
+      this.scheduleTaskSave(task);
+      return;
+    }
+    if (event.type === "usage") {
+      task.usage = { ...task.usage, ...event.usage };
+      task.updatedAt = Date.now();
+      this.scheduleTaskSave(task);
       return;
     }
     if (event.type === "tool-call") {
@@ -279,6 +291,23 @@ export class AiTaskService {
 
   private async createTask(request: AiTaskStartRequest): Promise<AiTaskSnapshot> {
     const now = Date.now();
+    const activeProvider = this.ai.getSettings?.().activeProvider;
+    const messages: AiTaskConversationMessage[] = [
+      ...(request.conversation ?? []).map((message, index) => ({
+        id: `context:${now}:${index}`,
+        runId: "pending",
+        role: message.role,
+        content: message.content,
+        createdAt: now
+      })),
+      {
+        id: `request:${now}`,
+        runId: "pending",
+        role: "user",
+        content: request.userMessage ?? request.instruction,
+        createdAt: now
+      }
+    ];
     const task: AiTaskSnapshot = {
       id: randomUUID(),
       runId: "",
@@ -287,7 +316,15 @@ export class AiTaskService {
       status: "queued",
       createdAt: now,
       updatedAt: now,
+      historyVersion: 2,
       instruction: request.instruction,
+      messages,
+      model: activeProvider ? {
+        providerId: activeProvider.providerId,
+        providerProfileId: activeProvider.id,
+        model: activeProvider.model
+      } : undefined,
+      parentTaskId: request.parentTaskId,
       steps: [{ id: randomUUID(), index: 1, kind: "model", title: "Task created", summary: request.instruction, createdAt: now }],
       sources: [],
       approvals: [],
@@ -517,21 +554,8 @@ export class AiTaskService {
     if (!active) {
       return [];
     }
-    const stored = active.db.listAiTasks().map(normalizeStoredTask);
-    if (stored.length) {
-      return stored;
-    }
-    const dir = tasksDir(active.info.rootPath);
-    try {
-      const entries = await readdir(dir);
-      const tasks = await Promise.all(entries.filter((entry) => entry.endsWith(".json")).map((entry) => readTaskFile(path.join(dir, entry))));
-      const migrated = tasks.filter((task): task is AiTaskSnapshot => Boolean(task)).map(normalizeStoredTask);
-      for (const task of migrated) active.db.saveAiTask(task);
-      if (migrated.length) await active.db.save();
-      return migrated;
-    } catch {
-      return [];
-    }
+    await this.prepareTaskHistory(active.info.workspaceId, active.info.rootPath);
+    return active.db.listAiTasks();
   }
 
   private async readTask(taskId: string): Promise<AiTaskSnapshot | undefined> {
@@ -543,16 +567,59 @@ export class AiTaskService {
     if (!active) {
       return undefined;
     }
+    await this.prepareTaskHistory(active.info.workspaceId, active.info.rootPath);
     const stored = active.db.readAiTask(taskId);
-    if (stored) return normalizeStoredTask(stored);
-    const legacy = await readTaskFile(path.join(tasksDir(active.info.rootPath), `${safeTaskId(taskId)}.json`));
-    if (legacy) {
-      const task = normalizeStoredTask(legacy);
-      active.db.saveAiTask(task);
-      await active.db.save();
-      return task;
+    return stored && isCurrentAiTask(stored) ? stored : undefined;
+  }
+
+  private async prepareTaskHistory(workspaceId: string, rootPath: string): Promise<void> {
+    if (this.preparedTaskHistoryWorkspaces.has(workspaceId)) {
+      return;
     }
-    return undefined;
+    const active = this.services.workspaces.getActiveWorkspace();
+    if (!active || active.info.workspaceId !== workspaceId) {
+      return;
+    }
+    const removed = active.db.removeLegacyAiTasks();
+    if (removed) {
+      this.services.diagnostics.info("Removed legacy AI task history", { workspaceId, count: removed });
+    }
+    await this.archiveLegacyTaskFiles(rootPath);
+    this.preparedTaskHistoryWorkspaces.add(workspaceId);
+  }
+
+  private async archiveLegacyTaskFiles(rootPath: string): Promise<void> {
+    const sourceDir = tasksDir(rootPath);
+    let entries: string[];
+    try {
+      entries = await readdir(sourceDir);
+    } catch {
+      return;
+    }
+    const taskFiles = entries.filter((entry) => entry.endsWith(".json"));
+    if (!taskFiles.length) {
+      return;
+    }
+    const archiveDir = path.join(rootPath, WORKSPACE_META_DIR, "backup", `ai-tasks-legacy-${Date.now()}`);
+    try {
+      await mkdir(archiveDir, { recursive: true });
+    } catch (error) {
+      this.services.diagnostics.warn("Failed to create legacy AI task archive", {
+        path: archiveDir,
+        error: error instanceof Error ? error.message : String(error)
+      });
+      return;
+    }
+    for (const entry of taskFiles) {
+      try {
+        await rename(path.join(sourceDir, entry), path.join(archiveDir, entry));
+      } catch (error) {
+        this.services.diagnostics.error("Failed to archive legacy AI task", {
+          path: entry,
+          error: error instanceof Error ? error.message : String(error)
+        });
+      }
+    }
   }
 
   private async saveTask(task: AiTaskSnapshot): Promise<void> {
@@ -563,6 +630,23 @@ export class AiTaskService {
     const runtime = this.services.workspaces.requireWorkspace(workspaceId);
     runtime.db.saveAiTask(task);
     await runtime.db.save();
+  }
+
+  private scheduleTaskSave(task: AiTaskSnapshot): void {
+    const workspaceId = task.workspaceId;
+    if (!workspaceId) {
+      return;
+    }
+    try {
+      const runtime = this.services.workspaces.requireWorkspace(workspaceId);
+      runtime.db.saveAiTask(task);
+      runtime.db.scheduleSave(250);
+    } catch (error) {
+      this.services.diagnostics.error("Failed to schedule AI task history save", {
+        taskId: task.id,
+        error: error instanceof Error ? error.message : String(error)
+      });
+    }
   }
 }
 
@@ -702,25 +786,15 @@ function tasksDir(rootPath: string): string {
   return path.join(rootPath, WORKSPACE_META_DIR, WORKSPACE_DIRECTORIES.aiTasks);
 }
 
-function safeTaskId(value: string): string {
-  return value.replace(/[^a-zA-Z0-9_-]/g, "-");
+function isCurrentAiTask(task: AiTaskSnapshot): boolean {
+  return task.historyVersion === 2 && Array.isArray(task.messages);
 }
 
-async function readTaskFile(filePath: string): Promise<AiTaskSnapshot | undefined> {
-  try {
-    return JSON.parse(await readFile(filePath, "utf8")) as AiTaskSnapshot;
-  } catch {
-    return undefined;
+function appendConversationDelta(messages: AiTaskConversationMessage[], runId: string, text: string): AiTaskConversationMessage[] {
+  const id = `${runId}:assistant`;
+  const existing = messages.find((message) => message.id === id);
+  if (!existing) {
+    return [...messages, { id, runId, role: "assistant", content: text, createdAt: Date.now() }];
   }
-}
-
-function normalizeStoredTask(task: AiTaskSnapshot): AiTaskSnapshot {
-  return {
-    ...task,
-    writes: task.writes.map((transaction) => ({
-      ...transaction,
-      status: transaction.status ?? (transaction.undoneAt ? "rolled_back" : "committed"),
-      operations: transaction.operations.map((operation) => ({ ...operation, status: operation.status ?? "applied" }))
-    }))
-  };
+  return messages.map((message) => message.id === id ? { ...message, content: `${message.content}${text}` } : message);
 }

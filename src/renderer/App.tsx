@@ -82,7 +82,7 @@ import { DEFAULT_SETTINGS } from "../shared/constants";
 import { getBuiltInExtensionManifests } from "../shared/builtinExtensions";
 import { createTranslator, formatFileSize as formatLocalizedFileSize, resolveLocale, type Translator } from "../shared/i18n";
 import { hasExtensionPermission, type ExtensionManifest, type ExtensionPermission, type FileEditorContribution, type PluginDescriptor, type SettingContribution } from "../shared/extensions";
-import { normalizeAiSettings, normalizeAiSettingsPublic, type AiEmbeddingSettings, type AiPatchOperation, type AiPatchProposal, type AiProviderProfile, type AiProviderTestResult, type AiRunEvent, type AiSelectionActionId, type AiSemanticIndexStatus, type AiSettings, type AiSettingsPublic, type AiSourceRef, type AiTaskSummary } from "../shared/ai";
+import { normalizeAiSettings, normalizeAiSettingsPublic, type AiEmbeddingSettings, type AiPatchOperation, type AiPatchProposal, type AiProviderProfile, type AiProviderTestResult, type AiRunEvent, type AiSelectionActionId, type AiSemanticIndexStatus, type AiSettings, type AiSettingsPublic, type AiSourceRef, type AiTaskSnapshot, type AiTaskSummary } from "../shared/ai";
 import type { AppSettings, BacklinksResponse, EditorMode, FileBinaryReadResponse, FileHistoryEntry, FileReadResponse, FileTreeNode, FileWriteResponse, RecentWorkspace, RenameReferencePreview, ResolvedLocale, SearchResultItem, WorkspaceInfo } from "../shared/types";
 import type { LocalGraphResponse, PropertyMutation, SavedSearch, SearchMode, TagRenamePreview, TagSummary, UnifiedSearchResult, WikiLinkTarget, WorkspaceHealthSnapshot, WorkspaceProbeResult, WorkspaceSessionSnapshot } from "../shared/contracts";
 import type { ExternalDocumentChangedEvent, ExternalDocumentSaveResponse, ExternalFolderSession, RecentExternalFile } from "../shared/externalDocuments";
@@ -95,6 +95,7 @@ import type { WysiwygEditorHandle } from "./components/WysiwygEditor";
 import type { FindReplaceOptions, FindReplaceResult } from "./components/findReplace";
 import type { MarkdownOpenTarget } from "./components/markdownOpenTarget";
 import { RendererI18nProvider, useRendererI18n } from "./app/i18n";
+import { isWorkspaceNavigationViewAvailable } from "./app/navigation";
 import { AppNavigation as AppNav } from "./app/AppNavigation";
 import { useUiStore } from "./app/store";
 import { useDocumentSession } from "./features/documents/useDocumentSession";
@@ -106,6 +107,7 @@ import { TemplatePickerDialog } from "./features/workspace/TemplatePickerDialog"
 import { WorkspaceHealthPage } from "./features/workspace/WorkspaceHealthPage";
 import { DiscoverPage } from "./features/discovery/DiscoverPage";
 import { AiTaskCenter } from "./features/ai/AiTaskCenter";
+import { AiTaskDetail } from "./features/ai/AiTaskDetail";
 import { AiApprovalView } from "./features/ai/AiApprovalView";
 import { PluginFrameHost } from "./features/plugins/PluginFrameHost";
 import { InspectorTabs, LinksPanel, PropertiesPanel, type InspectorTab } from "./features/documents/DocumentInspector";
@@ -334,12 +336,16 @@ export function App() {
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [settingsInitialTab, setSettingsInitialTab] = useState<SettingsTabId>("preferences");
   const [selectedCharCount, setSelectedCharCount] = useState(0);
-  const [modifiedOpenCursorActive, setModifiedOpenCursorActive] = useState(false);
+  const appShellRef = useRef<HTMLDivElement>(null);
   const [historyEntries, setHistoryEntries] = useState<FileHistoryEntry[]>([]);
   const [historyLoading, setHistoryLoading] = useState(false);
   const [historyPreview, setHistoryPreview] = useState<{ entry: FileHistoryEntry; content: string } | undefined>();
   const [aiSettings, setAiSettings] = useState<AiSettingsPublic | undefined>();
   const [aiTaskSummaries, setAiTaskSummaries] = useState<AiTaskSummary[]>([]);
+  const [selectedAiTaskId, setSelectedAiTaskId] = useState<string | undefined>();
+  const [selectedAiTask, setSelectedAiTask] = useState<AiTaskSnapshot | undefined>();
+  const [aiTaskDetailLoading, setAiTaskDetailLoading] = useState(false);
+  const [aiTaskDetailError, setAiTaskDetailError] = useState<string | undefined>();
   const [quickCaptureOpen, setQuickCaptureOpen] = useState(false);
   const [quickCaptureSaving, setQuickCaptureSaving] = useState(false);
   const [templatePickerOpen, setTemplatePickerOpen] = useState(false);
@@ -354,6 +360,7 @@ export function App() {
   const [aiActiveRunId, setAiActiveRunId] = useState<string | undefined>();
   const [aiRunning, setAiRunning] = useState(false);
   const [aiCanRetry, setAiCanRetry] = useState(false);
+  const [aiConversationParentTaskId, setAiConversationParentTaskId] = useState<string | undefined>();
   const aiLastInstructionRef = useRef<string>("");
   const aiLastDisplayTextRef = useRef<string>("");
   const aiLastActionRef = useRef<AiSelectionActionId | undefined>(undefined);
@@ -363,8 +370,13 @@ export function App() {
   const aiRunStatesRef = useRef<Map<string, AiRunUiState>>(new Map());
   const aiStartWatchdogRef = useRef<number | undefined>(undefined);
   const aiStartSequenceRef = useRef(0);
+  const aiTaskReadSequenceRef = useRef(0);
+  const selectedAiTaskIdRef = useRef<string | undefined>(undefined);
   const activeResourceRef = useRef(activeResource);
   const externalOpenQueueRef = useRef<Promise<void>>(Promise.resolve());
+  // Folder sessions are shared across external document tabs so the
+  // temporary tree remains available when navigating between those tabs.
+  const externalFolderSessionsRef = useRef<Map<string, ExternalFolderSession>>(new Map());
   const closeHandshakeRunningRef = useRef(false);
   const leftPanelWidthRef = useRef(leftPanelWidth);
   const rightPanelWidthRef = useRef(rightPanelWidth);
@@ -420,6 +432,10 @@ export function App() {
   useEffect(() => {
     workspaceIdRef.current = workspace?.workspaceId;
   }, [workspace?.workspaceId]);
+
+  useEffect(() => {
+    selectedAiTaskIdRef.current = selectedAiTaskId;
+  }, [selectedAiTaskId]);
 
   useEffect(() => {
     if (!workspace || workspaceLoading || !window.nolia.workspace.writeSession) {
@@ -520,7 +536,7 @@ export function App() {
     if (!showWorkspacePanels) {
       return;
     }
-    if (sidebarPanels.some((panel) => panel.id === sidebarView)) {
+    if (isWorkspaceNavigationViewAvailable(sidebarView, sidebarPanels)) {
       return;
     }
     const fallbackPanel = sidebarPanels[0]?.id;
@@ -677,9 +693,9 @@ export function App() {
 
   useEffect(() => {
     const updateFromKeyboardEvent = (event: KeyboardEvent) => {
-      setModifiedOpenCursorActive(event.metaKey || event.ctrlKey);
+      appShellRef.current?.classList.toggle("is-modified-open-cursor", event.metaKey || event.ctrlKey);
     };
-    const clear = () => setModifiedOpenCursorActive(false);
+    const clear = () => appShellRef.current?.classList.remove("is-modified-open-cursor");
     window.addEventListener("keydown", updateFromKeyboardEvent);
     window.addEventListener("keyup", updateFromKeyboardEvent);
     window.addEventListener("blur", clear);
@@ -925,7 +941,7 @@ export function App() {
 
   return (
     <RendererI18nProvider locale={startupLocale}>
-    <div className={`app-shell${platformClass}${focusMode ? " is-focus" : ""}${immersiveMode ? " is-immersive" : ""}${aiSidebarOpen ? " is-ai-open" : ""}${modifiedOpenCursorActive ? " is-modified-open-cursor" : ""}`}>
+    <div ref={appShellRef} className={`app-shell${platformClass}${focusMode ? " is-focus" : ""}${immersiveMode ? " is-immersive" : ""}${aiSidebarOpen ? " is-ai-open" : ""}`}>
       <CommandPalette
         open={commandPaletteOpen}
         query={commandQuery}
@@ -1200,11 +1216,22 @@ export function App() {
               }}
             />
           ) : null}
-          {workspace && !workspaceHealthOpen && !localGraphOpen && sidebarView === "ai" && !aiPatchProposal ? (
+          {workspace && !workspaceHealthOpen && !localGraphOpen && sidebarView === "ai" && !aiPatchProposal && selectedAiTaskId ? (
+            <AiTaskDetail
+              task={selectedAiTask}
+              loading={aiTaskDetailLoading}
+              error={aiTaskDetailError}
+              onBack={closeAiTaskDetail}
+              onRetry={() => void readAiTaskDetail(selectedAiTaskId)}
+              onContinue={continueAiTaskConversation}
+              onReviewApproval={reviewAiTaskApproval}
+            />
+          ) : null}
+          {workspace && !workspaceHealthOpen && !localGraphOpen && sidebarView === "ai" && !aiPatchProposal && !selectedAiTaskId ? (
             <AiTaskCenter
               tasks={aiTaskSummaries}
-              onNewTask={() => setAiSidebarOpen(true)}
-              onOpenTask={() => setAiSidebarOpen(true)}
+              onNewTask={openNewAiConversation}
+              onOpenTask={(task) => void openAiTaskDetail(task.id)}
             />
           ) : null}
           {!workspaceHealthOpen && !localGraphOpen && sidebarView !== "search" && sidebarView !== "ai" ? <>
@@ -1228,9 +1255,9 @@ export function App() {
               onFromTemplate={() => setTemplatePickerOpen(true)}
               onOpenHealth={() => void openWorkspaceHealth()}
               onOpen={(pathRel) => void openWorkspacePath(pathRel)}
-              onOpenAiTask={() => {
+              onOpenAiTask={(taskId) => {
                 setSidebarView("ai");
-                setAiSidebarOpen(true);
+                void openAiTaskDetail(taskId);
               }}
             />
           ) : (
@@ -1272,7 +1299,7 @@ export function App() {
             <ExternalFolderBrowser
               session={visibleDocument.folderSession}
               activePath={visibleDocument.filePath ?? visibleDocument.pathRel}
-              onOpen={(filePath) => enqueueExternalFileOpen(filePath)}
+              onOpen={(filePath) => enqueueExternalFileOpen(filePath, visibleDocument.folderSession)}
               onClose={() => void openExternalFolderContext()}
               onInitialize={() => void initializeExternalFolderAsWorkspace()}
             />
@@ -1697,6 +1724,10 @@ export function App() {
       resetAiRunWatchdog(event.runId);
     }
     if (event.type === "task-updated") {
+      setAiTaskSummaries((tasks) => upsertAiTaskSummary(tasks, event.task));
+      if (selectedAiTaskIdRef.current === event.task.id) {
+        void readAiTaskDetail(event.task.id, { silent: true });
+      }
       if (aiStartWatchdogRef.current && !aiActiveRunIdRef.current && (event.task.status === "queued" || event.task.status === "running")) {
         clearAiStartWatchdog();
         aiActiveRunIdRef.current = event.runId;
@@ -1716,6 +1747,15 @@ export function App() {
     if (event.type === "text-delta") {
       markAiRunOutput(event.runId, "text");
       setAiMessages((messages) => appendAiDelta(messages, event.runId, event.text));
+      setSelectedAiTask((task) => task?.runId === event.runId ? {
+        ...task,
+        messages: appendAiTaskConversationDelta(task.messages ?? [], event.runId, event.text),
+        updatedAt: Date.now()
+      } : task);
+      return;
+    }
+    if (event.type === "usage") {
+      setSelectedAiTask((task) => task?.runId === event.runId ? { ...task, usage: { ...task.usage, ...event.usage }, updatedAt: Date.now() } : task);
       return;
     }
     if (event.type === "tool-call") {
@@ -1975,6 +2015,8 @@ export function App() {
         entryPoint: actionId ? "selection-action" : "chat",
         instruction,
         title: displayText.slice(0, 80),
+        userMessage: displayText,
+        parentTaskId: aiConversationParentTaskId,
         actionId,
         conversation,
         clientContext,
@@ -1998,6 +2040,7 @@ export function App() {
         return;
       }
       clearAiStartWatchdog();
+      setAiConversationParentTaskId(response.taskId);
       const terminalReason = aiTerminalRunIdsRef.current.get(response.runId);
       if (terminalReason) {
         aiActiveRunIdRef.current = undefined;
@@ -3173,6 +3216,7 @@ export function App() {
 
   async function setWorkspaceState(info: WorkspaceInfo) {
     workspaceLoadTokenRef.current += 1;
+    aiTaskReadSequenceRef.current += 1;
     setWelcomeErrorMessage(undefined);
     setWelcomeOpeningWorkspaceId(undefined);
     setImmersiveMode(false);
@@ -3202,6 +3246,11 @@ export function App() {
     setHistoryPreview(undefined);
     setHistoryLoading(false);
     setAiSemanticStatus(undefined);
+    setSelectedAiTaskId(undefined);
+    setSelectedAiTask(undefined);
+    setAiTaskDetailLoading(false);
+    setAiTaskDetailError(undefined);
+    setAiConversationParentTaskId(undefined);
     setStatusMessage(tr("工作区已加载"));
     await initializeWorkspaceData(info);
     if (window.nolia.search.listSaved) {
@@ -3246,6 +3295,114 @@ export function App() {
     } catch {
       setAiTaskSummaries([]);
     }
+  }
+
+  async function openAiTaskDetail(taskId: string) {
+    setSidebarView("ai");
+    setAiSidebarOpen(false);
+    setAiPatchProposal(undefined);
+    await readAiTaskDetail(taskId);
+  }
+
+  async function readAiTaskDetail(taskId: string, options: { silent?: boolean } = {}) {
+    const sequence = ++aiTaskReadSequenceRef.current;
+    setSelectedAiTaskId(taskId);
+    selectedAiTaskIdRef.current = taskId;
+    if (!options.silent) {
+      setSelectedAiTask(undefined);
+      setAiTaskDetailError(undefined);
+      setAiTaskDetailLoading(true);
+    }
+    try {
+      const readTask = window.nolia.ai?.readTask;
+      if (!readTask) {
+        throw new Error(tr("AI 任务读取接口不可用。"));
+      }
+      const task = await readTask({ taskId });
+      if (sequence !== aiTaskReadSequenceRef.current || selectedAiTaskIdRef.current !== taskId) {
+        return;
+      }
+      if (!task) {
+        throw new Error(tr("AI 任务不存在或已被移除。"));
+      }
+      setSelectedAiTask(task);
+      setAiTaskSummaries((tasks) => upsertAiTaskSummary(tasks, task));
+    } catch (error) {
+      if (sequence !== aiTaskReadSequenceRef.current || selectedAiTaskIdRef.current !== taskId) {
+        return;
+      }
+      if (!options.silent) {
+        setAiTaskDetailError(errorMessageFor(error, tr("读取 AI 任务失败。")));
+      }
+    } finally {
+      if (!options.silent && sequence === aiTaskReadSequenceRef.current && selectedAiTaskIdRef.current === taskId) {
+        setAiTaskDetailLoading(false);
+      }
+    }
+  }
+
+  function closeAiTaskDetail() {
+    aiTaskReadSequenceRef.current += 1;
+    selectedAiTaskIdRef.current = undefined;
+    setSelectedAiTaskId(undefined);
+    setSelectedAiTask(undefined);
+    setAiTaskDetailLoading(false);
+    setAiTaskDetailError(undefined);
+    setAiPatchProposal(undefined);
+  }
+
+  function openNewAiConversation() {
+    if (aiRunning) {
+      setAiSidebarOpen(true);
+      setUserStatusMessage(tr("请先等待当前 AI 任务完成或停止任务。"));
+      return;
+    }
+    resetAiConversation();
+    setAiSidebarOpen(true);
+  }
+
+  function continueAiTaskConversation(task: AiTaskSnapshot) {
+    if (aiRunning) {
+      setAiSidebarOpen(true);
+      setUserStatusMessage(tr("请先等待当前 AI 任务完成或停止任务。"));
+      return;
+    }
+    resetAiConversation();
+    const messages: AiMessageView[] = (task.messages ?? []).map((message) => ({
+      id: `history:${task.id}:${message.id}`,
+      role: message.role,
+      text: message.content
+    }));
+    setAiMessages(messages);
+    setAiSources(task.sources);
+    setAiConversationParentTaskId(task.id);
+    setAiSidebarOpen(true);
+  }
+
+  function reviewAiTaskApproval(task: AiTaskSnapshot) {
+    const approval = task.approvals.find((item) => item.id === task.pendingApprovalId && item.status === "pending");
+    const proposal = task.proposals.find((item) => item.id === approval?.proposalId && item.status === "pending");
+    if (!proposal) {
+      setAiTaskDetailError(tr("此任务没有可处理的审批建议。"));
+      return;
+    }
+    setAiSidebarOpen(false);
+    setAiPatchProposal(proposal);
+  }
+
+  function resetAiConversation() {
+    setAiMessages([]);
+    setAiSources([]);
+    setAiPatchProposal(undefined);
+    setAiPatchApplyMode("current-document");
+    setAiCanRetry(false);
+    setAiConversationParentTaskId(undefined);
+    setAiActiveRunId(undefined);
+    aiActiveRunIdRef.current = undefined;
+    aiLastInstructionRef.current = "";
+    aiLastDisplayTextRef.current = "";
+    aiLastActionRef.current = undefined;
+    aiLastRunOptionsRef.current = undefined;
   }
 
   async function openDailyNote() {
@@ -3319,7 +3476,14 @@ export function App() {
     await handler();
   }
 
-  async function handleExternalFileOpen(filePath: string) {
+  function findExternalFolderSession(filePath: string): ExternalFolderSession | undefined {
+    for (const session of externalFolderSessionsRef.current.values()) {
+      if (isPathWithinRoot(session.realRootPath, filePath)) return session;
+    }
+    return undefined;
+  }
+
+  async function handleExternalFileOpen(filePath: string, folderSession?: ExternalFolderSession) {
     const active = currentDocumentFromRef();
     if (active && active.pathRel !== filePath && !(await ensureDocumentCanLeave(active))) {
       return;
@@ -3328,7 +3492,7 @@ export function App() {
     if (resource?.editorId && resource.dirty) {
       await saveActivePluginEditorResource(resource.pathRel);
     }
-    await openExternalDocument(filePath);
+    await openExternalDocument(filePath, folderSession ?? active?.folderSession);
   }
 
   async function handleExternalDocumentChanged(event: ExternalDocumentChangedEvent) {
@@ -3389,9 +3553,9 @@ export function App() {
     }
   }
 
-  function enqueueExternalFileOpen(filePath: string) {
+  function enqueueExternalFileOpen(filePath: string, folderSession?: ExternalFolderSession) {
     externalOpenQueueRef.current = externalOpenQueueRef.current
-      .then(() => handleExternalFileOpen(filePath))
+      .then(() => handleExternalFileOpen(filePath, folderSession))
       .catch((error: unknown) => setUserStatusMessage(errorMessageFor(error, "无法打开文件")));
   }
 
@@ -3409,14 +3573,21 @@ export function App() {
     const document = currentDocumentFromRef();
     if (document?.sourceKind !== "external" || !window.nolia.externalFile?.openFolder) return;
     if (document.folderSession) {
-      await window.nolia.externalFile.closeFolder?.({ sessionId: document.folderSession.id });
-      updateOpenDocument(document.pathRel, (current) => ({ ...current, folderSession: undefined }));
+      const sessionId = document.folderSession.id;
+      await window.nolia.externalFile.closeFolder?.({ sessionId });
+      externalFolderSessionsRef.current.delete(sessionId);
+      updateOpenDocs((documents) => documents.map((current) => current.folderSession?.id === sessionId ? { ...current, folderSession: undefined } : current));
       return;
     }
     if (!window.confirm("打开所在文件夹将读取其中的 Markdown 文件，但不会创建 .nolia 或建立索引。是否继续？")) return;
     try {
       const folderSession = await window.nolia.externalFile.openFolder({ filePath: document.filePath ?? document.pathRel });
-      updateOpenDocument(document.pathRel, (current) => ({ ...current, folderSession }));
+      externalFolderSessionsRef.current.set(folderSession.id, folderSession);
+      updateOpenDocs((documents) => documents.map((current) => {
+        if (current.sourceKind !== "external") return current;
+        const candidate = current.realPath ?? current.filePath ?? current.pathRel;
+        return isPathWithinRoot(folderSession.realRootPath, candidate) ? { ...current, folderSession } : current;
+      }));
       setUserStatusMessage(`已打开文件夹 ${folderSession.rootPath}`);
     } catch (error) {
       setUserStatusMessage(errorMessageFor(error, "无法打开所在文件夹"));
@@ -3430,13 +3601,17 @@ export function App() {
     if (probe) setWorkspaceProbe(probe);
   }
 
-  async function openExternalDocument(filePath: string) {
+  async function openExternalDocument(filePath: string, folderSession?: ExternalFolderSession) {
     if (!window.nolia.externalFile) {
       setStatusMessage(tr("当前版本不支持直接打开系统文件"));
       return;
     }
     const existing = openDocsRef.current.find((document) => document.sourceKind === "external" && (document.filePath ?? document.pathRel) === filePath);
     if (existing) {
+      const inheritedSession = folderSession ?? (existing.realPath ? findExternalFolderSession(existing.realPath) : undefined);
+      if (inheritedSession && existing.folderSession?.id !== inheritedSession.id) {
+        updateOpenDocument(existing.pathRel, (current) => ({ ...current, folderSession: inheritedSession }));
+      }
       setActiveResource(undefined);
       setActivePathRel(existing.pathRel);
       setTreeSelection(undefined);
@@ -3452,6 +3627,7 @@ export function App() {
       else await window.nolia.externalFile.deleteDraft?.({ filePath: file.filePath });
     }
     const parsed = await parseMarkdownOffThread(restoredContent, file.filePath);
+    const inheritedSession = folderSession ?? findExternalFolderSession(file.realPath);
     const nextDoc: OpenDocumentTab = {
       pathRel: file.filePath,
       sourceKind: "external",
@@ -3468,6 +3644,7 @@ export function App() {
       eol: file.eol,
       readonly: file.readonly,
       encodingSupported: file.encodingSupported,
+      folderSession: inheritedSession,
       externalConflict: restoredDraft && file.draft?.baseHash !== file.sha256 ? { kind: "change", diskHash: file.sha256, diskContent: file.content, mtimeMs: file.mtimeMs } : undefined,
       revisionState: restoredDraft
         ? editDocumentRevision(createDocumentRevision(file.filePath, file.filePath, file.sha256, file.readonly), restoredContent)
@@ -4658,6 +4835,12 @@ function flattenExternalFolderNodes(nodes: FileTreeNode[], depth = 0): Array<Fil
   return items;
 }
 
+function isPathWithinRoot(rootPath: string, candidatePath: string): boolean {
+  const root = rootPath.replace(/[\\/]$/, "");
+  const candidate = candidatePath.replace(/[\\/]$/, "");
+  return candidate === root || candidate.startsWith(`${root}/`) || candidate.startsWith(`${root}\\`);
+}
+
 function inspectorTabFromPanel(view: "outline" | "details" | "history" | "errors"): InspectorTab {
   if (view === "details") return "properties";
   if (view === "errors") return "links";
@@ -5673,6 +5856,32 @@ function appendAiDelta(messages: AiMessageView[], runId: string, text: string): 
     return [...messages, { id: targetId, role: "assistant", text }];
   }
   return messages.map((message) => (message.id === targetId ? { ...message, text: `${message.text}${text}` } : message));
+}
+
+function appendAiTaskConversationDelta(messages: NonNullable<AiTaskSnapshot["messages"]>, runId: string, text: string): NonNullable<AiTaskSnapshot["messages"]> {
+  const targetId = `${runId}:assistant`;
+  const existing = messages.find((message) => message.id === targetId);
+  if (!existing) {
+    return [...messages, { id: targetId, runId, role: "assistant", content: text, createdAt: Date.now() }];
+  }
+  return messages.map((message) => message.id === targetId ? { ...message, content: `${message.content}${text}` } : message);
+}
+
+function upsertAiTaskSummary(tasks: AiTaskSummary[], task: AiTaskSummary): AiTaskSummary[] {
+  const summary: AiTaskSummary = {
+    id: task.id,
+    runId: task.runId,
+    workspaceId: task.workspaceId,
+    title: task.title,
+    status: task.status,
+    createdAt: task.createdAt,
+    updatedAt: task.updatedAt,
+    lastError: task.lastError,
+    pendingApprovalId: task.pendingApprovalId
+  };
+  const existingIndex = tasks.findIndex((item) => item.id === summary.id);
+  const next = existingIndex >= 0 ? tasks.map((item, index) => index === existingIndex ? summary : item) : [summary, ...tasks];
+  return next.sort((left, right) => right.updatedAt - left.updatedAt);
 }
 
 function aiConversationHistory(messages: AiMessageView[], turns: number): Array<{ role: "user" | "assistant"; content: string }> {

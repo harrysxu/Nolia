@@ -3715,6 +3715,10 @@ body.is-resizing-right-panel {
 }
 
 .markdown-preview-block-mermaid .markdown-preview-block-render {
+  cursor: default;
+}
+
+.app-shell.is-modified-open-cursor .markdown-preview-block-mermaid .markdown-preview-block-render {
   cursor: zoom-in;
 }
 
@@ -4139,10 +4143,14 @@ body.is-resizing-right-panel {
   border: 1px solid var(--border);
   border-radius: 8px;
   background: var(--surface);
-  cursor: zoom-in;
+  cursor: default;
   overflow-x: auto;
   overflow-y: hidden;
   text-align: center;
+}
+
+.app-shell.is-modified-open-cursor .markdown-preview .mermaid {
+  cursor: zoom-in;
 }
 
 .markdown-preview .mermaid svg {

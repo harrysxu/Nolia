@@ -375,7 +375,7 @@ test("code block language controls update split preview and WYSIWYG source", asy
   expect(await sourceContains(page, "```xml\n<root><enabled>true</enabled></root>")).toBe(true);
 });
 
-test("WYSIWYG Mermaid blocks open a zoomable viewer before editing source", async ({ page }) => {
+test("WYSIWYG Mermaid blocks edit source on click and open the viewer on modified click", async ({ page }) => {
   await setupBoundaryWorkspace(page, {
     "diagram.md": ["# Diagram", "", "```mermaid", "graph TD; A[Markdown] --> B[Preview];", "```"].join("\n")
   });
@@ -389,10 +389,12 @@ test("WYSIWYG Mermaid blocks open a zoomable viewer before editing source", asyn
   const diagramSource = diagramBlock.getByLabel("Markdown 块源码");
   const diagramViewer = page.getByRole("dialog", { name: "图表预览" });
   await expect(diagramViewer).toBeHidden();
+  await expect(diagramSource).toBeVisible();
+  await expect(diagramSource).toBeFocused();
+  await page.keyboard.press("Escape");
   await expect(diagramSource).toBeHidden();
   await expect(diagramViewer.getByText("125%", { exact: true })).toHaveCount(0);
-  await diagramBlock.focus();
-  await page.keyboard.press("Enter");
+  await diagramBlock.click({ modifiers: ["ControlOrMeta"] });
   await expect(diagramViewer).toBeVisible();
   await expect(diagramSource).toBeHidden();
   await expect(diagramViewer.getByText("125%", { exact: true })).toBeVisible();
@@ -1148,7 +1150,7 @@ test("WYSIWYG list source editor expands for long wrapped Markdown", async ({ pa
   expect(metrics.overflowY).toBe("hidden");
 });
 
-test("split Mermaid preview opens the viewer and edits the matching source on request", async ({ page }) => {
+test("split Mermaid preview focuses source on click and opens the viewer on modified click", async ({ page }) => {
   await setupBoundaryWorkspace(page, {
     "diagram-click.md": [
       "# Diagram Click",
@@ -1179,13 +1181,20 @@ test("split Mermaid preview opens the viewer and edits the matching source on re
   await expect(diagrams.nth(1).locator("svg")).toBeVisible();
 
   const diagramViewer = page.getByRole("dialog", { name: "图表预览" });
+  const modifierKey = process.platform === "darwin" ? "Meta" : "Control";
+  await expect.poll(() => diagrams.nth(1).evaluate((element) => getComputedStyle(element).cursor)).toBe("default");
+  await page.keyboard.down(modifierKey);
+  await expect.poll(() => diagrams.nth(1).evaluate((element) => getComputedStyle(element).cursor)).toBe("zoom-in");
+  await page.keyboard.up(modifierKey);
+
+  await diagrams.nth(1).click({ modifiers: ["ControlOrMeta"] });
+  await expect(diagramViewer).toBeVisible();
+  await page.keyboard.press("Escape");
+  await expect(diagramViewer).toBeHidden();
+
   await diagrams.nth(1).click();
   await expect(diagramViewer).toBeHidden();
-  await diagrams.nth(1).focus();
-  await page.keyboard.press("Enter");
-  await expect(diagramViewer).toBeVisible();
-  await diagramViewer.getByRole("button", { name: "编辑图表源码" }).click();
-  await expect(diagramViewer).toBeHidden();
+  await expect(page.locator(".cm-content")).toBeFocused();
   await page.keyboard.type("%% clicked\n");
   expect(await sourceContains(page, "```erDiagram\n%% clicked\nCUSTOMER ||--o{ ORDER : places")).toBe(true);
 });

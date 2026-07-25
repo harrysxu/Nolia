@@ -866,6 +866,28 @@ export class WorkspaceRepository {
     });
   }
 
+  removeLegacyAiTasks(): number {
+    const rows = this.all("SELECT id, state_json AS stateJson FROM ai_tasks");
+    let removed = 0;
+    for (const row of rows) {
+      let state: Partial<AiTaskSnapshot> | undefined;
+      try {
+        state = JSON.parse(readString(row.stateJson)) as Partial<AiTaskSnapshot>;
+      } catch {
+        state = undefined;
+      }
+      if (state?.historyVersion === 2 && Array.isArray(state.messages)) {
+        continue;
+      }
+      this.db.run("DELETE FROM ai_tasks WHERE id = ?", [readString(row.id)]);
+      removed += 1;
+    }
+    if (removed) {
+      this.scheduleSave(250);
+    }
+    return removed;
+  }
+
   readAiTask(taskId: string): AiTaskSnapshot | undefined {
     const row = this.first("SELECT state_json AS stateJson FROM ai_tasks WHERE id = ?", [taskId]);
     if (!row) return undefined;

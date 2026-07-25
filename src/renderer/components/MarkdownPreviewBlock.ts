@@ -82,7 +82,7 @@ export const MarkdownPreviewBlock = Node.create<MarkdownPreviewBlockOptions>({
       wrapper.tabIndex = 0;
       if (node.attrs.kind === "mermaid") {
         wrapper.setAttribute("aria-label", this.options.viewLabel);
-        wrapper.setAttribute("aria-keyshortcuts", "Enter Space F2 E");
+        wrapper.setAttribute("aria-keyshortcuts", "Enter Control+Enter Meta+Enter");
         wrapper.title = this.options.viewLabel;
       }
       const preview = document.createElement("div");
@@ -126,13 +126,13 @@ export const MarkdownPreviewBlock = Node.create<MarkdownPreviewBlockOptions>({
       if (node.attrs.kind === "toc") {
         wireTocBlockNavigation(wrapper, view, getNodePos);
       } else if (node.attrs.kind === "mermaid") {
-        wireMermaidBlockInteraction({
+        wireMarkdownNodeInteraction({
           wrapper,
           input,
           view,
           getPos: getNodePos,
           setEditing,
-          onOpen: () => {
+          onOpenModifiedClick: () => {
             const svg = preview.querySelector<SVGElement>("svg")?.outerHTML;
             if (!svg) {
               return;
@@ -198,78 +198,6 @@ export const MarkdownPreviewBlock = Node.create<MarkdownPreviewBlockOptions>({
     };
   }
 });
-
-function wireMermaidBlockInteraction({ wrapper, input, view, getPos, setEditing, onOpen }: {
-  wrapper: HTMLElement;
-  input: HTMLTextAreaElement;
-  view: EditorView;
-  getPos: () => number | undefined;
-  setEditing: (editing: boolean, focusInput?: boolean) => void;
-  onOpen: () => void;
-}) {
-  const selectNode = (focusEditor = true) => {
-    const pos = getPos();
-    if (typeof pos !== "number") {
-      return;
-    }
-    view.dispatch(view.state.tr.setSelection(NodeSelection.create(view.state.doc, pos)));
-    if (focusEditor) {
-      view.focus();
-    }
-  };
-  const openViewer = () => {
-    selectNode();
-    onOpen();
-  };
-  const closeWhenFocusLeaves = () => {
-    window.setTimeout(() => {
-      if (!wrapper.contains(document.activeElement)) {
-        setEditing(false);
-      }
-    }, 0);
-  };
-
-  wrapper.addEventListener("mousedown", (event) => {
-    if (input.contains(event.target as globalThis.Node)) {
-      return;
-    }
-    event.preventDefault();
-    event.stopPropagation();
-    selectNode();
-  });
-  wrapper.addEventListener("click", (event) => {
-    if (input.contains(event.target as globalThis.Node)) {
-      return;
-    }
-    event.preventDefault();
-    event.stopPropagation();
-    selectNode();
-  });
-  wrapper.addEventListener("focus", () => selectNode(false));
-  wrapper.addEventListener("blur", closeWhenFocusLeaves);
-  wrapper.addEventListener("keydown", (event) => {
-    if (event.key === "Enter" || event.key === " ") {
-      event.preventDefault();
-      event.stopPropagation();
-      openViewer();
-      return;
-    }
-    if (event.key === "F2" || (event.key.toLowerCase() === "e" && !event.metaKey && !event.ctrlKey && !event.altKey)) {
-      event.preventDefault();
-      event.stopPropagation();
-      setEditing(true, true);
-      return;
-    }
-    if (event.key === "Escape") {
-      event.preventDefault();
-      event.stopPropagation();
-      setEditing(false);
-      view.focus();
-    }
-  });
-  input.addEventListener("focus", () => setEditing(true));
-  input.addEventListener("blur", closeWhenFocusLeaves);
-}
 
 function wireTocBlockNavigation(wrapper: HTMLElement, view: EditorView, getPos: () => number | undefined) {
   const selectBlock = () => {

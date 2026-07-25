@@ -1,5 +1,6 @@
 .discover-page,
 .ai-task-center,
+.ai-task-detail,
 .ai-approval-page {
   height: 100%;
   overflow: auto;
@@ -451,6 +452,326 @@
   color: var(--muted);
 }
 
+.ai-task-detail-header,
+.ai-task-detail-tabs,
+.ai-task-detail-body {
+  width: min(960px, calc(100% - 64px));
+  margin: 0 auto;
+}
+
+.ai-task-detail-header {
+  display: grid;
+  grid-template-columns: 32px minmax(0, 1fr) auto;
+  align-items: start;
+  gap: 12px;
+  padding: 28px 0 18px;
+}
+
+.ai-task-detail-header h1 {
+  margin: 5px 0 2px;
+  overflow-wrap: anywhere;
+  font-size: 20px;
+  line-height: 28px;
+  letter-spacing: 0;
+}
+
+.ai-task-detail-header p {
+  margin: 0;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.ai-task-status {
+  display: inline-flex;
+  min-height: 22px;
+  align-items: center;
+  padding: 0 7px;
+  border-radius: 4px;
+  background: var(--panel-strong);
+  color: var(--muted);
+  font-size: 11px;
+}
+
+.ai-task-status.is-completed {
+  color: var(--success);
+}
+
+.ai-task-status.is-failed,
+.ai-task-status.is-interrupted {
+  color: var(--danger);
+}
+
+.ai-task-status.is-waiting_approval {
+  color: var(--warning);
+}
+
+.ai-task-detail-actions {
+  display: flex;
+  gap: 8px;
+}
+
+.ai-task-detail-actions button,
+.ai-task-detail-state .secondary-button {
+  display: inline-flex;
+  min-height: 32px;
+  align-items: center;
+  gap: 7px;
+}
+
+.ai-task-detail-actions .primary-button {
+  background: color-mix(in srgb, var(--accent) 80%, #000);
+  color: #fff;
+}
+
+.ai-task-detail-tabs {
+  display: flex;
+  gap: 20px;
+  border-bottom: 1px solid var(--border);
+}
+
+.ai-task-detail-tabs > button {
+  min-height: 38px;
+  padding: 0 2px;
+  border: 0;
+  border-bottom: 2px solid transparent;
+  background: transparent;
+  color: var(--muted);
+}
+
+.ai-task-detail-tabs > button.is-active {
+  border-bottom-color: var(--accent);
+  color: var(--text);
+}
+
+.ai-task-detail-body {
+  padding: 20px 0 40px;
+}
+
+.ai-task-conversation,
+.ai-task-execution,
+.ai-task-changes {
+  display: grid;
+  gap: 18px;
+}
+
+.ai-task-message {
+  max-width: min(760px, 92%);
+}
+
+.ai-task-message > header {
+  margin-bottom: 5px;
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 700;
+}
+
+.ai-task-message > pre,
+.ai-task-message .ai-markdown-content {
+  margin: 0;
+  overflow-wrap: anywhere;
+  white-space: pre-wrap;
+}
+
+.ai-task-message.is-user {
+  justify-self: end;
+  padding: 10px 12px;
+  border-radius: 6px;
+  background: var(--panel-strong);
+}
+
+.ai-task-message.is-assistant {
+  justify-self: start;
+  width: 100%;
+}
+
+.ai-task-legacy-warning,
+.ai-task-error {
+  display: grid;
+  grid-template-columns: 20px minmax(0, 1fr);
+  gap: 8px;
+  padding: 11px 12px;
+  border: 1px solid color-mix(in srgb, var(--warning) 45%, var(--border));
+  border-radius: 6px;
+  color: var(--warning);
+}
+
+.ai-task-legacy-warning div {
+  display: grid;
+  gap: 3px;
+}
+
+.ai-task-legacy-warning span,
+.ai-task-error span {
+  color: var(--text);
+  font-size: 12px;
+}
+
+.ai-task-timeline {
+  display: grid;
+  gap: 0;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.ai-task-timeline > li {
+  display: grid;
+  grid-template-columns: 28px minmax(0, 1fr);
+  gap: 8px;
+  padding: 10px 0;
+  border-bottom: 1px solid var(--border);
+}
+
+.ai-task-timeline-icon {
+  display: grid;
+  width: 26px;
+  height: 26px;
+  place-items: center;
+  border-radius: 50%;
+  background: var(--panel-strong);
+  color: var(--muted);
+}
+
+.ai-task-timeline strong,
+.ai-task-timeline p,
+.ai-task-timeline time {
+  display: block;
+  margin: 0;
+}
+
+.ai-task-timeline p {
+  margin-top: 3px;
+  overflow-wrap: anywhere;
+  white-space: pre-wrap;
+}
+
+.ai-task-timeline time,
+.ai-task-usage {
+  margin-top: 4px;
+  color: var(--muted);
+  font-size: 11px;
+}
+
+.ai-task-source-list,
+.ai-task-changes > section {
+  display: grid;
+  gap: 8px;
+}
+
+.ai-task-source-list h2,
+.ai-task-changes h2 {
+  margin: 8px 0 2px;
+  font-size: 13px;
+  letter-spacing: 0;
+}
+
+.ai-task-source-list > article {
+  display: grid;
+  grid-template-columns: 20px minmax(0, 1fr);
+  gap: 8px;
+  padding: 8px 0;
+  border-bottom: 1px solid var(--border);
+}
+
+.ai-task-source-list p {
+  margin: 3px 0 0;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.ai-task-change-card {
+  padding: 10px 0;
+  border-bottom: 1px solid var(--border);
+}
+
+.ai-task-change-card > header {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.ai-task-change-card > header span,
+.ai-task-change-card small {
+  color: var(--muted);
+  font-size: 11px;
+}
+
+.ai-task-change-card > p {
+  margin: 6px 0;
+  color: var(--muted);
+}
+
+.ai-task-change-card ul {
+  display: grid;
+  gap: 6px;
+  margin: 8px 0 0;
+  padding: 0;
+  list-style: none;
+}
+
+.ai-task-change-card li {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.ai-task-operation-list details {
+  padding: 8px 0;
+  border-top: 1px solid var(--border);
+}
+
+.ai-task-operation-list summary {
+  display: grid;
+  grid-template-columns: minmax(120px, auto) minmax(0, 1fr);
+  gap: 10px;
+  cursor: pointer;
+}
+
+.ai-task-operation-list summary span {
+  overflow-wrap: anywhere;
+  color: var(--muted);
+}
+
+.ai-task-operation-list details > div {
+  margin-top: 8px;
+}
+
+.ai-task-operation-list pre {
+  max-height: 280px;
+  margin: 4px 0 0;
+  padding: 8px;
+  overflow: auto;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  background: var(--panel);
+  white-space: pre-wrap;
+}
+
+.ai-task-detail-empty,
+.ai-task-detail-state > div {
+  display: grid;
+  min-height: 220px;
+  place-items: center;
+  align-content: center;
+  gap: 8px;
+  color: var(--muted);
+  text-align: center;
+}
+
+.ai-task-detail-state {
+  position: relative;
+}
+
+.ai-task-detail-state > .icon-button {
+  position: absolute;
+  top: 28px;
+  left: max(32px, calc((100% - 960px) / 2));
+}
+
+.ai-task-detail-state p {
+  margin: 0;
+}
+
 @media (max-width: 960px) {
   .discover-header,
   .discover-layout,
@@ -458,7 +779,10 @@
   .ai-approval-list,
   .ai-task-center > header,
   .ai-task-center > nav,
-  .ai-task-center > .ai-task-list {
+  .ai-task-center > .ai-task-list,
+  .ai-task-detail-header,
+  .ai-task-detail-tabs,
+  .ai-task-detail-body {
     width: calc(100% - 32px);
   }
 
@@ -502,5 +826,26 @@
   .ai-task-center > nav {
     overflow-x: auto;
     white-space: nowrap;
+  }
+
+  .ai-task-detail-header {
+    grid-template-columns: 32px minmax(0, 1fr);
+  }
+
+  .ai-task-detail-actions {
+    grid-column: 2;
+    flex-wrap: wrap;
+  }
+
+  .ai-task-detail-tabs {
+    overflow-x: auto;
+  }
+
+  .ai-task-message {
+    max-width: 100%;
+  }
+
+  .ai-task-operation-list summary {
+    grid-template-columns: 1fr;
   }
 }
