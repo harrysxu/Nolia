@@ -3,7 +3,9 @@ import path from "node:path";
 import { describe, expect, it } from "vitest";
 
 interface PackageBuildConfig {
+  desktopName?: string;
   build?: {
+    linux?: { syncDesktopName?: boolean };
     mac?: { mergeASARs?: boolean };
     nsis?: { useZip?: boolean; differentialPackage?: boolean };
     fileAssociations?: Array<{ ext?: string }>;
@@ -17,6 +19,8 @@ describe("packaging configuration", () => {
     ) as PackageBuildConfig;
 
     expect(packageJson.build?.mac?.mergeASARs).toBe(false);
+    expect(packageJson.desktopName).toBe("nolia.desktop");
+    expect(packageJson.build?.linux?.syncDesktopName).toBe(true);
     expect(packageJson.build?.nsis).toMatchObject({
       useZip: true,
       differentialPackage: false

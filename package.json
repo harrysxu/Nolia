@@ -5,6 +5,7 @@
   "description": "Nolia local-first Markdown knowledge workstation",
   "author": "徐晓龙",
   "license": "GPL-3.0-or-later",
+  "desktopName": "nolia.desktop",
   "repository": {
     "type": "git",
     "url": "git+https://github.com/harrysxu/Nolia.git"
@@ -96,6 +97,7 @@
     "linux": {
       "icon": "build/icon.svg",
       "category": "Office",
+      "syncDesktopName": true,
       "maintainer": "徐晓龙",
       "description": "Nolia local-first Markdown knowledge workstation",
       "extraResources": [

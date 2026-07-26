@@ -7,6 +7,7 @@ const APPIMAGE_TOOLS_RELEASE = "appimage@1.0.2";
 const APPIMAGE_TOOLS_FILE = "appimage-tools-runtime-20251108.tar.gz";
 const APPIMAGE_TOOLS_SHA256 = "a784a8c26331ec2e945c23d6bdb14af5c9df27f5939825d84b8709c61dc81eb0";
 const DEFAULT_BUILDER_BINARIES_MIRROR = "https://npmmirror.com/mirrors/electron-builder-binaries/";
+const DEFAULT_ELECTRON_MIRROR = "https://npmmirror.com/mirrors/electron/";
 const APPIMAGE_UTIL_PATH = resolve("node_modules/app-builder-lib/out/targets/appimage/appImageUtil.js");
 const APPIMAGE_RUN_ORIGINAL = 'exec "$BIN"';
 const APPIMAGE_RUN_PATCHED = 'ELECTRON_DISABLE_SANDBOX="\\${ELECTRON_DISABLE_SANDBOX:-1}" exec "$BIN"';
@@ -22,6 +23,9 @@ async function main() {
 
   if (!hasEnv(env, "ELECTRON_BUILDER_BINARIES_MIRROR")) {
     env.ELECTRON_BUILDER_BINARIES_MIRROR = DEFAULT_BUILDER_BINARIES_MIRROR;
+  }
+  if (!hasEnv(env, "ELECTRON_MIRROR")) {
+    env.ELECTRON_MIRROR = DEFAULT_ELECTRON_MIRROR;
   }
 
   if (!forwardedArgs.includes("--dir")) {
@@ -52,15 +56,8 @@ function runElectronBuilder(forwardedArgs, env, restoreAppImageUtil) {
 }
 
 async function prepareAppImageTools() {
-  const { downloadArtifact } = require("app-builder-lib/out/binDownload");
-  const artifactPath = await downloadArtifact({
-    releaseName: APPIMAGE_TOOLS_RELEASE,
-    filenameWithExt: APPIMAGE_TOOLS_FILE,
-    checksums: {
-      [APPIMAGE_TOOLS_FILE]: APPIMAGE_TOOLS_SHA256
-    },
-    githubOrgRepo: "electron-userland/electron-builder-binaries"
-  });
+  const { getBinFromUrl } = require("app-builder-lib/out/binDownload");
+  const artifactPath = await getBinFromUrl(APPIMAGE_TOOLS_RELEASE, APPIMAGE_TOOLS_FILE, APPIMAGE_TOOLS_SHA256);
 
   const hostPlatform = process.platform;
   const hostArch = mapArch(process.arch);
