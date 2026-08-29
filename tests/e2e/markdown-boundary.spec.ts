@@ -400,6 +400,18 @@ test("WYSIWYG Mermaid blocks edit source on click and open the viewer on modifie
   await expect(diagramViewer.getByText("125%", { exact: true })).toBeVisible();
   await diagramViewer.getByRole("button", { name: "放大图表" }).click();
   await expect(diagramViewer.getByText("150%", { exact: true })).toBeVisible();
+  const diagramViewport = diagramViewer.locator(".diagram-viewer-viewport");
+  const diagramCanvas = diagramViewer.locator(".diagram-viewer-canvas");
+  await expect.poll(() => diagramViewport.evaluate((element) => getComputedStyle(element).overflow)).toBe("hidden");
+  const viewportBox = await diagramViewport.boundingBox();
+  expect(viewportBox).not.toBeNull();
+  const dragStartX = (viewportBox?.x ?? 0) + (viewportBox?.width ?? 0) * 0.6;
+  const dragStartY = (viewportBox?.y ?? 0) + (viewportBox?.height ?? 0) * 0.35;
+  await page.mouse.move(dragStartX, dragStartY);
+  await page.mouse.down();
+  await page.mouse.move(dragStartX - 120, dragStartY - 80);
+  await page.mouse.up();
+  await expect.poll(() => diagramCanvas.evaluate((element) => element.style.transform)).toContain("translate3d(-");
   const downloadPromise = page.waitForEvent("download");
   await diagramViewer.getByRole("button", { name: "下载 PNG 图片" }).click();
   const download = await downloadPromise;

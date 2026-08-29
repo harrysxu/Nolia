@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useRef, useState, type PointerEvent as ReactPointerEvent } from "react";
 import { createPortal } from "react-dom";
 import { Download, Pencil, RotateCcw, X, ZoomIn, ZoomOut } from "lucide-react";
 
@@ -24,9 +24,63 @@ const SCALE_STEP = 0.25;
 export function DiagramViewer({ content, onClose }: DiagramViewerProps) {
   const { tr } = useRendererI18n();
   const [scale, setScale] = useState(() => clampScale(content.initialScale ?? 1));
+  const [pan, setPan] = useState({ x: 0, y: 0 });
+  const [isPanning, setIsPanning] = useState(false);
   const [downloading, setDownloading] = useState(false);
   const [downloadError, setDownloadError] = useState(false);
   const closeButtonRef = useRef<HTMLButtonElement>(null);
+  const viewportRef = useRef<HTMLDivElement>(null);
+  const canvasRef = useRef<HTMLDivElement>(null);
+  const dragRef = useRef<{ pointerId: number; startX: number; startY: number; panX: number; panY: number } | undefined>(undefined);
+
+  const changeScale = (nextScale: number | ((value: number) => number)) => {
+    setScale((value) => clampScale(typeof nextScale === "function" ? nextScale(value) : nextScale));
+    setPan({ x: 0, y: 0 });
+  };
+
+  const clampPan = (x: number, y: number) => {
+    const viewport = viewportRef.current;
+    const canvas = canvasRef.current;
+    if (!viewport || !canvas) {
+      return { x, y };
+    }
+    const maxX = Math.max(0, canvas.offsetWidth - viewport.clientWidth);
+    const maxY = Math.max(0, canvas.offsetHeight - viewport.clientHeight);
+    return {
+      x: Math.min(0, Math.max(-maxX, x)),
+      y: Math.min(0, Math.max(-maxY, y))
+    };
+  };
+
+  const handlePointerDown = (event: ReactPointerEvent<HTMLDivElement>) => {
+    if (!event.isPrimary || event.button !== 0) {
+      return;
+    }
+    dragRef.current = { pointerId: event.pointerId, startX: event.clientX, startY: event.clientY, panX: pan.x, panY: pan.y };
+    event.currentTarget.setPointerCapture(event.pointerId);
+    event.preventDefault();
+    setIsPanning(true);
+  };
+
+  const handlePointerMove = (event: ReactPointerEvent<HTMLDivElement>) => {
+    const drag = dragRef.current;
+    if (!drag || drag.pointerId !== event.pointerId) {
+      return;
+    }
+    setPan(clampPan(drag.panX + event.clientX - drag.startX, drag.panY + event.clientY - drag.startY));
+  };
+
+  const stopPointerDrag = (event: ReactPointerEvent<HTMLDivElement>) => {
+    const drag = dragRef.current;
+    if (!drag || drag.pointerId !== event.pointerId) {
+      return;
+    }
+    dragRef.current = undefined;
+    if (event.currentTarget.hasPointerCapture(event.pointerId)) {
+      event.currentTarget.releasePointerCapture(event.pointerId);
+    }
+    setIsPanning(false);
+  };
 
   useEffect(() => {
     closeButtonRef.current?.focus({ preventScroll: true });
@@ -38,12 +92,12 @@ export function DiagramViewer({ content, onClose }: DiagramViewerProps) {
       }
       if (event.key === "+" || event.key === "=") {
         event.preventDefault();
-        setScale((value) => clampScale(value + SCALE_STEP));
+        changeScale((value) => value + SCALE_STEP);
         return;
       }
       if (event.key === "-") {
         event.preventDefault();
-        setScale((value) => clampScale(value - SCALE_STEP));
+        changeScale((value) => value - SCALE_STEP);
         return;
       }
       const isEditShortcut = event.key === "F2" || (event.key.toLowerCase() === "e" && !event.metaKey && !event.ctrlKey && !event.altKey) || ((event.metaKey || event.ctrlKey) && event.key === "Enter");
@@ -76,14 +130,14 @@ export function DiagramViewer({ content, onClose }: DiagramViewerProps) {
         <header className="diagram-viewer-header">
           <strong id="diagram-viewer-title">{tr("图表预览")}</strong>
           <div className="diagram-viewer-toolbar" role="toolbar" aria-label={tr("图表操作")}>
-            <button type="button" className="icon-button" title={tr("缩小图表")} aria-label={tr("缩小图表")} disabled={scale <= MIN_SCALE} onClick={() => setScale((value) => clampScale(value - SCALE_STEP))}>
+            <button type="button" className="icon-button" title={tr("缩小图表")} aria-label={tr("缩小图表")} disabled={scale <= MIN_SCALE} onClick={() => changeScale(scale - SCALE_STEP)}>
               <ZoomOut size={17} />
             </button>
             <span className="diagram-viewer-scale" aria-live="polite">{Math.round(scale * 100)}%</span>
-            <button type="button" className="icon-button" title={tr("恢复图表比例")} aria-label={tr("恢复图表比例")} disabled={scale === 1} onClick={() => setScale(1)}>
+            <button type="button" className="icon-button" title={tr("恢复图表比例")} aria-label={tr("恢复图表比例")} disabled={scale === 1 && pan.x === 0 && pan.y === 0} onClick={() => changeScale(1)}>
               <RotateCcw size={17} />
             </button>
-            <button type="button" className="icon-button" title={tr("放大图表")} aria-label={tr("放大图表")} disabled={scale >= MAX_SCALE} onClick={() => setScale((value) => clampScale(value + SCALE_STEP))}>
+            <button type="button" className="icon-button" title={tr("放大图表")} aria-label={tr("放大图表")} disabled={scale >= MAX_SCALE} onClick={() => changeScale(scale + SCALE_STEP)}>
               <ZoomIn size={17} />
             </button>
             <span className="diagram-viewer-divider" aria-hidden="true" />
@@ -104,8 +158,16 @@ export function DiagramViewer({ content, onClose }: DiagramViewerProps) {
           </div>
         </header>
         {downloadError ? <div className="diagram-viewer-error" role="status">{tr("图表下载失败，请重试。")}</div> : null}
-        <div className="diagram-viewer-viewport">
-          <div className="diagram-viewer-canvas" style={{ width: `${scale * 100}%` }}>
+        <div
+          ref={viewportRef}
+          className={`diagram-viewer-viewport${isPanning ? " is-panning" : ""}`}
+          aria-label={tr("查看图表")}
+          onPointerDown={handlePointerDown}
+          onPointerMove={handlePointerMove}
+          onPointerUp={stopPointerDrag}
+          onPointerCancel={stopPointerDrag}
+        >
+          <div ref={canvasRef} className="diagram-viewer-canvas" style={{ width: `${scale * 100}%`, transform: `translate3d(${pan.x}px, ${pan.y}px, 0)` }}>
             <div className="diagram-viewer-diagram" dangerouslySetInnerHTML={{ __html: content.svg }} />
           </div>
         </div>

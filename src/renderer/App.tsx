@@ -6416,6 +6416,11 @@ const EditorPane = forwardRef<EditorPaneHandle, {
   const splitPreviewRef = useRef<HTMLDivElement>(null);
   const splitScrollSyncLock = useRef<"source" | "preview" | undefined>(undefined);
   const pendingScrollRestoreRef = useRef<EditorScrollSnapshot | undefined>(undefined);
+  // Keep reading positions scoped to the document path. The editor pane stays
+  // mounted while tabs change, so a shared scroll container would otherwise
+  // leak its position into the next document.
+  const scrollSnapshotsRef = useRef<Map<string, EditorScrollSnapshot>>(new Map());
+  const scrollRestoreLockRef = useRef(false);
   const findQueryInputRef = useRef<HTMLInputElement>(null);
   const [splitLeftPercent, setSplitLeftPercent] = useState(DEFAULT_SPLIT_LEFT_PERCENT);
   const [sourceTableDialog, setSourceTableDialog] = useState<TableDialogState | undefined>();
@@ -6600,10 +6605,14 @@ const EditorPane = forwardRef<EditorPaneHandle, {
       if (!document) {
         return;
       }
-      pendingScrollRestoreRef.current = captureEditorScrollSnapshot(
+      const snapshot = captureEditorScrollSnapshot(
         document.pathRel,
         editorScrollElementForMode(document.mode, editorPaneRootRef.current, sourceEditorRef.current?.view?.scrollDOM, splitPreviewRef.current)
       );
+      if (snapshot) {
+        scrollSnapshotsRef.current.set(document.pathRel, snapshot);
+        pendingScrollRestoreRef.current = snapshot;
+      }
     },
     jumpToHeading: (line: number, headingIndex: number) => {
       if (!document) {
@@ -6645,54 +6654,89 @@ const EditorPane = forwardRef<EditorPaneHandle, {
 
   useLayoutEffect(() => {
     if (!document) {
-      pendingScrollRestoreRef.current = undefined;
-      return;
-    }
-    const snapshot = pendingScrollRestoreRef.current;
-    if (!snapshot || snapshot.pathRel !== document.pathRel) {
       return;
     }
 
     let frame = 0;
-    let attempts = 0;
     let cancelled = false;
-    const restore = () => {
+    let cleanup: (() => void) | undefined;
+    let attachedScrollers: HTMLElement[] = [];
+    let attempts = 0;
+
+    const attach = () => {
       if (cancelled) {
         return;
       }
-      const scrollers = editorScrollElementsForMode(document.mode, editorPaneRootRef.current, sourceEditorRef.current?.view?.scrollDOM, splitPreviewRef.current);
+      const scrollers = editorScrollElementsForMode(
+        document.mode,
+        editorPaneRootRef.current,
+        sourceEditorRef.current?.view?.scrollDOM,
+        splitPreviewRef.current
+      );
       if (!scrollers.length) {
-        attempts += 1;
-        if (attempts < 60) {
-          frame = window.requestAnimationFrame(restore);
+        if (attempts++ < 180) {
+          frame = window.requestAnimationFrame(attach);
         }
         return;
       }
-      if (scrollers.some((scroller) => scroller.scrollHeight <= scroller.clientHeight)) {
-        attempts += 1;
-        if (attempts < 60) {
-          frame = window.requestAnimationFrame(restore);
+      attachedScrollers = scrollers;
+
+      const snapshot = pendingScrollRestoreRef.current?.pathRel === document.pathRel
+        ? pendingScrollRestoreRef.current
+        : scrollSnapshotsRef.current.get(document.pathRel);
+      if (snapshot && scrollers.some((scroller) => scroller.scrollHeight <= scroller.clientHeight)) {
+        if (attempts++ < 180) {
+          frame = window.requestAnimationFrame(attach);
         }
         return;
       }
+      scrollRestoreLockRef.current = true;
       for (const scroller of scrollers) {
-        restoreEditorScroll(scroller, snapshot);
+        if (snapshot) {
+          restoreEditorScroll(scroller, snapshot);
+        } else {
+          scroller.scrollTop = 0;
+        }
       }
-      attempts += 1;
-      if (attempts < 8) {
-        frame = window.requestAnimationFrame(restore);
-        return;
+      if (pendingScrollRestoreRef.current?.pathRel === document.pathRel) {
+        pendingScrollRestoreRef.current = undefined;
       }
-      pendingScrollRestoreRef.current = undefined;
+      window.requestAnimationFrame(() => {
+        scrollRestoreLockRef.current = false;
+      });
+
+      const onScroll = (event: Event) => {
+        if (scrollRestoreLockRef.current || !(event.currentTarget instanceof HTMLElement)) {
+          return;
+        }
+        const next = captureEditorScrollSnapshot(document.pathRel, event.currentTarget);
+        if (next) {
+          scrollSnapshotsRef.current.set(document.pathRel, next);
+        }
+      };
+      scrollers.forEach((scroller) => scroller.addEventListener("scroll", onScroll, { passive: true }));
+      cleanup = () => scrollers.forEach((scroller) => scroller.removeEventListener("scroll", onScroll));
     };
-    frame = window.requestAnimationFrame(restore);
+
+    frame = window.requestAnimationFrame(attach);
     return () => {
       cancelled = true;
       if (frame) {
         window.cancelAnimationFrame(frame);
       }
+      const scroller = attachedScrollers[0] ?? editorScrollElementForMode(
+        document.mode,
+        editorPaneRootRef.current,
+        sourceEditorRef.current?.view?.scrollDOM,
+        splitPreviewRef.current
+      );
+      const snapshot = captureEditorScrollSnapshot(document.pathRel, scroller);
+      if (snapshot) {
+        scrollSnapshotsRef.current.set(document.pathRel, snapshot);
+      }
+      cleanup?.();
     };
-  }, [document?.mode, document?.pathRel, html]);
+  }, [document?.mode, document?.pathRel, resource?.pathRel, resource?.editorId]);
   const insertSourceImage = async () => {
     if (!document) {
       return;

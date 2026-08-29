@@ -4382,20 +4382,30 @@ body.is-resizing-right-panel {
 }
 
 .diagram-viewer-viewport {
+  position: relative;
   min-width: 0;
   min-height: 0;
-  overflow: auto;
+  overflow: hidden;
   background: var(--panel);
+  cursor: grab;
+  touch-action: none;
+  user-select: none;
+}
+
+.diagram-viewer-viewport.is-panning {
+  cursor: grabbing;
 }
 
 .diagram-viewer-canvas {
   display: flex;
-  align-items: center;
-  justify-content: center;
+  align-items: flex-start;
+  justify-content: flex-start;
   min-height: 100%;
-  margin: 0 auto;
+  margin: 0;
   padding: 28px;
   box-sizing: border-box;
+  transform-origin: top left;
+  will-change: transform;
 }
 
 .diagram-viewer-diagram {
